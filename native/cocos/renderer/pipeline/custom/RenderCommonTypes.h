@@ -62,6 +62,7 @@ struct RasterPassTag {};
 struct RasterSubpassTag {};
 struct ComputeSubpassTag {};
 struct ComputeTag {};
+struct ResolveTag {};
 struct CopyTag {};
 struct MoveTag {};
 struct RaytraceTag {};
@@ -368,6 +369,60 @@ inline bool operator<(const DescriptorBlockIndex& lhs, const DescriptorBlockInde
            std::forward_as_tuple(rhs.updateFrequency, rhs.parameterType, rhs.descriptorType, rhs.visibility);
 }
 
+enum class ResolveFlags : uint32_t {
+    NONE = 0,
+    COLOR = 1 << 0,
+    DEPTH = 1 << 1,
+    STENCIL = 1 << 2,
+};
+
+constexpr ResolveFlags operator|(const ResolveFlags lhs, const ResolveFlags rhs) noexcept {
+    return static_cast<ResolveFlags>(static_cast<uint32_t>(lhs) | static_cast<uint32_t>(rhs));
+}
+
+constexpr ResolveFlags operator&(const ResolveFlags lhs, const ResolveFlags rhs) noexcept {
+    return static_cast<ResolveFlags>(static_cast<uint32_t>(lhs) & static_cast<uint32_t>(rhs));
+}
+
+constexpr ResolveFlags& operator|=(ResolveFlags& lhs, const ResolveFlags rhs) noexcept {
+    return lhs = lhs | rhs;
+}
+
+constexpr ResolveFlags& operator&=(ResolveFlags& lhs, const ResolveFlags rhs) noexcept {
+    return lhs = lhs & rhs;
+}
+
+constexpr bool operator!(ResolveFlags e) noexcept {
+    return e == static_cast<ResolveFlags>(0);
+}
+
+constexpr bool any(ResolveFlags e) noexcept {
+    return !!e;
+}
+
+struct ResolvePair {
+    using allocator_type = boost::container::pmr::polymorphic_allocator<char>;
+    allocator_type get_allocator() const noexcept { // NOLINT
+        return {source.get_allocator().resource()};
+    }
+
+    ResolvePair(const allocator_type& alloc = boost::container::pmr::get_default_resource()) noexcept; // NOLINT
+    ResolvePair(ccstd::pmr::string sourceIn, ccstd::pmr::string targetIn, ResolveFlags resolveFlagsIn, gfx::ResolveMode modeIn, gfx::ResolveMode mode1In, const allocator_type& alloc = boost::container::pmr::get_default_resource()) noexcept;
+    ResolvePair(ResolvePair&& rhs, const allocator_type& alloc);
+    ResolvePair(ResolvePair const& rhs, const allocator_type& alloc);
+
+    ResolvePair(ResolvePair&& rhs) noexcept = default;
+    ResolvePair(ResolvePair const& rhs) = delete;
+    ResolvePair& operator=(ResolvePair&& rhs) = default;
+    ResolvePair& operator=(ResolvePair const& rhs) = default;
+
+    ccstd::pmr::string source;
+    ccstd::pmr::string target;
+    ResolveFlags resolveFlags{ResolveFlags::NONE};
+    gfx::ResolveMode mode{gfx::ResolveMode::SAMPLE_ZERO};
+    gfx::ResolveMode mode1{gfx::ResolveMode::SAMPLE_ZERO};
+};
+
 struct CopyPair {
     using allocator_type = boost::container::pmr::polymorphic_allocator<char>;
     allocator_type get_allocator() const noexcept { // NOLINT
@@ -380,7 +435,7 @@ struct CopyPair {
     CopyPair(CopyPair const& rhs, const allocator_type& alloc);
 
     CopyPair(CopyPair&& rhs) noexcept = default;
-    CopyPair(CopyPair const& rhs) = default;
+    CopyPair(CopyPair const& rhs) = delete;
     CopyPair& operator=(CopyPair&& rhs) = default;
     CopyPair& operator=(CopyPair const& rhs) = default;
 
@@ -391,6 +446,30 @@ struct CopyPair {
     uint32_t sourceMostDetailedMip{0};
     uint32_t sourceFirstSlice{0};
     uint32_t sourcePlaneSlice{0};
+    uint32_t targetMostDetailedMip{0};
+    uint32_t targetFirstSlice{0};
+    uint32_t targetPlaneSlice{0};
+};
+
+struct UploadPair {
+    using allocator_type = boost::container::pmr::polymorphic_allocator<char>;
+    allocator_type get_allocator() const noexcept { // NOLINT
+        return {target.get_allocator().resource()};
+    }
+
+    UploadPair(const allocator_type& alloc = boost::container::pmr::get_default_resource()) noexcept; // NOLINT
+    UploadPair(ccstd::vector<uint8_t> sourceIn, ccstd::pmr::string targetIn, uint32_t mipLevelsIn, uint32_t numSlicesIn, uint32_t targetMostDetailedMipIn, uint32_t targetFirstSliceIn, uint32_t targetPlaneSliceIn, const allocator_type& alloc = boost::container::pmr::get_default_resource()) noexcept;
+    UploadPair(UploadPair&& rhs, const allocator_type& alloc);
+
+    UploadPair(UploadPair&& rhs) noexcept = default;
+    UploadPair(UploadPair const& rhs) = delete;
+    UploadPair& operator=(UploadPair&& rhs) = default;
+    UploadPair& operator=(UploadPair const& rhs) = delete;
+
+    ccstd::vector<uint8_t> source;
+    ccstd::pmr::string target;
+    uint32_t mipLevels{0xFFFFFFFF};
+    uint32_t numSlices{0xFFFFFFFF};
     uint32_t targetMostDetailedMip{0};
     uint32_t targetFirstSlice{0};
     uint32_t targetPlaneSlice{0};
@@ -408,7 +487,7 @@ struct MovePair {
     MovePair(MovePair const& rhs, const allocator_type& alloc);
 
     MovePair(MovePair&& rhs) noexcept = default;
-    MovePair(MovePair const& rhs) = default;
+    MovePair(MovePair const& rhs) = delete;
     MovePair& operator=(MovePair&& rhs) = default;
     MovePair& operator=(MovePair const& rhs) = default;
 
