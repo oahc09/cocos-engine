@@ -24,13 +24,14 @@
 
 /* eslint-disable max-len */
 import { EffectAsset } from '../../asset/assets';
-import { assert } from '../../core';
+import { assert, error, warn } from '../../core';
 import { DescriptorSetInfo, DescriptorSetLayout, DescriptorSetLayoutBinding, DescriptorSetLayoutInfo, DescriptorType, Device, PipelineLayout, PipelineLayoutInfo, ShaderStageFlagBit, Type, Uniform, UniformBlock } from '../../gfx';
 import { DefaultVisitor, depthFirstSearch, GraphColor, MutableVertexPropertyMap } from './graph';
-import { DescriptorBlockData, DescriptorData, DescriptorDB, DescriptorSetData, DescriptorSetLayoutData, LayoutGraph, LayoutGraphData, LayoutGraphDataValue, LayoutGraphValue, PipelineLayoutData, RenderPhase, RenderPhaseData, RenderStageData, ShaderProgramData } from './layout-graph';
+import { DescriptorBlockData, DescriptorData, DescriptorDB, DescriptorSetData, DescriptorSetLayoutData, LayoutGraph, LayoutGraphData, LayoutGraphDataValue, LayoutGraphValue, PipelineLayoutData, RenderPassType, RenderPhase, RenderPhaseData, RenderStageData, ShaderProgramData } from './layout-graph';
 import { UpdateFrequency, getUpdateFrequencyName, getDescriptorTypeOrderName, Descriptor, DescriptorBlock, DescriptorBlockFlattened, DescriptorBlockIndex, DescriptorTypeOrder, ParameterType } from './types';
 
 export const INVALID_ID = 0xFFFFFFFF;
+export const ENABLE_SUBPASS = true;
 
 // get name of gfx.Type
 function getGfxTypeName (type: Type): string {
@@ -108,7 +109,7 @@ export function getGfxDescriptorType (type: DescriptorTypeOrder): DescriptorType
     case DescriptorTypeOrder.INPUT_ATTACHMENT:
         return DescriptorType.INPUT_ATTACHMENT;
     default:
-        console.error('DescriptorType not found');
+        error('DescriptorType not found');
         return DescriptorType.INPUT_ATTACHMENT;
     }
 }
@@ -136,7 +137,7 @@ export function getDescriptorTypeOrder (type: DescriptorType): DescriptorTypeOrd
         return DescriptorTypeOrder.INPUT_ATTACHMENT;
     case DescriptorType.UNKNOWN:
     default:
-        console.error('DescriptorTypeOrder not found');
+        error('DescriptorTypeOrder not found');
         return DescriptorTypeOrder.INPUT_ATTACHMENT;
     }
 }
@@ -146,15 +147,20 @@ export function getCustomPassID (lg: LayoutGraphData, name: string | undefined):
     return lg.locateChild(lg.nullVertex(), name || 'default');
 }
 
-// find phaseID using passID and phase name
-export function getCustomPhaseID (lg: LayoutGraphData, passID: number, name: string | number | undefined): number {
+// find subpassID using name
+export function getCustomSubpassID (lg: LayoutGraphData, passID: number, name: string): number {
+    return lg.locateChild(passID, name);
+}
+
+// find phaseID using subpassOrPassID and phase name
+export function getCustomPhaseID (lg: LayoutGraphData, subpassOrPassID: number, name: string | number | undefined): number {
     if (name === undefined) {
-        return lg.locateChild(passID, 'default');
+        return lg.locateChild(subpassOrPassID, 'default');
     }
     if (typeof (name) === 'number') {
-        return lg.locateChild(passID, name.toString());
+        return lg.locateChild(subpassOrPassID, name.toString());
     }
-    return lg.locateChild(passID, name);
+    return lg.locateChild(subpassOrPassID, name);
 }
 
 // check ShaderStageFlagBit has certain bits
@@ -213,7 +219,7 @@ function getVisibilityName (stage: ShaderStageFlagBit): string {
 
 // print LayoutGraphData
 export class PrintVisitor extends DefaultVisitor {
-    discoverVertex (u: number, g: LayoutGraphData) {
+    discoverVertex (u: number, g: LayoutGraphData): void {
         const ppl: PipelineLayoutData = g.getLayout(u);
         const name: string = g._names[u];
         const freq: UpdateFrequency = g._updateFrequencies[u];
@@ -226,11 +232,11 @@ export class PrintVisitor extends DefaultVisitor {
         this.space = indent(this.space);
 
         // eslint-disable-next-line no-loop-func
-        ppl.descriptorSets.forEach((value, key) => {
+        ppl.descriptorSets.forEach((value, key): void => {
             this.oss += `${this.space}DescriptorSet<${getUpdateFrequencyName(key)}> {\n`;
             this.space = indent(this.space);
             const uniformBlocks = value.descriptorSetLayoutData.uniformBlocks;
-            uniformBlocks.forEach((uniformBlock, attrNameID) => {
+            uniformBlocks.forEach((uniformBlock, attrNameID): void => {
                 const name = g.valueNames[attrNameID];
                 this.oss += `${this.space}UniformBlock "${name}" {\n`;
                 for (const u of uniformBlock.members) {
@@ -275,7 +281,7 @@ export class PrintVisitor extends DefaultVisitor {
             this.oss += `${this.space}}\n`;
         });
     }
-    finishVertex (v: number, g: LayoutGraphData) {
+    finishVertex (v: number, g: LayoutGraphData): void {
         this.space = unindent(this.space);
         this.oss += `${this.space}}\n`;
     }
@@ -299,11 +305,11 @@ function convertDescriptorBlock (block: DescriptorBlock): DescriptorBlockFlatten
 
     // sort descriptors by name
     const descriptors = Array.from(block.descriptors).sort(
-        (a, b) => String(a[0]).localeCompare(b[0]),
+        (a, b): number => String(a[0]).localeCompare(b[0]),
     );
 
     // flatten descriptors
-    descriptors.forEach((v: [string, Descriptor]) => {
+    descriptors.forEach((v: [string, Descriptor]): void => {
         const name: string = v[0];
         const d = v[1];
         flattened.descriptorNames.push(name);
@@ -312,11 +318,11 @@ function convertDescriptorBlock (block: DescriptorBlock): DescriptorBlockFlatten
 
     // sort uniforms by name
     const uniformBlocks = Array.from(block.uniformBlocks).sort(
-        (a, b) => String(a[0]).localeCompare(b[0]),
+        (a, b): number => String(a[0]).localeCompare(b[0]),
     );
 
     // flatten uniforms
-    uniformBlocks.forEach((v: [string, UniformBlock]) => {
+    uniformBlocks.forEach((v: [string, UniformBlock]): void => {
         const name = v[0];
         const uniformBlock = v[1];
         flattened.uniformBlockNames.push(name);
@@ -331,7 +337,7 @@ function convertDescriptorBlock (block: DescriptorBlock): DescriptorBlockFlatten
 
 // cache of descriptor blocks
 class DescriptorCounter {
-    public addDescriptor (key: string, name: string, count: number) {
+    public addDescriptor (key: string, name: string, count: number): void {
         // key is DescriptorBlockIndex
         // name is Descriptor name
         // count is Descriptor count
@@ -351,7 +357,7 @@ class DescriptorCounter {
 
 // print LayoutGraph (not LayoutGraphData)
 class LayoutGraphPrintVisitor extends DefaultVisitor {
-    discoverVertex (v: number, g: LayoutGraph) {
+    discoverVertex (v: number, g: LayoutGraph): void {
         const info: DescriptorDB = g.getDescriptors(v);
         const name = g.getName(v);
 
@@ -370,10 +376,10 @@ class LayoutGraphPrintVisitor extends DefaultVisitor {
         this.space = indent(this.space);
 
         const sortedMap: Map<string, DescriptorBlock> = new Map<string, DescriptorBlock>(
-            Array.from(info.blocks).sort((a, b) => String(a[0]).localeCompare(b[0])),
+            Array.from(info.blocks).sort((a, b): number => String(a[0]).localeCompare(b[0])),
         );
 
-        sortedMap.forEach((block: DescriptorBlock, key: string) => {
+        sortedMap.forEach((block: DescriptorBlock, key: string): void => {
             const index: DescriptorBlockIndex = JSON.parse(key);
             const flat = convertDescriptorBlock(block);
             this.oss += `${this.space}DescriptorBlock {\n`;
@@ -396,7 +402,7 @@ class LayoutGraphPrintVisitor extends DefaultVisitor {
             this.oss += `${this.space}}\n`;
         });
     }
-    finishVertex (v: number, g: LayoutGraphData) {
+    finishVertex (v: number, g: LayoutGraphData): void {
         this.space = unindent(this.space);
         this.oss += `${this.space}}\n`;
     }
@@ -441,7 +447,7 @@ export class VisibilityIndex {
 
 // descriptors of same visibility
 export class VisibilityBlock {
-    public mergeVisibility (name: string, vis: ShaderStageFlagBit) {
+    public mergeVisibility (name: string, vis: ShaderStageFlagBit): void {
         // for each descriptor, merge visibility
         // rate must >= PER_PHASE
         const v0 = this.descriptors.get(name);
@@ -454,7 +460,7 @@ export class VisibilityBlock {
     public getVisibility (name: string): ShaderStageFlagBit {
         const v = this.descriptors.get(name);
         if (v === undefined) {
-            console.error(`Can't find visibility for descriptor: ${name}`);
+            error(`Can't find visibility for descriptor: ${name}`);
             return ShaderStageFlagBit.NONE;
         }
         return v;
@@ -511,7 +517,7 @@ export class VisibilityGraph {
         EffectAsset.ISamplerTextureInfo[] |
         EffectAsset.ITextureInfo[],
         db: VisibilityDB,
-    ) {
+    ): void {
         const blockIndex = new VisibilityIndex(
             rate,
             ParameterType.TABLE,
@@ -522,7 +528,7 @@ export class VisibilityGraph {
             block.mergeVisibility(info.name, info.stageFlags);
         }
     }
-    public mergeEffect (asset: EffectAsset) {
+    public mergeEffect (asset: EffectAsset): void {
         for (const tech of asset.techniques) {
             for (const pass of tech.passes) {
                 const programName = pass.program;
@@ -536,7 +542,7 @@ export class VisibilityGraph {
                     continue;
                 }
                 if (shader.descriptors === undefined) {
-                    console.warn(`No descriptors in shader: ${programName}, please reimport ALL effects`);
+                    warn(`No descriptors in shader: ${programName}, please reimport ALL effects`);
                     continue;
                 }
                 const passName = getPassName(pass);
@@ -584,28 +590,43 @@ export class LayoutGraphInfo {
     lg = new LayoutGraph();
     visg: VisibilityGraph;
     readonly enableDebug = false;
-    private getPassID (passName: string): number {
+    private getPassID (passName: string, type: RenderPassType): number {
         const lg = this.lg;
         let passID = lg.locateChild(lg.nullVertex(), passName);
         if (passID === lg.nullVertex()) {
             passID = lg.addVertex<LayoutGraphValue.RenderStage>(
-                LayoutGraphValue.RenderStage, 0,
+                LayoutGraphValue.RenderStage, type,
                 passName, new DescriptorDB(),
                 lg.nullVertex(),
             );
         }
+        assert(passID !== lg.nullVertex());
         return passID;
     }
-    private getPhaseID (phaseName: string, passID: number): number {
+    private getSubpassID (subpassName: string, passID: number): number {
         const lg = this.lg;
-        let phaseID = lg.locateChild(passID, phaseName);
+        let subpassID = lg.locateChild(passID, subpassName);
+        if (subpassID === lg.nullVertex()) {
+            subpassID = lg.addVertex<LayoutGraphValue.RenderStage>(
+                LayoutGraphValue.RenderStage, RenderPassType.RENDER_SUBPASS,
+                subpassName, new DescriptorDB(),
+                passID,
+            );
+        }
+        assert(subpassID !== lg.nullVertex());
+        return subpassID;
+    }
+    private getPhaseID (phaseName: string, subpassOrPassID: number): number {
+        const lg = this.lg;
+        let phaseID = lg.locateChild(subpassOrPassID, phaseName);
         if (phaseID === lg.nullVertex()) {
             phaseID = lg.addVertex<LayoutGraphValue.RenderPhase>(
                 LayoutGraphValue.RenderPhase, new RenderPhase(),
                 phaseName, new DescriptorDB(),
-                passID,
+                subpassOrPassID,
             );
         }
+        assert(phaseID !== lg.nullVertex());
         return phaseID;
     }
     private getDescriptorBlock (key: string, descriptorDB: DescriptorDB): DescriptorBlock {
@@ -645,7 +666,7 @@ export class LayoutGraphInfo {
         }
         return uniformBlock;
     }
-    private addDescriptor (block: DescriptorBlock, name: string, type = Type.UNKNOWN) {
+    private addDescriptor (block: DescriptorBlock, name: string, type = Type.UNKNOWN): void {
         const value = block.descriptors.get(name);
         if (value === undefined) {
             block.descriptors.set(name, new Descriptor(type));
@@ -654,7 +675,7 @@ export class LayoutGraphInfo {
             return;
         }
         if (value.type !== type) {
-            console.warn(`Type mismatch for descriptor ${name}`);
+            warn(`Type mismatch for descriptor ${name}`);
         }
     }
     private addUniformBlock (block: DescriptorBlock,
@@ -665,10 +686,10 @@ export class LayoutGraphInfo {
             return;
         }
         if (!this.checkConsistency(value, gfxBlock)) {
-            console.warn(`Uniform block ${name} is inconsistent in the same block`);
+            warn(`Uniform block ${name} is inconsistent in the same block`);
         }
     }
-    private buildBlocks (visDB: VisibilityDB, rate: UpdateFrequency, blocks: EffectAsset.IBlockInfo[], db: DescriptorDB, counter: DescriptorCounter) {
+    private buildBlocks (visDB: VisibilityDB, rate: UpdateFrequency, blocks: EffectAsset.IBlockInfo[], db: DescriptorDB, counter: DescriptorCounter): void {
         const visBlock = visDB.getBlock({
             updateFrequency: rate,
             parameterType: ParameterType.TABLE,
@@ -696,7 +717,7 @@ export class LayoutGraphInfo {
         rate: UpdateFrequency,
         infoArray: EffectAsset.IBufferInfo[],
         type: Type, db: DescriptorDB, counter: DescriptorCounter,
-    ) {
+    ): void {
         const visBlock = visDB.getBlock({
             updateFrequency: rate,
             parameterType: ParameterType.TABLE,
@@ -724,7 +745,7 @@ export class LayoutGraphInfo {
         order: DescriptorTypeOrder,
         infoArray: EffectAsset.ISamplerInfo[] | EffectAsset.IInputAttachmentInfo[],
         type: Type, db: DescriptorDB, counter: DescriptorCounter,
-    ) {
+    ): void {
         const visBlock = visDB.getBlock({
             updateFrequency: rate,
             parameterType: ParameterType.TABLE,
@@ -752,7 +773,7 @@ export class LayoutGraphInfo {
         order: DescriptorTypeOrder,
         infoArray: EffectAsset.IImageInfo[] | EffectAsset.ISamplerTextureInfo[] | EffectAsset.ITextureInfo[],
         db: DescriptorDB, counter: DescriptorCounter,
-    ) {
+    ): void {
         const visBlock = visDB.getBlock({
             updateFrequency: rate,
             parameterType: ParameterType.TABLE,
@@ -786,18 +807,22 @@ export class LayoutGraphInfo {
                     }
                 }
                 if (!shader) {
-                    console.warn(`program: ${programName} not found`);
+                    warn(`program: ${programName} not found`);
                     continue;
                 }
                 if (shader.descriptors === undefined) {
-                    console.warn(`No descriptors in shader: ${programName}, please reimport ALL effects`);
+                    warn(`No descriptors in shader: ${programName}, please reimport ALL effects`);
                     continue;
                 }
                 // get database
                 const passName = getPassName(pass);
                 const phaseName = getPhaseName(pass);
-                const passID = this.getPassID(passName);
-                const phaseID = this.getPhaseID(phaseName, passID);
+                const enableSubpass = pass.subpass && pass.subpass !== '' && ENABLE_SUBPASS;
+                const passID = this.getPassID(passName, enableSubpass
+                    ? RenderPassType.RENDER_PASS : RenderPassType.SINGLE_RENDER_PASS);
+                const subpassID: number | undefined = enableSubpass
+                    ? this.getSubpassID(pass.subpass!, passID) : undefined;
+                const phaseID = this.getPhaseID(phaseName, subpassID || passID);
                 const passVis = this.visg.getPass(passName);
                 const visDB = passVis.getPhase(phaseName);
                 const db = lg.getDescriptors(phaseID);
@@ -815,7 +840,7 @@ export class LayoutGraphInfo {
                 }
 
                 // update max capacity and debug info
-                counter.counter.forEach((v: number, key: string) => {
+                counter.counter.forEach((v: number, key: string): void => {
                     const block = this.getDescriptorBlock(key, db);
                     if (v > block.capacity) {
                         block.capacity = Math.max(block.capacity, v);
@@ -847,13 +872,13 @@ export class LayoutGraphInfo {
             const phaseID = v;
             const parentID = lg.getParent(phaseID);
             if (lg.id(parentID) !== LayoutGraphValue.RenderStage) {
-                console.error(`phase: ${lg.getName(phaseID)} has no parent stage`);
+                error(`phase: ${lg.getName(phaseID)} has no parent stage`);
                 return 1;
             }
             const phaseDB = lg.getDescriptors(phaseID);
             const passVisDB = visMap.get(parentID);
             if (!passVisDB) {
-                console.error(`pass: ${lg.getName(parentID)} has no visibility database`);
+                error(`pass: ${lg.getName(parentID)} has no visibility database`);
                 return 1;
             }
             // merge phase visibility to pass visibility
@@ -869,6 +894,7 @@ export class LayoutGraphInfo {
                 }
             }
         }
+        // build phase decriptors
         for (const v of lg.vertices()) {
             if (lg.id(v) === LayoutGraphValue.RenderStage) {
                 continue;
@@ -876,14 +902,14 @@ export class LayoutGraphInfo {
             const phaseID = v;
             const parentID = lg.getParent(phaseID);
             if (lg.id(parentID) !== LayoutGraphValue.RenderStage) {
-                console.error(`phase: ${lg.getName(phaseID)} has no parent stage`);
+                error(`phase: ${lg.getName(phaseID)} has no parent stage`);
                 return 1;
             }
             const passDB = lg.getDescriptors(parentID);
             const phaseDB = lg.getDescriptors(phaseID);
             const passVisDB = visMap.get(parentID);
             if (passVisDB === undefined) {
-                console.error(`pass: ${lg.getName(parentID)} has no visibility database`);
+                error(`pass: ${lg.getName(parentID)} has no visibility database`);
                 return 1;
             }
             for (const [key0, block] of phaseDB.blocks) {
@@ -917,7 +943,7 @@ export class LayoutGraphInfo {
                     }
                     const b = block.uniformBlocks.get(name);
                     if (!b) {
-                        console.error(`uniform block: ${name} not found`);
+                        error(`uniform block: ${name} not found`);
                         return 1;
                     }
                     this.addUniformBlock(passBlock, name, b);
@@ -926,26 +952,38 @@ export class LayoutGraphInfo {
         }
         // update pass
         for (const passID of lg.vertices()) {
+            // skip RenderPhase
             if (lg.id(passID) !== LayoutGraphValue.RenderStage) {
                 continue;
             }
+            // skip RENDER_PASS
+            if (lg.getRenderStage(passID) === RenderPassType.RENDER_PASS) {
+                continue;
+            }
+            // build SINGLE_RENDER_PASS or RENDER_SUBPASS
+            assert(lg.getRenderStage(passID) === RenderPassType.SINGLE_RENDER_PASS
+                || lg.getRenderStage(passID) === RenderPassType.RENDER_SUBPASS);
             const passDB = lg.getDescriptors(passID);
             // update children phases
             for (const e of lg.children(passID)) {
                 const phaseID = lg.child(e);
+                if (lg.id(phaseID) !== LayoutGraphValue.RenderPhase) {
+                    error(`pass: ${lg.getName(passID)} is not single_render_pass or render_subpass`);
+                    return 1;
+                }
                 const phaseDB = lg.getDescriptors(phaseID);
                 for (const [key, passBlock] of passDB.blocks) {
                     const index: DescriptorBlockIndex = JSON.parse(key);
                     if (index.updateFrequency !== UpdateFrequency.PER_PASS) {
-                        console.error(`phase: ${lg.getName(phaseID)} update frequency is not PER_PASS`);
+                        error(`phase: ${lg.getName(phaseID)} update frequency is not PER_PASS`);
                         return 1;
                     }
                     if (passBlock.count === 0) {
-                        console.error(`pass: ${lg.getName(passID)} count is 0`);
+                        error(`pass: ${lg.getName(passID)} count is 0`);
                         return 1;
                     }
                     if (passBlock.capacity !== passBlock.count) {
-                        console.error(`pass: ${lg.getName(passID)} capacity does not equal count`);
+                        error(`pass: ${lg.getName(passID)} capacity does not equal count`);
                         return 1;
                     }
                     const phaseBlock = this.getDescriptorBlock(key, phaseDB);
@@ -962,7 +1000,7 @@ export class LayoutGraphInfo {
                 }
             }
         }
-        // console.debug(this.print());
+        // debug(this.print());
         return 0;
     }
     public print (): string {
@@ -989,16 +1027,27 @@ function sortDescriptorBlocks<T> (lhs: [string, T], rhs: [string, T]): number {
 }
 
 // build LayoutGraphData
-function buildLayoutGraphDataImpl (graph: LayoutGraph, builder: LayoutGraphBuilder2) {
+function buildLayoutGraphDataImpl (graph: LayoutGraph, builder: LayoutGraphBuilder2): void {
     for (const v of graph.vertices()) {
         const db = graph.getDescriptors(v);
         let minLevel = UpdateFrequency.PER_INSTANCE;
         let maxLevel = UpdateFrequency.PER_PASS;
+        let isRenderPass = false;
         switch (graph.id(v)) {
         case LayoutGraphValue.RenderStage: {
-            const vertID = builder.addRenderStage(graph.getName(v));
+            const type = graph.getRenderStage(v);
+            const parentID = graph.getParent(v);
+            if (type === RenderPassType.RENDER_SUBPASS) {
+                assert(parentID !== graph.nullVertex());
+            } else {
+                assert(parentID === graph.nullVertex());
+            }
+            if (type === RenderPassType.RENDER_PASS) {
+                isRenderPass = true;
+            }
+            const vertID = builder.addRenderStage(graph.getName(v), parentID);
             if (vertID !== v) {
-                console.error('vertex id mismatch');
+                error('vertex id mismatch');
             }
             minLevel = UpdateFrequency.PER_PASS;
             maxLevel = UpdateFrequency.PER_PASS;
@@ -1006,9 +1055,11 @@ function buildLayoutGraphDataImpl (graph: LayoutGraph, builder: LayoutGraphBuild
         }
         case LayoutGraphValue.RenderPhase: {
             const parentID = graph.getParent(v);
+            const parentType = graph.getRenderStage(parentID);
+            assert(parentType === RenderPassType.RENDER_SUBPASS || parentType === RenderPassType.SINGLE_RENDER_PASS);
             const vertID = builder.addRenderPhase(graph.getName(v), parentID);
             if (vertID !== v) {
-                console.error('vertex id mismatch');
+                error('vertex id mismatch');
             }
             const phase = graph.getRenderPhase(v);
             for (const shaderName of phase.shaders) {
@@ -1019,15 +1070,20 @@ function buildLayoutGraphDataImpl (graph: LayoutGraph, builder: LayoutGraphBuild
             break;
         }
         default:
-            console.error('unknown vertex type');
+            error('unknown vertex type');
             minLevel = UpdateFrequency.PER_INSTANCE;
             minLevel = UpdateFrequency.PER_PASS;
             break;
         }
 
+        if (isRenderPass) {
+            assert(db.blocks.size === 0);
+            continue;
+        }
+
         const flattenedBlocks = Array.from(db.blocks).sort(sortDescriptorBlocks);
 
-        flattenedBlocks.forEach((value: [string, DescriptorBlock]) => {
+        flattenedBlocks.forEach((value: [string, DescriptorBlock]): void => {
             const key = value[0];
             const block = value[1];
             const index: DescriptorBlockIndex = JSON.parse(key);
@@ -1036,7 +1092,7 @@ function buildLayoutGraphDataImpl (graph: LayoutGraph, builder: LayoutGraphBuild
             }
             const flattened = convertDescriptorBlock(block);
             if (block.capacity === 0) {
-                console.error('block capacity is 0');
+                error('block capacity is 0');
                 return;
             }
             if (index.updateFrequency > UpdateFrequency.PER_BATCH) {
@@ -1082,11 +1138,12 @@ class LayoutGraphBuilder2 {
     clear (): void {
         this.lg.clear();
     }
-    addRenderStage (name: string): number {
+    addRenderStage (name: string, parentID: number): number {
         return this.lg.addVertex<LayoutGraphDataValue.RenderStage>(
             LayoutGraphDataValue.RenderStage,
             new RenderStageData(), name,
             UpdateFrequency.PER_PASS, new PipelineLayoutData(),
+            parentID,
         );
     }
     addRenderPhase (name: string, parentID: number): number {
@@ -1119,20 +1176,20 @@ class LayoutGraphBuilder2 {
     }
     addDescriptorBlock (nodeID: number, index: DescriptorBlockIndex, block: Readonly<DescriptorBlockFlattened>): void {
         if (block.capacity <= 0) {
-            console.error('empty block');
+            error('empty block');
             return;
         }
         if (block.descriptorNames.length !== block.descriptors.length) {
-            console.error('error descriptor');
+            error('error descriptor');
             return;
         }
         if (block.uniformBlockNames.length !== block.uniformBlocks.length) {
-            console.error('error uniform');
+            error('error uniform');
             return;
         }
         if (!(index.updateFrequency >= UpdateFrequency.PER_INSTANCE
             && index.updateFrequency <= UpdateFrequency.PER_PASS)) {
-            console.error('invalid update frequency');
+            error('invalid update frequency');
             return;
         }
 
@@ -1173,7 +1230,7 @@ class LayoutGraphBuilder2 {
     }
     reserveDescriptorBlock (nodeID: number, index: DescriptorBlockIndex, block: DescriptorBlockFlattened): void {
         if (block.capacity <= 0) {
-            console.error('empty block');
+            error('empty block');
             return;
         }
         const g: LayoutGraphData = this.lg;
@@ -1193,7 +1250,7 @@ class LayoutGraphBuilder2 {
         }
     }
     compile (): number {
-        // console.debug(this.print());
+        // debug(this.print());
         return 0;
     }
     print (): string {
@@ -1206,13 +1263,13 @@ class LayoutGraphBuilder2 {
     readonly lg: LayoutGraphData;
 }
 
-export function buildLayoutGraphData (lg: LayoutGraph, lgData: LayoutGraphData) {
+export function buildLayoutGraphData (lg: LayoutGraph, lgData: LayoutGraphData): void {
     const builder = new LayoutGraphBuilder2(lgData);
     buildLayoutGraphDataImpl(lg, builder);
     builder.compile();
 }
 
-function createDescriptorInfo (layoutData: DescriptorSetLayoutData, info: DescriptorSetLayoutInfo) {
+function createDescriptorInfo (layoutData: DescriptorSetLayoutData, info: DescriptorSetLayoutInfo): void {
     for (let i = 0; i < layoutData.descriptorBlocks.length; ++i) {
         const block = layoutData.descriptorBlocks[i];
         let slot = block.offset;
@@ -1230,7 +1287,7 @@ function createDescriptorInfo (layoutData: DescriptorSetLayoutData, info: Descri
     }
 }
 
-function createDescriptorSetLayout (device: Device | null, layoutData: DescriptorSetLayoutData) {
+function createDescriptorSetLayout (device: Device | null, layoutData: DescriptorSetLayoutData): DescriptorSetLayout | null {
     const info: DescriptorSetLayoutInfo = new DescriptorSetLayoutInfo();
     createDescriptorInfo(layoutData, info);
 
@@ -1241,10 +1298,10 @@ function createDescriptorSetLayout (device: Device | null, layoutData: Descripto
     }
 }
 
-export function createGfxDescriptorSetsAndPipelines (device: Device | null, g: LayoutGraphData) {
+export function createGfxDescriptorSetsAndPipelines (device: Device | null, g: LayoutGraphData): void {
     for (let i = 0; i < g._layouts.length; ++i) {
         const ppl: PipelineLayoutData = g.getLayout(i);
-        ppl.descriptorSets.forEach((value, key) => {
+        ppl.descriptorSets.forEach((value, key): void => {
             const level = value;
             const layoutData = level.descriptorSetLayoutData;
             if (device) {
@@ -1378,7 +1435,7 @@ export function makeDescriptorSetLayoutData (lg: LayoutGraphData,
                 // update uniform buffer binding
                 const ub = uniformBlocks.get(d.descriptorID);
                 if (!ub) {
-                    console.error(`Uniform block not found for ${d.descriptorID}`);
+                    error(`Uniform block not found for ${d.descriptorID}`);
                     continue;
                 }
                 assert(ub.binding === 0xFFFFFFFF);
@@ -1389,7 +1446,7 @@ export function makeDescriptorSetLayoutData (lg: LayoutGraphData,
             // update block capacity
             const binding = data.bindingMap.get(d.descriptorID);
             if (binding !== undefined) {
-                console.error(`Duplicated descriptor ${d.descriptorID}`);
+                error(`Duplicated descriptor ${d.descriptorID}`);
             }
             data.bindingMap.set(d.descriptorID, block.offset + block.capacity);
             block.capacity += d.count;
@@ -1432,7 +1489,7 @@ let _emptyDescriptorSetLayout: DescriptorSetLayout;
 let _emptyPipelineLayout: PipelineLayout;
 
 function populatePipelineLayoutInfo (layout: PipelineLayoutData,
-    rate: UpdateFrequency, info: PipelineLayoutInfo) {
+    rate: UpdateFrequency, info: PipelineLayoutInfo): void {
     const set = layout.descriptorSets.get(rate);
     if (set && set.descriptorSetLayout) {
         info.setLayouts.push(set.descriptorSetLayout);
@@ -1442,7 +1499,7 @@ function populatePipelineLayoutInfo (layout: PipelineLayoutData,
 }
 
 // initialize layout graph module
-export function initializeLayoutGraphData (device: Device, lg: LayoutGraphData) {
+export function initializeLayoutGraphData (device: Device, lg: LayoutGraphData): void {
     // create descriptor sets
     _emptyDescriptorSetLayout = device.createDescriptorSetLayout(new DescriptorSetLayoutInfo());
     _emptyPipelineLayout = device.createPipelineLayout(new PipelineLayoutInfo());
@@ -1450,7 +1507,7 @@ export function initializeLayoutGraphData (device: Device, lg: LayoutGraphData) 
         const layoutData = lg.getLayout(v);
         for (const [_, set] of layoutData.descriptorSets) {
             if (set.descriptorSetLayout !== null) {
-                console.warn('descriptor set layout already initialized. It will be overwritten');
+                warn('descriptor set layout already initialized. It will be overwritten');
             }
             initializeDescriptorSetLayoutInfo(set.descriptorSetLayoutData,
                 set.descriptorSetLayoutInfo);
@@ -1462,9 +1519,9 @@ export function initializeLayoutGraphData (device: Device, lg: LayoutGraphData) 
         if (!lg.holds(LayoutGraphDataValue.RenderPhase, v)) {
             continue;
         }
-        const passID = lg.getParent(v);
+        const subpassOrPassID = lg.getParent(v);
         const phaseID = v;
-        const passLayout = lg.getLayout(passID);
+        const passLayout = lg.getLayout(subpassOrPassID);
         const phaseLayout = lg.getLayout(phaseID);
         const info = new PipelineLayoutInfo();
         populatePipelineLayoutInfo(passLayout, UpdateFrequency.PER_PASS, info);
@@ -1477,7 +1534,7 @@ export function initializeLayoutGraphData (device: Device, lg: LayoutGraphData) 
 }
 
 // terminate layout graph module
-export function terminateLayoutGraphData (lg: LayoutGraphData) {
+export function terminateLayoutGraphData (lg: LayoutGraphData): void {
     for (const v of lg.vertices()) {
         const layoutData = lg.getLayout(v);
         for (const [_, set] of layoutData.descriptorSets) {
@@ -1502,13 +1559,13 @@ export function getEmptyPipelineLayout (): PipelineLayout {
 
 // get descriptor set from LayoutGraphData (not from ProgramData)
 export function getOrCreateDescriptorSetLayout (lg: LayoutGraphData,
-    passID: number, phaseID: number, rate: UpdateFrequency): DescriptorSetLayout {
+    subpassOrPassID: number, phaseID: number, rate: UpdateFrequency): DescriptorSetLayout {
     if (rate < UpdateFrequency.PER_PASS) {
         const phaseData = lg.getLayout(phaseID);
         const data = phaseData.descriptorSets.get(rate);
         if (data) {
             if (!data.descriptorSetLayout) {
-                console.error('descriptor set layout not initialized');
+                error('descriptor set layout not initialized');
                 return _emptyDescriptorSetLayout;
             }
             return data.descriptorSetLayout;
@@ -1517,13 +1574,13 @@ export function getOrCreateDescriptorSetLayout (lg: LayoutGraphData,
     }
 
     assert(rate === UpdateFrequency.PER_PASS);
-    assert(passID === lg.getParent(phaseID));
+    assert(subpassOrPassID === lg.getParent(phaseID));
 
-    const passData = lg.getLayout(passID);
+    const passData = lg.getLayout(subpassOrPassID);
     const data = passData.descriptorSets.get(rate);
     if (data) {
         if (!data.descriptorSetLayout) {
-            console.error('descriptor set layout not initialized');
+            error('descriptor set layout not initialized');
             return _emptyDescriptorSetLayout;
         }
         return data.descriptorSetLayout;
@@ -1533,13 +1590,13 @@ export function getOrCreateDescriptorSetLayout (lg: LayoutGraphData,
 
 // getDescriptorSetLayout from LayoutGraphData
 export function getDescriptorSetLayout (lg: LayoutGraphData,
-    passID: number, phaseID: number, rate: UpdateFrequency): DescriptorSetLayout | null {
+    subpassOrPassID: number, phaseID: number, rate: UpdateFrequency): DescriptorSetLayout | null {
     if (rate < UpdateFrequency.PER_PASS) {
         const phaseData = lg.getLayout(phaseID);
         const data = phaseData.descriptorSets.get(rate);
         if (data) {
             if (!data.descriptorSetLayout) {
-                console.error('descriptor set layout not initialized');
+                error('descriptor set layout not initialized');
                 return null;
             }
             return data.descriptorSetLayout;
@@ -1548,13 +1605,13 @@ export function getDescriptorSetLayout (lg: LayoutGraphData,
     }
 
     assert(rate === UpdateFrequency.PER_PASS);
-    assert(passID === lg.getParent(phaseID));
+    assert(subpassOrPassID === lg.getParent(phaseID));
 
-    const passData = lg.getLayout(passID);
+    const passData = lg.getLayout(subpassOrPassID);
     const data = passData.descriptorSets.get(rate);
     if (data) {
         if (!data.descriptorSetLayout) {
-            console.error('descriptor set layout not initialized');
+            error('descriptor set layout not initialized');
             return null;
         }
         return data.descriptorSetLayout;
@@ -1602,9 +1659,9 @@ export function getDescriptorName (lg: LayoutGraphData, nameID: number): string 
 }
 
 export function getPerPassDescriptorSetLayoutData (lg: LayoutGraphData,
-    passID: number): DescriptorSetLayoutData | null {
-    assert(passID !== lg.nullVertex());
-    const node = lg.getLayout(passID);
+    subpassOrPassID: number): DescriptorSetLayoutData | null {
+    assert(subpassOrPassID !== lg.nullVertex());
+    const node = lg.getLayout(subpassOrPassID);
     const set = node.descriptorSets.get(UpdateFrequency.PER_PASS);
     if (set === undefined) {
         return null;
@@ -1649,7 +1706,7 @@ export function getPerInstanceDescriptorSetLayoutData (lg: LayoutGraphData,
     return set.descriptorSetLayoutData;
 }
 
-export function getBinding (layout: DescriptorSetLayoutData, nameID: number) {
+export function getBinding (layout: DescriptorSetLayoutData, nameID: number): number {
     const binding = layout.bindingMap.get(nameID);
     if (binding === undefined) {
         return 0xFFFFFFFF;

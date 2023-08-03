@@ -5,6 +5,7 @@ module.paths.push(path.join(Editor.App.path, 'node_modules'));
 const { throttle } = require('lodash');
 const utils = require('./utils');
 const { trackEventWithTimer } = require('../utils/metrics');
+const { injectionStyle } = require('../utils/prop');
 
 const lockList = [];
 let lockPerform = false;
@@ -73,6 +74,9 @@ exports.listeners = {
         if (!target) {
             return;
         }
+
+        clearTimeout(panel.previewTimeId);
+
         if (!panel.snapshotLock) {
             snapshotLock(panel, true, panel.uuidList);
         }
@@ -160,6 +164,7 @@ exports.listeners = {
     },
     'confirm-dump'() {
         const panel = this;
+        clearTimeout(panel.previewTimeId);
         snapshotLock(panel, false);
         // In combination with change-dump, snapshot only generated once after ui-elements continuously changed.
         // Editor.Message.send('scene', 'snapshot');
@@ -171,6 +176,8 @@ exports.listeners = {
         if (!target) {
             return;
         }
+
+        clearTimeout(panel.previewTimeId);
 
         // Editor.Message.send('scene', 'snapshot');
         const undoID = await beginRecording(panel.uuidList);
@@ -204,10 +211,11 @@ exports.listeners = {
             return;
         }
 
+        clearTimeout(panel.previewTimeId);
+
         const undoID = await beginRecording(panel.uuidList);
         const dump = event.target.dump;
         try {
-            // Editor.Message.send('scene', 'snapshot');
             for (let i = 0; i < panel.uuidList.length; i++) {
                 const uuid = panel.uuidList[i];
                 if (i > 0) {
@@ -251,9 +259,10 @@ exports.listeners = {
         }
 
         const { method, value: assetUuid } = event.detail;
-        if (method === 'confirm') {
-            clearTimeout(panel.previewTimeId);
 
+        clearTimeout(panel.previewTimeId);
+
+        if (method === 'confirm') {
             try {
                 panel.previewTimeId = setTimeout(() => {
                     for (let i = 0; i < panel.uuidList.length; i++) {
@@ -264,8 +273,6 @@ exports.listeners = {
                         if (dump.values) {
                             value = dump.values[i];
                         }
-
-
 
                         // 预览新的值
                         value.uuid = assetUuid;
@@ -284,183 +291,188 @@ exports.listeners = {
                 console.error(error);
             }
         } else if (method === 'cancel') {
-            clearTimeout(panel.previewTimeId);
+            panel.previewTimeId = setTimeout(() => {
+                try {
+                    for (let i = 0; i < panel.uuidList.length; i++) {
+                        const uuid = panel.uuidList[i];
+                        const { path } = dump;
 
-            try {
-                for (let i = 0; i < panel.uuidList.length; i++) {
-                    const uuid = panel.uuidList[i];
-                    const { path } = dump;
-
-                    Editor.Message.send('scene', 'cancel-preview-set-property', {
-                        uuid,
-                        path,
-                    });
+                        Editor.Message.send('scene', 'cancel-preview-set-property', {
+                            uuid,
+                            path,
+                        });
+                    }
+                } catch (error) {
+                    console.error(error);
                 }
-            } catch (error) {
-                console.error(error);
-            }
+            }, 50);
         }
     },
 };
 
 exports.template = /* html*/`
 <ui-drag-area class="container">
-    <section class="prefab" hidden missing>
-        <ui-label value="Prefab"></ui-label>
-        <ui-button role="edit" tooltip="i18n:ENGINE.prefab.edit">
-            <ui-icon value="edit"></ui-icon>
-        </ui-button>
-        <ui-button role="unlink" tooltip="i18n:ENGINE.prefab.unlink">
-            <ui-icon value="unlink"></ui-icon>
-        </ui-button>
-        <ui-button role="local" tooltip="i18n:ENGINE.prefab.local">
-            <ui-icon value="location"></ui-icon>
-        </ui-button>
-        <ui-button role="reset" tooltip="i18n:ENGINE.prefab.reset">
-            <ui-icon value="reset"></ui-icon>
-        </ui-button>
-        <ui-button role="save" tooltip="i18n:ENGINE.prefab.save">
-            <ui-icon value="save-o"></ui-icon>
-        </ui-button>
-    </section>
-
     <header class="header">
-        <ui-checkbox class="active"></ui-checkbox>
-        <ui-input class="name"></ui-input>
+        <section class="prefab" hidden>
+            <ui-label value="Prefab"></ui-label>
+            <ui-button role="edit" tooltip="i18n:ENGINE.prefab.edit">
+                <ui-icon value="edit"></ui-icon>
+            </ui-button>
+            <ui-button role="unlink" tooltip="i18n:ENGINE.prefab.unlink">
+                <ui-icon value="unlink"></ui-icon>
+            </ui-button>
+            <ui-button role="local" tooltip="i18n:ENGINE.prefab.local">
+                <ui-icon value="location"></ui-icon>
+            </ui-button>
+            <ui-button role="reset" tooltip="i18n:ENGINE.prefab.reset">
+                <ui-icon value="reset"></ui-icon>
+            </ui-button>
+            <ui-button role="save" tooltip="i18n:ENGINE.prefab.save">
+                <ui-icon value="save-o"></ui-icon>
+            </ui-button>
+        </section>
+
+        <section class="node">
+            <ui-checkbox class="active"></ui-checkbox>
+            <ui-input class="name"></ui-input>
+        </section>
     </header>
 
-    <section class="component scene">
-        <ui-prop class="release" type="dump" ui-section-config></ui-prop>
-        <ui-prop class="ambient" type="dump" ui-section-config></ui-prop>
-        <ui-section class="skybox config" expand>
-            <div slot="header" class="component-header">
-                <span>Skybox</span>
-                <ui-link tooltip="i18n:scene.menu.help_url">
+    <section class="body">
+        <section class="component scene">
+            <ui-prop class="release" type="dump"></ui-prop>
+            <ui-prop class="ambient" type="dump" ui-section-config></ui-prop>
+            <ui-section class="skybox config" expand>
+                <div slot="header" class="component-header">
+                    <span>Skybox</span>
+                    <ui-link tooltip="i18n:scene.menu.help_url">
+                        <ui-icon value="help"></ui-icon>
+                    </ui-link>
+                </div>
+                <div class="before"></div>
+                <ui-section class="envmap" expand>
+                    <ui-label slot="header" value="Envmap"></ui-label>
+                    <ui-radio-group class="useHDR" default-value="HDR" value="HDR">
+                        <ui-prop class="envmap-prop">
+                            <ui-radio class="envmap-radio" slot="label" type="single" value="HDR" tabindex="0">
+                                <ui-label value="HDR"></ui-label>
+                            </ui-radio>
+                            <ui-prop slot="content" class="envmapHDR" type="dump" no-label ui-section-config></ui-prop>
+                        </ui-prop>
+                        <ui-prop class="envmap-prop">
+                            <ui-radio class="envmap-radio" slot="label" type="single" value="LDR" tabindex="0">
+                                <ui-label value="LDR"></ui-label>
+                            </ui-radio>
+                            <ui-prop slot="content" class="envmapLDR" type="dump" no-label ui-section-config></ui-prop>
+                        </ui-prop>
+                    </ui-radio-group>
+                    <ui-prop class="reflection">
+                        <ui-label slot="label">Reflection Convolution</ui-label>
+                        <div slot="content">
+                            <ui-loading style="display:none; position: relative;top: 4px;"></ui-loading>
+                            <ui-button class="blue bake" style="display:none;">Bake</ui-button>
+                            <ui-button class="red remove" style="display:none;">Remove</ui-button>
+                        </div>
+                    </ui-prop>
+                </ui-section>
+                <div class="after"></div>
+            </ui-section>
+            <ui-prop class="fog" type="dump" ui-section-config></ui-prop>
+            <ui-prop class="shadows" type="dump" ui-section-config></ui-prop>
+            <ui-prop class="octree" type="dump" ui-section-config></ui-prop>
+            <ui-prop class="skin" type="dump" ui-section-config></ui-prop>
+        </section>
+
+        <ui-section class="component node config" expand>
+            <header class="component-header" slot="header">
+                <span class="name">Node</span>
+                <ui-link class="link" tooltip="i18n:ENGINE.menu.help_url">
                     <ui-icon value="help"></ui-icon>
                 </ui-link>
-            </div>
-            <div class="before"></div>
-            <ui-section class="envmap" expand>
-                <ui-label slot="header" value="Envmap"></ui-label>
-                <ui-radio-group class="useHDR" default-value="HDR" value="HDR">
-                    <ui-prop class="envmap-prop">
-                        <ui-radio class="envmap-radio" slot="label" type="single" value="HDR" tabindex="0">
-                            <ui-label value="HDR"></ui-label>
-                        </ui-radio>
-                        <ui-prop slot="content" class="envmapHDR" type="dump" no-label ui-section-config></ui-prop>
-                    </ui-prop>
-                    <ui-prop class="envmap-prop">
-                        <ui-radio class="envmap-radio" slot="label" type="single" value="LDR" tabindex="0">
-                            <ui-label value="LDR"></ui-label>
-                        </ui-radio>
-                        <ui-prop slot="content" class="envmapLDR" type="dump" no-label ui-section-config></ui-prop>
-                    </ui-prop>
-                </ui-radio-group>
-                <ui-prop class="reflection">
-                    <ui-label slot="label">Reflection Convolution</ui-label>
-                    <div slot="content">
-                        <ui-loading style="display:none; position: relative;top: 4px;"></ui-loading>
-                        <ui-button class="blue bake" style="display:none;">Bake</ui-button>
-                        <ui-button class="red remove" style="display:none;">Remove</ui-button>
-                    </div>
-                </ui-prop>
-            </ui-section>
-            <div class="after"></div>
+                <ui-icon class="menu" value="menu" tooltip="i18n:ENGINE.menu.component"></ui-icon>
+            </header>
+
+            <ui-prop class="position" type="dump"></ui-prop>
+            <ui-prop class="rotation" type="dump"></ui-prop>
+            <ui-prop class="scale" type="dump"></ui-prop>
+            <ui-prop class="mobility" type="dump"></ui-prop>
+            <ui-prop class="layer">
+                <ui-label slot="label" value="Layer"></ui-label>
+                <div class="layer-content" slot="content">
+                    <ui-prop class="layer-select" type="dump" no-label></ui-prop>
+                    <ui-button class="layer-edit">Edit</ui-button>
+                </div>
+            </ui-prop>
+            <div class="node-section"></div>
         </ui-section>
-        <ui-prop class="fog" type="dump" ui-section-config></ui-prop>
-        <ui-prop class="shadows" type="dump" ui-section-config></ui-prop>
-        <ui-prop class="octree" type="dump" ui-section-config></ui-prop>
-        <ui-prop class="skin" type="dump" ui-section-config></ui-prop>
+
+        <section class="section-body"></section>
+        <section class="section-missing"></section>
+
+        <footer class="footer">
+            <ui-button class="add-component" size="medium">
+                <ui-label value="i18n:ENGINE.components.add_component"></ui-label>
+            </ui-button>
+        </footer>
+
+        <section class="section-asset"></section>
     </section>
-
-    <ui-section class="component node config" expand>
-        <header class="component-header" slot="header">
-            <span class="name">Node</span>
-            <ui-link class="link" tooltip="i18n:ENGINE.menu.help_url">
-                <ui-icon value="help"></ui-icon>
-            </ui-link>
-            <ui-icon class="menu" value="menu" tooltip="i18n:ENGINE.menu.component"></ui-icon>
-        </header>
-
-        <ui-prop class="position" type="dump"></ui-prop>
-        <ui-prop class="rotation" type="dump"></ui-prop>
-        <ui-prop class="scale" type="dump"></ui-prop>
-        <ui-prop class="mobility" type="dump"></ui-prop>
-        <ui-prop class="layer">
-            <ui-label slot="label" value="Layer"></ui-label>
-            <div class="layer-content" slot="content">
-                <ui-prop class="layer-select" type="dump" no-label></ui-prop>
-                <ui-button class="layer-edit">Edit</ui-button>
-            </div>
-        </ui-prop>
-        <div class="node-section"></div>
-    </ui-section>
-
-    <section class="section-body"></section>
-    <section class="section-missing"></section>
-
-    <footer class="footer">
-        <ui-button class="add-component" size="medium">
-            <ui-label value="i18n:ENGINE.components.add_component"></ui-label>
-        </ui-button>
-    </footer>
-
-    <section class="section-asset"></section>
 </ui-drag-area>
 `;
 exports.style = fs.readFileSync(path.join(__dirname, './node.css'), 'utf8');
 
 exports.$ = {
     container: '.container',
+    header: '.container > .header',
+    body: '.container > .body',
 
-    prefab: '.prefab',
-    prefabUnlink: '.prefab > [role="unlink"]',
-    prefabLocal: '.prefab > [role="local"]',
-    prefabReset: '.prefab > [role="reset"]',
-    prefabSave: '.prefab > [role="save"]',
-    prefabEdit: '.prefab > [role="edit"]',
+    prefab: '.container > .header > .prefab',
+    prefabUnlink: '.container > .header > .prefab > [role="unlink"]',
+    prefabLocal: '.container > .header > .prefab > [role="local"]',
+    prefabReset: '.container > .header > .prefab > [role="reset"]',
+    prefabSave: '.container > .header > .prefab > [role="save"]',
+    prefabEdit: '.container > .header > .prefab > [role="edit"]',
 
-    header: '.header',
-    active: '.active',
-    name: '.name',
+    active: '.container > .header > .node > .active',
+    name: '.container > .header > .node > .name',
 
-    scene: '.scene',
-    sceneRelease: '.scene > .release',
-    sceneAmbient: '.scene > .ambient',
-    sceneFog: '.scene > .fog',
-    sceneShadows: '.scene > .shadows',
-    sceneSkybox: '.scene > .skybox',
-    sceneSkyboxBefore: '.scene > .skybox > .before',
-    sceneSkyboxUseHDR: '.scene > .skybox .useHDR',
-    sceneSkyboxEnvmapHDR: '.scene > .skybox .envmapHDR',
-    sceneSkyboxEnvmapLDR: '.scene > .skybox .envmapLDR',
-    sceneSkyboxReflection: '.scene > .skybox .reflection',
-    sceneSkyboxReflectionLoading: '.scene > .skybox .reflection ui-loading',
-    sceneSkyboxReflectionBake: '.scene > .skybox .reflection .bake',
-    sceneSkyboxReflectionRemove: '.scene > .skybox .reflection .remove',
-    sceneSkyboxAfter: '.scene > .skybox > .after',
-    sceneOctree: '.scene > .octree',
-    sceneSkin: '.scene > .skin',
+    scene: '.container > .body > .scene',
+    sceneRelease: '.container > .body > .scene > .release',
+    sceneAmbient: '.container > .body > .scene > .ambient',
+    sceneFog: '.container > .body > .scene > .fog',
+    sceneShadows: '.container > .body > .scene > .shadows',
+    sceneSkybox: '.container > .body > .scene > .skybox',
+    sceneSkyboxBefore: '.container > .body > .scene > .skybox > .before',
+    sceneSkyboxUseHDR: '.container > .body > .scene > .skybox .useHDR',
+    sceneSkyboxEnvmapHDR: '.container > .body > .scene > .skybox .envmapHDR',
+    sceneSkyboxEnvmapLDR: '.container > .body > .scene > .skybox .envmapLDR',
+    sceneSkyboxReflection: '.container > .body > .scene > .skybox .reflection',
+    sceneSkyboxReflectionLoading: '.container > .body > .scene > .skybox .reflection ui-loading',
+    sceneSkyboxReflectionBake: '.container > .body > .scene > .skybox .reflection .bake',
+    sceneSkyboxReflectionRemove: '.container > .body > .scene > .skybox .reflection .remove',
+    sceneSkyboxAfter: '.container > .body > .scene > .skybox > .after',
+    sceneOctree: '.container > .body > .scene > .octree',
+    sceneSkin: '.container > .body > .scene > .skin',
 
-    node: '.node',
-    nodeHeader: '.node > header',
-    nodeSection: '.node-section',
-    nodeMenu: '.node > header > .menu',
-    nodeLink: '.node > header > .link',
+    node: '.container > .body > .node',
+    nodeHeader: '.container > .body > .node > .component-header',
+    nodeSection: '.container > .body > .node >.node-section',
+    nodeMenu: '.container > .body > .node > .component-header > .menu',
+    nodeLink: '.container > .body > .node > .component-header > .link',
 
-    nodePosition: '.node > .position',
-    nodeRotation: '.node > .rotation',
-    nodeScale: '.node > .scale',
-    nodeMobility: '.node > .mobility',
-    nodeLayerSelect: '.node > .layer .layer-select',
-    nodeLayerButton: '.node > .layer .layer-edit',
+    nodePosition: '.container > .body > .node > .position',
+    nodeRotation: '.container > .body > .node > .rotation',
+    nodeScale: '.container > .body > .node > .scale',
+    nodeMobility: '.container > .body > .node > .mobility',
+    nodeLayerSelect: '.container > .body > .node > .layer .layer-select',
+    nodeLayerButton: '.container > .body > .node > .layer .layer-edit',
 
-    sectionBody: '.section-body',
-    sectionMissing: '.section-missing',
-    sectionAsset: '.section-asset',
+    sectionBody: '.container > .body > .section-body',
+    sectionMissing: '.container > .body > .section-missing',
+    sectionAsset: '.container > .body > .section-asset',
 
-    footer: '.footer',
-    componentAdd: '.footer .add-component',
+    footer: '.container > .body > .footer',
+    componentAdd: '.container > .body > .footer .add-component',
 };
 
 const Elements = {
@@ -588,9 +600,7 @@ const Elements = {
             panel.assets = {};
 
             if (panel.dump) {
-                panel.$.container.style.display = 'flex';
-                panel.$.header.style.display = 'flex';
-                panel.$.footer.style.display = 'block';
+                panel.$.container.removeAttribute('hidden');
 
                 // 以第一个节点的类型，过滤多选的其他不同类型，比如 node 和 sceneNode 就不能混为多选编辑
                 const type = panel.dump.__type__;
@@ -604,7 +614,7 @@ const Elements = {
                 // 补充缺失的 dump 数据，如 path values 等，收集节点内的资源
                 utils.translationDump(panel.dump, panel.dumps.length > 1 ? panel.dumps : undefined, panel.assets);
             } else {
-                panel.$.container.style.display = 'none';
+                panel.$.container.setAttribute('hidden', '');
             }
         },
         close() {
@@ -629,9 +639,21 @@ const Elements = {
                     return;
                 }
 
-                // Editor.Message.send('scene', 'snapshot');
-
                 const role = button.getAttribute('role');
+
+                const recordings = [];
+                for (const dump of panel.dumps) {
+                    const prefab = dump.__prefab__;
+                    switch (role) {
+                        case 'reset': {
+                            recordings.push(prefab.rootUuid);
+                        }
+                    }
+                }
+                let undoID;
+                if (recordings.length) {
+                    undoID = await beginRecording(recordings);
+                }
 
                 for (const dump of panel.dumps) {
                     const prefab = dump.__prefab__;
@@ -646,9 +668,7 @@ const Elements = {
                             break;
                         }
                         case 'unlink': {
-                            const undoID = await beginRecording(prefab.rootUuid);
                             await Editor.Message.request('scene', 'unlink-prefab', prefab.rootUuid, false);
-                            await endRecording(undoID);
                             break;
                         }
                         case 'local': {
@@ -656,9 +676,7 @@ const Elements = {
                             break;
                         }
                         case 'reset': {
-                            const undoID = await beginRecording(prefab.rootUuid);
                             await Editor.Message.request('scene', 'restore-prefab', prefab.rootUuid, prefab.uuid);
-                            await endRecording(undoID);
                             break;
                         }
                         case 'save': {
@@ -667,6 +685,10 @@ const Elements = {
                             break;
                         }
                     }
+                }
+
+                if (recordings.length && undoID) {
+                    await endRecording(undoID);
                 }
             });
         },
@@ -683,7 +705,16 @@ const Elements = {
             const prefab = panel.dump.__prefab__;
             const prefabStateInfo = prefab.prefabStateInfo;
 
-            if (prefabStateInfo.assetUuid) {
+            const canUnlink = panel.dumps.some(dump => {
+                if (dump.__prefab__ && dump.__prefab__.prefabStateInfo) {
+                    const state = dump.__prefab__.prefabStateInfo.state;
+                    if (state === 2 || state === 3) {
+                        return true;
+                    }
+                }
+                return false;
+            });
+            if (canUnlink) {
                 panel.$.prefabUnlink.removeAttribute('disabled');
             } else {
                 panel.$.prefabUnlink.setAttribute('disabled', '');
@@ -712,6 +743,7 @@ const Elements = {
                 }
             } else {
                 panel.$.prefab.setAttribute('missing', '');
+                panel.$.prefabEdit.setAttribute('disabled', '');
                 panel.$.prefabLocal.setAttribute('disabled', '');
                 panel.$.prefabReset.setAttribute('disabled', '');
                 panel.$.prefabSave.setAttribute('disabled', '');
@@ -756,7 +788,7 @@ const Elements = {
                 panel.$.name.dispatch('change-dump');
             });
             panel.$.name.addEventListener('confirm', () => {
-                panel.$.active.dispatch('confirm-dump');
+                panel.$.name.dispatch('confirm-dump');
             });
         },
         update() {
@@ -1093,6 +1125,8 @@ const Elements = {
         async update() {
             const panel = this;
 
+            panel.componentCacheExpand = {};
+
             if (!panel.dump || panel.dump.isScene) {
                 return;
             }
@@ -1148,6 +1182,12 @@ const Elements = {
                         $active.invalid = false;
                     }
 
+                    if (dump.value.enabled.visible === false) {
+                        $active.setAttribute('hidden', '');
+                    } else {
+                        $active.removeAttribute('hidden');
+                    }
+
                     const url = panel.getHelpUrl(dump.editor);
                     const $link = $section.querySelector('ui-link');
                     if (url) {
@@ -1175,7 +1215,15 @@ const Elements = {
                     const $section = document.createElement('ui-section');
                     $section.setAttribute('expand', '');
                     $section.setAttribute('class', 'component config');
-                    $section.setAttribute('cache-expand', `${component.path}:${component.type}`);
+
+                    let cacheExpandKey = `node-component:${component.type}`;
+                    if (panel.componentCacheExpand[cacheExpandKey]) {
+                        // when exist duplicated component, use uuid as key;
+                        cacheExpandKey = `node-component:${component.value.uuid.value}`;
+                    }
+                    panel.componentCacheExpand[cacheExpandKey] = true;
+                    $section.setAttribute('cache-expand', `${cacheExpandKey}`);
+
                     $section.innerHTML = `
                     <header class="component-header" slot="header">
                         <ui-checkbox class="active"></ui-checkbox>
@@ -1211,6 +1259,16 @@ const Elements = {
                         }
                         $active.dispatch('change-dump');
                     });
+                    $active.addEventListener('confirm', (event) => {
+                        event.stopPropagation();
+                        $active.dispatch('confirm-dump');
+                    });
+
+                    if (component.value.enabled.visible === false) {
+                        $active.setAttribute('hidden', '');
+                    } else {
+                        $active.removeAttribute('hidden');
+                    }
 
                     const $link = $section.querySelector('.link');
                     const url = panel.getHelpUrl(component.editor);
@@ -1252,16 +1310,8 @@ const Elements = {
 
                     renderList.forEach((file) => {
                         const $panel = document.createElement('ui-panel');
+                        $panel.injectionStyle(injectionStyle);
                         $panel.setAttribute('src', file);
-                        $panel.injectionStyle(`
-                            ui-prop,
-                            ui-section { margin-top: 4px; }
-
-                            ui-prop > ui-section,
-                            ui-prop > ui-prop,
-                            ui-section > ui-prop[slot="header"],
-                            ui-prop [slot="content"] ui-prop { margin-top: 0; }
-                        `);
 
                         $panel.shadowRoot.addEventListener('change-dump', (event) => {
                             exports.listeners['change-dump'].call(panel, event);
@@ -1309,6 +1359,7 @@ const Elements = {
                 panel.renderMap.section['cc.Node'].forEach((file, index) => {
                     if (!array[index]) {
                         array[index] = document.createElement('ui-panel');
+                        array[index].injectionStyle(injectionStyle);
                         panel.$.nodeSection.appendChild(array[index]);
                     }
                     array[index].setAttribute('src', file);
@@ -1502,11 +1553,17 @@ const Elements = {
                 if (!materialPanel) {
                     // 添加新的
                     materialPanel = document.createElement('ui-panel');
+                    materialPanel.injectionStyle(injectionStyle);
                     materialPanel.setAttribute('src', panel.typeManager[materialPanelType]);
                     materialPanel.setAttribute('type', materialPanelType);
+                    materialPanel.setAttribute('sub-type', 'unknown');
                     materialPanel.setAttribute('uuid', materialUuid);
-                    materialPanel.panelObject.$.container.removeAttribute('whole');
-                    materialPanel.panelObject.$.container.setAttribute('cache-expand', materialUuid);
+
+                    materialPanel.panelObject.replaceContainerWithUISection({
+                        type: materialPanelType,
+                        uuid: materialUuid,
+                    });
+
                     const { section = {} } = panel.renderManager[materialPanelType];
 
                     // 按数组顺序放置
@@ -1673,8 +1730,6 @@ exports.methods = {
                 {
                     label: Editor.I18n.t('ENGINE.menu.remove_component'),
                     async click() {
-                        // Editor.Message.send('scene', 'snapshot');
-
                         const values = dump.value.uuid.values || [dump.value.uuid.value];
                         // 收集待修改的uuids
                         const uuids = [];
@@ -1694,15 +1749,14 @@ exports.methods = {
                         }
                         if (!uuids.length > 0) { return; }
                         const undoID = await beginRecording(uuids);
-                        for (let index = 0; index < uuids.length; index++) {
+                        for (let i = 0; i < uuids.length; i++) {
                             await Editor.Message.request('scene', 'remove-array-element', {
-                                uuid: uuids[index],
+                                uuid: uuids[i],
                                 path: '__comps__',
-                                index:indexes[index],
+                                index: indexes[i],
                             });
                         }
                         await endRecording(undoID);
-                        // Editor.Message.send('scene', 'snapshot');
                     },
                 },
                 {
@@ -1765,12 +1819,14 @@ exports.methods = {
                         }
                         const undoID = await beginRecording(uuids);
                         // 遍历uuids
-                        for (let index = 0; index < uuids.length; index++) {
-                            const uuid = uuids[index];
-                            const index = indexes[index];
+                        for (let i = 0; i < uuids.length; i++) {
+                            const uuid = uuids[i];
+                            const index = indexes[i];
+
+                            const nodeDump = nodeDumps.find(nodeDump => uuid === nodeDump.uuid.value);
                             await Editor.Message.request('scene', 'set-property', {
                                 uuid,
-                                path: nodeDumps[index].__comps__[index].path,
+                                path: nodeDump.__comps__[index].path,
                                 dump: clipboardComponentInfo.dump,
                             });
                         }

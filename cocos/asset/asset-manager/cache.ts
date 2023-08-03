@@ -139,7 +139,7 @@ export default class Cache<T = any> implements ICache<T> {
     /**
      * @engineInternal
      */
-    public get map () {
+    public get map (): Record<string, T> | null {
         return this._map;
     }
     protected _map: Record<string, T> | null = null;
@@ -282,7 +282,7 @@ export default class Cache<T = any> implements ICache<T> {
      *
      * @example
      * var cache = new Cache();
-     * cache.forEach((val, key) => console.log(key));
+     * cache.forEach((val, key) => log(key));
      *
      */
     public forEach (func: (val: T, key: string) => void): void {

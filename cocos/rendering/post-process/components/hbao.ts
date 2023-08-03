@@ -23,11 +23,12 @@
 */
 
 import { CCBoolean, CCFloat, CCInteger } from '../../../core';
-import { ccclass, disallowMultiple, editable, executeInEditMode, menu, range,
+import { ccclass, disallowMultiple, editable, executeInEditMode, help, menu, range,
     serializable, slide, tooltip, type, visible } from '../../../core/data/decorators';
 import { PostProcessSetting } from './post-process-setting';
 
 @ccclass('cc.HBAO')
+@help('cc.HBAO')
 @menu('PostProcess/HBAO')
 @disallowMultiple
 @executeInEditMode
@@ -51,7 +52,7 @@ export class HBAO extends PostProcessSetting {
     set radiusScale (value: number) {
         this._radiusScale = value;
     }
-    get radiusScale () {
+    get radiusScale (): number {
         return this._radiusScale;
     }
 
@@ -64,7 +65,7 @@ export class HBAO extends PostProcessSetting {
     set angleBiasDegree (value: number) {
         this._angleBiasDegree = value;
     }
-    get angleBiasDegree () {
+    get angleBiasDegree (): number {
         return this._angleBiasDegree;
     }
 
@@ -77,7 +78,7 @@ export class HBAO extends PostProcessSetting {
     set blurSharpness (value: number) {
         this._blurSharpness = value;
     }
-    get blurSharpness () {
+    get blurSharpness (): number {
         return this._blurSharpness;
     }
 
@@ -89,7 +90,7 @@ export class HBAO extends PostProcessSetting {
     set aoSaturation (value: number) {
         this._aoSaturation = value;
     }
-    get aoSaturation () {
+    get aoSaturation (): number {
         return this._aoSaturation;
     }
 
@@ -99,7 +100,7 @@ export class HBAO extends PostProcessSetting {
     set needBlur (value: boolean) {
         this._needBlur = value;
     }
-    get needBlur () {
+    get needBlur (): boolean {
         return this._needBlur;
     }
 }

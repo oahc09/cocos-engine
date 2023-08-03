@@ -34,6 +34,7 @@ import { AABB } from './aabb';
 import { OBB } from './obb';
 import { Capsule } from './capsule';
 import { Frustum } from './frustum';
+import { warn } from '../platform';
 
 replaceProperty(intersect, 'intersect', [
     {
@@ -170,8 +171,8 @@ replaceProperty(intersect, 'intersect', [
     },
 ]);
 
-function deprecatedClassMessage (oldClassName: string, newClassName) {
-    console.warn(`${oldClassName} is deprecated, please use ${newClassName} instead.`);
+function deprecatedClassMessage (oldClassName: string, newClassName): void {
+    warn(`${oldClassName} is deprecated, please use ${newClassName} instead.`);
 }
 
 /**

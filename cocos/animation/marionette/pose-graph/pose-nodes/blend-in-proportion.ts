@@ -10,6 +10,7 @@ import { AnimationGraphBindingContext, AnimationGraphEvaluationContext,
 import { poseGraphNodeAppearance, poseGraphNodeCategory } from '../decorator/node';
 import { POSE_GRAPH_NODE_MENU_PREFIX_POSE_BLEND } from './menu-common';
 import { PoseGraphType } from '../foundation/type-system';
+import { isIgnorableWeight } from '../utils';
 
 @ccclass(`${CLASS_NAME_PREFIX_ANIM}PoseNodeBlendInProportion`)
 @poseGraphNodeCategory(POSE_GRAPH_NODE_MENU_PREFIX_POSE_BLEND)
@@ -30,7 +31,7 @@ export class PoseNodeBlendInProportion extends PoseNode {
     })
     public readonly proportions: number[] = [];
 
-    public bind (context: AnimationGraphBindingContext) {
+    public bind (context: AnimationGraphBindingContext): void {
         for (const pose of this.poses) {
             pose?.bind(context);
         }
@@ -42,7 +43,7 @@ export class PoseNodeBlendInProportion extends PoseNode {
         }
     }
 
-    public reenter () {
+    public reenter (): void {
         for (const pose of this.poses) {
             pose?.reenter();
         }
@@ -55,6 +56,9 @@ export class PoseNodeBlendInProportion extends PoseNode {
         const nInputPoses = this.poses.length;
         for (let iInputPose = 0; iInputPose < nInputPoses; ++iInputPose) {
             const inputPoseWeight = this.proportions[iInputPose];
+            if (isIgnorableWeight(inputPoseWeight)) {
+                continue;
+            }
             const inputPoseUpdateContext = updateContextGenerator.generate(
                 context.deltaTime,
                 context.indicativeWeight * inputPoseWeight,
@@ -63,13 +67,13 @@ export class PoseNodeBlendInProportion extends PoseNode {
         }
     }
 
-    public doEvaluate (context: AnimationGraphEvaluationContext) {
+    public doEvaluate (context: AnimationGraphEvaluationContext): Pose {
         const nInputPoses = this.poses.length;
         let sumWeight = 0.0;
         let finalPose: Pose | null = null;
         for (let iInputPose = 0; iInputPose < nInputPoses; ++iInputPose) {
             const inputPoseWeight = this.proportions[iInputPose];
-            if (!inputPoseWeight) {
+            if (isIgnorableWeight(inputPoseWeight)) {
                 continue;
             }
             const inputPose = this.poses[iInputPose]?.evaluate(context, PoseTransformSpaceRequirement.LOCAL);

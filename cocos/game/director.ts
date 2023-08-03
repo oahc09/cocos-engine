@@ -27,7 +27,7 @@
 
 /* spell-checker:words COORD, Quesada, INITED, Renerer */
 
-import { DEBUG, EDITOR, BUILD, TEST } from 'internal:constants';
+import { DEBUG, EDITOR, BUILD, TEST, EDITOR_NOT_IN_PREVIEW } from 'internal:constants';
 import { SceneAsset } from '../asset/assets/scene-asset';
 import { System, EventTarget, Scheduler, js, errorID, error, assertID, warnID, macro, CCObject, cclegacy, isValid } from '../core';
 import { input } from '../input';
@@ -40,6 +40,8 @@ import { uiRendererManager } from '../2d/framework/ui-renderer-manager';
 import { assetManager } from '../asset/asset-manager';
 import { deviceManager } from '../gfx';
 import { releaseManager } from '../asset/asset-manager/release-manager';
+import { MeshRenderer } from '../3d/framework/mesh-renderer';
+import { Mesh } from '../3d/assets/mesh';
 
 // ----------------------------------------------------------------------------------------------------------------------
 
@@ -218,6 +220,8 @@ export class Director extends EventTarget {
         this._nodeActivator = new NodeActivator();
 
         this._systems = [];
+
+        this.on(Director.EVENT_BEFORE_SCENE_LAUNCH, this.buildGPUScene, this);
     }
 
     /**
@@ -225,14 +229,14 @@ export class Director extends EventTarget {
      * @zh 计算从上一帧到现在的时间间隔，结果保存在私有属性中
      * @deprecated since v3.3.0 no need to use it anymore
      */
-    public calculateDeltaTime (now) {}
+    public calculateDeltaTime (now): void {}
 
     /**
      * @en End the life of director in the next frame
      * @zh 执行完当前帧后停止 director 的执行
      */
-    public end () {
-        this.once(Director.EVENT_END_FRAME, () => {
+    public end (): void {
+        this.once(Director.EVENT_END_FRAME, (): void => {
             this.purgeDirector();
         });
     }
@@ -245,7 +249,7 @@ export class Director extends EventTarget {
      * @zh 暂停正在运行的场景，该暂停只会停止游戏逻辑执行，但是不会停止渲染和 UI 响应。<br>
      * 如果想要更彻底得暂停游戏，包含渲染，音频和事件，请使用 `game.pause` 。
      */
-    public pause () {
+    public pause (): void {
         if (this._paused) {
             return;
         }
@@ -258,7 +262,7 @@ export class Director extends EventTarget {
      * @zh 清除 `director` 本身，包括停止所有的计时器，<br>
      * 移除所有的事件监听器，清理并退出当前运行的场景，停止所有动画，清理缓存数据。
      */
-    public purgeDirector () {
+    public purgeDirector (): void {
         // cleanup scheduler
         this._scheduler.unscheduleAll();
         this._compScheduler.unscheduleAll();
@@ -282,7 +286,7 @@ export class Director extends EventTarget {
      * @en Reset the director, can be used to restart the director after purge
      * @zh 重置此 Director，可用于在清除后重启 Director。
      */
-    public reset () {
+    public reset (): void {
         this.purgeDirector();
 
         for (const id in this._persistRootNodes) {
@@ -306,22 +310,25 @@ export class Director extends EventTarget {
      * @param onBeforeLoadScene - The function invoked at the scene before loading.
      * @param onLaunched - The function invoked at the scene after launch.
      */
-    public runSceneImmediate (scene: Scene | SceneAsset, onBeforeLoadScene?: Director.OnBeforeLoadScene, onLaunched?: Director.OnSceneLaunched) {
+    public runSceneImmediate (scene: Scene | SceneAsset, onBeforeLoadScene?: Director.OnBeforeLoadScene, onLaunched?: Director.OnSceneLaunched): void {
         if (scene instanceof SceneAsset) scene = scene.scene!;
         assertID(scene instanceof Scene, 1216);
 
         if (BUILD && DEBUG) {
+            // eslint-disable-next-line no-console
             console.time('InitScene');
         }
         scene._load();  // ensure scene initialized
         if (BUILD && DEBUG) {
+            // eslint-disable-next-line no-console
             console.timeEnd('InitScene');
         }
         // Re-attach or replace persist nodes
         if (BUILD && DEBUG) {
+            // eslint-disable-next-line no-console
             console.time('AttachPersist');
         }
-        const persistNodeList = Object.keys(this._persistRootNodes).map((x) => this._persistRootNodes[x] as Node);
+        const persistNodeList = Object.keys(this._persistRootNodes).map((x): Node => this._persistRootNodes[x] as Node);
         for (let i = 0; i < persistNodeList.length; i++) {
             const node = persistNodeList[i];
             node.emit(Node.EventType.SCENE_CHANGED_FOR_PERSISTS, scene.renderScene);
@@ -340,12 +347,14 @@ export class Director extends EventTarget {
             }
         }
         if (BUILD && DEBUG) {
+            // eslint-disable-next-line no-console
             console.timeEnd('AttachPersist');
         }
         const oldScene = this._scene;
 
         // unload scene
         if (BUILD && DEBUG) {
+            // eslint-disable-next-line no-console
             console.time('Destroy');
         }
         if (isValid(oldScene)) {
@@ -354,10 +363,12 @@ export class Director extends EventTarget {
         if (!EDITOR) {
             // auto release assets
             if (BUILD && DEBUG) {
+                // eslint-disable-next-line no-console
                 console.time('AutoRelease');
             }
             releaseManager._autoRelease(oldScene!, scene, this._persistRootNodes);
             if (BUILD && DEBUG) {
+                // eslint-disable-next-line no-console
                 console.timeEnd('AutoRelease');
             }
         }
@@ -366,10 +377,15 @@ export class Director extends EventTarget {
 
         // purge destroyed nodes belongs to old scene
         CCObject._deferredDestroy();
+        // eslint-disable-next-line no-console
         if (BUILD && DEBUG) { console.timeEnd('Destroy'); }
 
         if (onBeforeLoadScene) {
             onBeforeLoadScene();
+        }
+
+        if (scene.renderScene) {
+            scene.renderScene.activate();
         }
         this.emit(Director.EVENT_BEFORE_SCENE_LAUNCH, scene);
 
@@ -377,10 +393,12 @@ export class Director extends EventTarget {
         this._scene = scene;
 
         if (BUILD && DEBUG) {
+            // eslint-disable-next-line no-console
             console.time('Activate');
         }
         scene._activate();
         if (BUILD && DEBUG) {
+            // eslint-disable-next-line no-console
             console.timeEnd('Activate');
         }
         // start scene
@@ -404,13 +422,13 @@ export class Director extends EventTarget {
      * @param onLaunched - The function invoked at the scene after launch.
      * @private
      */
-    public runScene (scene: Scene | SceneAsset, onBeforeLoadScene?: Director.OnBeforeLoadScene, onLaunched?: Director.OnSceneLaunched) {
+    public runScene (scene: Scene | SceneAsset, onBeforeLoadScene?: Director.OnBeforeLoadScene, onLaunched?: Director.OnSceneLaunched): void {
         if (scene instanceof SceneAsset) scene = scene.scene!;
-        assertID(scene, 1205);
+        assertID(Boolean(scene), 1205);
         assertID(scene instanceof Scene, 1216);
 
         // Delay run / replace scene to the end of the frame
-        this.once(Director.EVENT_END_FRAME, () => {
+        this.once(Director.EVENT_END_FRAME, (): void => {
             this.runSceneImmediate(scene, onBeforeLoadScene, onLaunched);
         });
     }
@@ -423,17 +441,19 @@ export class Director extends EventTarget {
      * @param onLaunched - callback, will be called after scene launched.
      * @return if error, return false
      */
-    public loadScene (sceneName: string, onLaunched?: Director.OnSceneLaunched, onUnloaded?: Director.OnUnload) {
+    public loadScene (sceneName: string, onLaunched?: Director.OnSceneLaunched, onUnloaded?: Director.OnUnload): boolean {
         if (this._loadingScene) {
             warnID(1208, sceneName, this._loadingScene);
             return false;
         }
-        const bundle = assetManager.bundles.find((bundle) => !!bundle.getSceneInfo(sceneName));
+        const bundle = assetManager.bundles.find((bundle): boolean => !!bundle.getSceneInfo(sceneName));
         if (bundle) {
             this.emit(Director.EVENT_BEFORE_SCENE_LOADING, sceneName);
             this._loadingScene = sceneName;
+            // eslint-disable-next-line no-console
             console.time(`LoadScene ${sceneName}`);
-            bundle.loadScene(sceneName, (err, scene) => {
+            bundle.loadScene(sceneName, (err, scene): void => {
+                // eslint-disable-next-line no-console
                 console.timeEnd(`LoadScene ${sceneName}`);
                 this._loadingScene = '';
                 if (err) {
@@ -485,8 +505,8 @@ export class Director extends EventTarget {
         sceneName: string,
         onProgress?: Director.OnLoadSceneProgress | Director.OnSceneLoaded,
         onLoaded?: Director.OnSceneLoaded,
-    ) {
-        const bundle = assetManager.bundles.find((bundle) => !!bundle.getSceneInfo(sceneName));
+    ): void {
+        const bundle = assetManager.bundles.find((bundle): boolean => !!bundle.getSceneInfo(sceneName));
         if (bundle) {
             // NOTE: the similar function signatures but defined as deferent function types.
             bundle.preloadScene(sceneName, null, onProgress as (finished: number, total: number, item: any) => void,
@@ -500,18 +520,38 @@ export class Director extends EventTarget {
         }
     }
 
+    public buildGPUScene (scene: Scene): void {
+        const sceneData = this.root!.pipeline.pipelineSceneData;
+        if (!sceneData || !sceneData.isGPUDrivenEnabled()) {
+            return;
+        }
+
+        const renderers = scene.getComponentsInChildren(MeshRenderer);
+        const meshes: Mesh[] = [];
+
+        for (let i = 0; i < renderers.length; i++) {
+            const renderer = renderers[i];
+            const mesh = renderer.mesh;
+            if (renderer.isUseGPUScene()) {
+                meshes.push(mesh!);
+            }
+        }
+
+        scene.renderScene?.buildGPUScene(meshes);
+    }
+
     /**
      * @en Resume game logic execution after pause, if the current scene is not paused, nothing will happen.
      * @zh 恢复暂停场景的游戏逻辑，如果当前场景没有暂停将没任何事情发生。
      */
-    public resume () {
+    public resume (): void {
         if (!this._paused) {
             return;
         }
         this._paused = false;
     }
 
-    get root () {
+    get root (): Root | null {
         return this._root;
     }
 
@@ -534,7 +574,7 @@ export class Director extends EventTarget {
      * @zh 获取上一帧的增量时间。
      * @deprecated since v3.3.0, please use game.deltaTime instead
      */
-    public getDeltaTime () {
+    public getDeltaTime (): number {
         return cclegacy.game.deltaTime as number;
     }
 
@@ -543,7 +583,7 @@ export class Director extends EventTarget {
      * @zh 获取从游戏开始到现在总共经过的时间，单位为 ms
      * @deprecated since v3.3.0, please use game.totalTime instead
      */
-    public getTotalTime () {
+    public getTotalTime (): number {
         return cclegacy.game.totalTime as number;
     }
 
@@ -552,7 +592,7 @@ export class Director extends EventTarget {
      * @zh 获取当前帧的时间。
      * @deprecated since v3.3.0, please use game.frameStartTime instead
      */
-    public getCurrentTime () {
+    public getCurrentTime (): number {
         return cclegacy.game.frameStartTime as number;
     }
 
@@ -560,7 +600,7 @@ export class Director extends EventTarget {
      * @en Returns how many frames were called since the director started.
      * @zh 获取 director 启动以来游戏运行的总帧数。
      */
-    public getTotalFrames () {
+    public getTotalFrames (): number {
         return this._totalFrames;
     }
 
@@ -568,7 +608,7 @@ export class Director extends EventTarget {
      * @en Returns whether or not the Director is paused.
      * @zh 是否处于暂停状态。
      */
-    public isPaused () {
+    public isPaused (): boolean {
         return this._paused;
     }
 
@@ -576,7 +616,7 @@ export class Director extends EventTarget {
      * @en Returns the scheduler associated with this director.
      * @zh 获取和 director 相关联的调度器。
      */
-    public getScheduler () {
+    public getScheduler (): Scheduler {
         return this._scheduler;
     }
 
@@ -584,7 +624,7 @@ export class Director extends EventTarget {
      * @en Sets the scheduler associated with this director.
      * @zh 设置和 director 相关联的调度器。
      */
-    public setScheduler (scheduler: Scheduler) {
+    public setScheduler (scheduler: Scheduler): void {
         if (this._scheduler !== scheduler) {
             this.unregisterSystem(this._scheduler);
             this._scheduler = scheduler;
@@ -596,14 +636,14 @@ export class Director extends EventTarget {
      * @en Register a system.
      * @zh 注册一个系统。
      */
-    public registerSystem (name: string, sys: System, priority: number) {
+    public registerSystem (name: string, sys: System, priority: number): void {
         sys.id = name;
         sys.priority = priority;
         this._systems.push(sys);
         this._systems.sort(System.sortByPriority);
     }
 
-    public unregisterSystem (sys: System) {
+    public unregisterSystem (sys: System): void {
         js.array.fastRemove(this._systems, sys);
         this._systems.sort(System.sortByPriority);
     }
@@ -612,8 +652,8 @@ export class Director extends EventTarget {
      * @en get a system.
      * @zh 获取一个 system。
      */
-    public getSystem (name: string) {
-        return this._systems.find((sys) => sys.id === name);
+    public getSystem (name: string): System | undefined {
+        return this._systems.find((sys): boolean => sys.id === name);
     }
 
     /**
@@ -630,7 +670,7 @@ export class Director extends EventTarget {
      * @en Starts the director
      * @zh 开始执行游戏逻辑
      */
-    public startAnimation () {
+    public startAnimation (): void {
         this._invalid = false;
     }
 
@@ -638,7 +678,7 @@ export class Director extends EventTarget {
      * @en Stops the director
      * @zh 停止执行游戏逻辑，每帧渲染会继续执行
      */
-    public stopAnimation () {
+    public stopAnimation (): void {
         this._invalid = true;
     }
 
@@ -647,9 +687,9 @@ export class Director extends EventTarget {
      * @zh 运行主循环
      * @deprecated Since v3.6, please use [tick] instead
      */
-    public mainLoop (now: number) {
+    public mainLoop (now: number): void {
         let dt;
-        if (EDITOR && !cclegacy.GAME_VIEW || TEST) {
+        if (EDITOR_NOT_IN_PREVIEW || TEST) {
             dt = now;
         } else {
             dt = cclegacy.game._calculateDT(now);
@@ -662,10 +702,10 @@ export class Director extends EventTarget {
      * @zh 运行主循环
      * @param dt Delta time in seconds
      */
-    public tick (dt: number) {
+    public tick (dt: number): void {
         if (!this._invalid) {
             this.emit(Director.EVENT_BEGIN_FRAME);
-            if (!EDITOR || cclegacy.GAME_VIEW) {
+            if (!EDITOR_NOT_IN_PREVIEW) {
                 input._frameDispatchEvents();
             }
 
@@ -706,7 +746,7 @@ export class Director extends EventTarget {
         }
     }
 
-    private buildRenderPipeline () {
+    private buildRenderPipeline (): void {
         if (this._root) {
             this._root.customPipeline.beginSetup();
             const builder = cclegacy.rendering.getCustomPipeline(macro.CUSTOM_PIPELINE_NAME);
@@ -715,7 +755,7 @@ export class Director extends EventTarget {
         }
     }
 
-    private setupRenderPipelineBuilder () {
+    private setupRenderPipelineBuilder (): void {
         if (macro.CUSTOM_PIPELINE_NAME !== '' && cclegacy.rendering && this._root && this._root.usesCustomPipeline) {
             this.on(Director.EVENT_BEFORE_RENDER, this.buildRenderPipeline, this);
         }
@@ -724,7 +764,7 @@ export class Director extends EventTarget {
     /**
      * @internal
      */
-    public init () {
+    public init (): void {
         this._totalFrames = 0;
         this._paused = false;
         // Scheduler
@@ -752,7 +792,7 @@ export class Director extends EventTarget {
      * 目标节点必须位于为层级的根节点，否则无效。
      * @param node - The node to be made persistent
      */
-    public addPersistRootNode (node: Node) {
+    public addPersistRootNode (node: Node): void {
         if (!Node.isNode(node) || !node.uuid) {
             warnID(3800);
             return;
@@ -785,7 +825,7 @@ export class Director extends EventTarget {
      * @zh 取消常驻根节点。
      * @param node - The node to be removed from persistent node list
      */
-    public removePersistRootNode (node: Node) {
+    public removePersistRootNode (node: Node): void {
         const id = node.uuid || '';
         if (node === this._persistRootNodes[id]) {
             delete this._persistRootNodes[id];

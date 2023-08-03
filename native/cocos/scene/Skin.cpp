@@ -1,8 +1,8 @@
 /****************************************************************************
- Copyright (c) 2022-2023 Xiamen Yaji Software Co., Ltd.
-
- https://www.cocos.com/
-
+ Copyright (c) 2023 Xiamen Yaji Software Co., Ltd.
+ 
+ http://www.cocos.com
+ 
  Permission is hereby granted, free of charge, to any person obtaining a copy
  of this software and associated documentation files (the "Software"), to deal
  in the Software without restriction, including without limitation the rights to
@@ -22,29 +22,46 @@
  THE SOFTWARE.
 ****************************************************************************/
 
-#include "NativePipelineTypes.h"
+#include "scene/Skin.h"
 
 namespace cc {
+namespace scene {
+void SkinInfo::setEnabled(bool val) {
+    if (_enabled == val) {
+        return;
+    }
 
-namespace render {
-
-const pipeline::PipelineSceneData *DefaultSceneVisitor::getPipelineSceneData() const {
-    return nullptr;
+    _enabled = val;
+    if (_resource != nullptr) {
+        _resource->setEnabled(val);
+    }
 }
 
-void DefaultSceneVisitor::setViewport(const gfx::Viewport &vp) {}
-void DefaultSceneVisitor::setScissor(const gfx::Rect &rect) {}
-void DefaultSceneVisitor::bindPipelineState(gfx::PipelineState *pso) {}
-void DefaultSceneVisitor::bindDescriptorSet(uint32_t set, gfx::DescriptorSet *descriptorSet, uint32_t dynamicOffsetCount, const uint32_t *dynamicOffsets) {}
-void DefaultSceneVisitor::bindInputAssembler(gfx::InputAssembler *ia) {}
-void DefaultSceneVisitor::updateBuffer(gfx::Buffer *buff, const void *data, uint32_t size) {}
-void DefaultSceneVisitor::draw(const gfx::DrawInfo &info) {}
-
-SceneTask *DefaultForwardLightingTransversal::transverse(SceneVisitor *visitor) const {
-    std::ignore = visitor;
-    return nullptr;
+void SkinInfo::setBlurRadius(float val) {
+    _blurRadius = val;
+    if (_resource != nullptr) {
+        _resource->setBlurRadius(val);
+    }
 }
 
-} // namespace render
+void SkinInfo::setSSSIntensity(float val) {
+    _sssIntensity = val;
 
+    if (_resource != nullptr) {
+        _resource->setSSSIntensity(val);
+    }
+}
+
+void SkinInfo::activate(Skin *resource) {
+    _resource = resource;
+    _resource->initialize(*this);
+}
+
+void Skin::initialize(const SkinInfo &skinInfo) {
+    setEnabled(skinInfo.isEnabled());
+    setBlurRadius(skinInfo.getBlurRadius());
+    setSSSIntensity(skinInfo.getSSSIntensity());
+}
+
+} // namespace scene
 } // namespace cc

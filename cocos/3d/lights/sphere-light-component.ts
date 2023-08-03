@@ -59,9 +59,9 @@ export class SphereLight extends Light {
     @displayOrder(-1)
     @tooltip('i18n:lights.luminous_flux')
     @editable
-    @rangeMin(0)
+    @range([0, Number.POSITIVE_INFINITY, 100])
     @type(CCInteger)
-    get luminousFlux () {
+    get luminousFlux (): number {
         const isHDR = (cclegacy.director.root as Root).pipeline.pipelineSceneData.isHDR;
         if (isHDR) {
             return this._luminanceHDR * scene.nt2lm(this._size);
@@ -89,9 +89,9 @@ export class SphereLight extends Light {
     @displayOrder(-1)
     @tooltip('i18n:lights.luminance')
     @editable
-    @rangeMin(0)
+    @range([0, Number.POSITIVE_INFINITY, 10])
     @type(CCInteger)
-    get luminance () {
+    get luminance (): number {
         const isHDR = (cclegacy.director.root as Root).pipeline.pipelineSceneData.isHDR;
         if (isHDR) {
             return this._luminanceHDR;
@@ -118,8 +118,6 @@ export class SphereLight extends Light {
     @displayOrder(-2)
     @tooltip('i18n:lights.term')
     @editable
-    @rangeMin(0)
-    @type(CCInteger)
     get term (): number {
         return this._term;
     }
@@ -138,7 +136,7 @@ export class SphereLight extends Light {
     @slide
     @range([0.0, 10.0, 0.001])
     @type(CCFloat)
-    get size () {
+    get size (): number {
         return this._size;
     }
     set size (val) {
@@ -156,7 +154,7 @@ export class SphereLight extends Light {
     @editable
     @rangeMin(0)
     @type(CCFloat)
-    get range () {
+    get range (): number {
         return this._range;
     }
     set range (val) {
@@ -169,7 +167,7 @@ export class SphereLight extends Light {
         this._lightType = scene.SphereLight;
     }
 
-    protected _createLight () {
+    protected _createLight (): void {
         super._createLight();
         this._type = scene.LightType.SPHERE;
         this.size = this._size;

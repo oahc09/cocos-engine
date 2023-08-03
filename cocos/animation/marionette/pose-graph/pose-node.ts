@@ -71,7 +71,7 @@ export abstract class PoseNode extends PoseGraphNode {
      *
      * @note Subclasses shall not override this method and should override `doUpdate` instead.
      */
-    public update (context: AnimationGraphUpdateContext) {
+    public update (context: AnimationGraphUpdateContext): void {
         this._dependencyEvaluation?.evaluate();
         this.doUpdate(context);
     }
@@ -84,7 +84,7 @@ export abstract class PoseNode extends PoseGraphNode {
      *
      * @note Subclasses shall not override this method and should override `doEvaluate` instead.
      */
-    public evaluate (context: AnimationGraphEvaluationContext, poseTransformSpaceRequirement: PoseTransformSpaceRequirement) {
+    public evaluate (context: AnimationGraphEvaluationContext, poseTransformSpaceRequirement: PoseTransformSpaceRequirement): Pose {
         let stackSizeBefore!: number;
         if (POSE_NODE_EVALUATION_STACK_ORDER_DEBUG_ENABLED) {
             stackSizeBefore = context._stackSize_debugging;
@@ -128,7 +128,7 @@ export abstract class PoseNode extends PoseGraphNode {
         return pose;
     }
 
-    public static evaluateDefaultPose (context: AnimationGraphEvaluationContext, poseTransformSpaceRequirement: PoseTransformSpaceRequirement) {
+    public static evaluateDefaultPose (context: AnimationGraphEvaluationContext, poseTransformSpaceRequirement: PoseTransformSpaceRequirement): Pose {
         switch (poseTransformSpaceRequirement) {
         default:
             assertIsTrue(false);
@@ -142,7 +142,7 @@ export abstract class PoseNode extends PoseGraphNode {
     }
 
     /** @internal */
-    public _setDependencyEvaluation (dependency: PoseNodeDependencyEvaluation) {
+    public _setDependencyEvaluation (dependency: PoseNodeDependencyEvaluation): void {
         this._dependencyEvaluation = dependency;
     }
 
@@ -164,6 +164,13 @@ export abstract class PoseNode extends PoseGraphNode {
      * @returns The result pose.
      */
     protected abstract doEvaluate(context: AnimationGraphEvaluationContext): Pose;
+
+    /**
+     * TODO: some nodes access dependencies in reenter(). See: cocos/cocos-engine#15305
+     */
+    protected _forceEvaluateEvaluation (): void {
+        this._dependencyEvaluation?.evaluate();
+    }
 
     private _dependencyEvaluation: PoseNodeDependencyEvaluation | undefined = undefined;
 }

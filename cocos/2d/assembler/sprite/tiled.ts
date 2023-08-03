@@ -24,7 +24,7 @@
 
 import { JSB } from 'internal:constants';
 import { IUV, SpriteFrame } from '../../assets/sprite-frame';
-import { Mat4, Vec3, Color } from '../../../core';
+import { Mat4, Vec3, Color, error } from '../../../core';
 import { IRenderData, RenderData } from '../../renderer/render-data';
 import { IBatcher } from '../../renderer/i-batcher';
 import { Sprite } from '../../components/sprite';
@@ -45,7 +45,7 @@ let tempRenderDataLength = 0;
 const tempRenderData: IRenderData[] = [];
 let QUAD_INDICES;
 
-function has9SlicedOffsetVertexCount (spriteFrame: SpriteFrame) {
+function has9SlicedOffsetVertexCount (spriteFrame: SpriteFrame): number {
     if (spriteFrame) {
         if (spriteFrame.insetTop > 0
         || spriteFrame.insetBottom > 0
@@ -121,7 +121,7 @@ export const tiled: IAssembler = {
 
     createQuadIndices (indexCount) {
         if (indexCount % 6 !== 0) {
-            console.error('illegal index count!');
+            error('illegal index count!');
             return;
         }
         const quadCount = indexCount / 6;
@@ -253,6 +253,7 @@ export const tiled: IAssembler = {
         }
 
         // 临时变量存前置数据
+        tempRenderData.length = 0;
         tempRenderDataLength = Math.max(row + 1, col + 1);
         for (let i = 0; i < tempRenderDataLength; i++) {
             tempRenderData.push({ x: 0, y: 0, z: 0, u: 0, v: 0, color: new Color() });

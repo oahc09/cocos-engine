@@ -415,6 +415,27 @@ void CommandBufferAgent::updateBuffer(Buffer *buff, const void *data, uint32_t s
         });
 }
 
+void CommandBufferAgent::resolveTexture(Texture *srcTexture, Texture *dstTexture, const TextureCopy *regions, uint32_t count) {
+    Texture *actorSrcTexture = nullptr;
+    Texture *actorDstTexture = nullptr;
+    if (srcTexture) actorSrcTexture = static_cast<TextureAgent *>(srcTexture)->getActor();
+    if (dstTexture) actorDstTexture = static_cast<TextureAgent *>(dstTexture)->getActor();
+
+    auto *actorRegions = _messageQueue->allocate<TextureCopy>(count);
+    memcpy(actorRegions, regions, count * sizeof(TextureCopy));
+
+    ENQUEUE_MESSAGE_5(
+        _messageQueue, CommandBufferBlitTexture,
+        actor, getActor(),
+        srcTexture, actorSrcTexture,
+        dstTexture, actorDstTexture,
+        regions, actorRegions,
+        count, count,
+        {
+            actor->resolveTexture(srcTexture, dstTexture, regions, count);
+        });
+}
+
 void CommandBufferAgent::copyTexture(Texture *srcTexture, Texture *dstTexture, const TextureCopy *regions, uint32_t count) {
     Texture *actorSrcTexture = nullptr;
     Texture *actorDstTexture = nullptr;
@@ -433,6 +454,27 @@ void CommandBufferAgent::copyTexture(Texture *srcTexture, Texture *dstTexture, c
         count, count,
         {
             actor->copyTexture(srcTexture, dstTexture, regions, count);
+        });
+}
+
+void CommandBufferAgent::copyBuffer(Buffer *srcBuffer, Buffer *dstBuffer, const BufferCopy *regions, uint32_t count) {
+    Buffer *actorSrcBuffer = nullptr;
+    Buffer *actorDstBuffer = nullptr;
+    if (srcBuffer) actorSrcBuffer = static_cast<BufferAgent *>(srcBuffer)->getActor();
+    if (dstBuffer) actorDstBuffer = static_cast<BufferAgent *>(dstBuffer)->getActor();
+
+    auto *actorRegions = _messageQueue->allocate<BufferCopy>(count);
+    memcpy(actorRegions, regions, count * sizeof(BufferCopy));
+
+    ENQUEUE_MESSAGE_5(
+        _messageQueue, CommandBufferCopyBuffer,
+        actor, getActor(),
+        srcBuffer, actorSrcBuffer,
+        dstBuffer, actorDstBuffer,
+        regions, actorRegions,
+        count, count,
+        {
+            actor->copyBuffer(srcBuffer, dstBuffer, regions, count);
         });
 }
 

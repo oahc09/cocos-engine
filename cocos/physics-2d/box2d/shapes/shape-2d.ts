@@ -31,8 +31,10 @@ import { b2PhysicsWorld } from '../physics-world';
 import { PhysicsGroup } from '../../../physics/framework/physics-enum';
 
 const tempFilter = new b2.Filter();
+const lowerBound = new b2.Vec2();
+const upperBound = new b2.Vec2();
 
-function getFilter (shape: b2Shape2D) {
+function getFilter (shape: b2Shape2D): any {
     const comp = shape.collider;
     if (comp.body) {
         tempFilter.categoryBits = comp.group === PhysicsGroup.DEFAULT ? comp.body.group : comp.group;
@@ -54,41 +56,41 @@ export class b2Shape2D implements IBaseShape {
 
     private _rect = new Rect();
 
-    get impl () {
+    get impl (): b2.Shape[] {
         return this._shapes;
     }
 
-    get collider () {
+    get collider (): Collider2D {
         return this._collider!;
     }
 
-    initialize (comp: Collider2D) {
+    initialize (comp: Collider2D): void {
         this._collider = comp;
     }
 
-    onLoad () {
+    onLoad (): void {
     }
 
-    onEnable () {
+    onEnable (): void {
         PhysicsSystem2D.instance._callAfterStep(this, this._init);
     }
 
-    onDisable () {
+    onDisable (): void {
         PhysicsSystem2D.instance._callAfterStep(this, this._destroy);
     }
 
-    start () {
+    start (): void {
 
     }
 
-    onGroupChanged () {
+    onGroupChanged (): void {
         const filter = getFilter(this);
-        this._fixtures.forEach((f) => {
+        this._fixtures.forEach((f): void => {
             f.SetFilterData(filter);
         });
     }
 
-    apply () {
+    apply (): void {
         this._destroy();
         if (this.collider.enabledInHierarchy) {
             this._init();
@@ -107,15 +109,17 @@ export class b2Shape2D implements IBaseShape {
 
             const count = fixture.GetShape().GetChildCount();
             for (let j = 0; j < count; j++) {
-                const aabb = fixture.GetAABB(j);
+                lowerBound.Copy(fixture.GetAABB(j).lowerBound);
+                upperBound.Copy(fixture.GetAABB(j).upperBound);
                 if (fixture.GetShape().m_type === 2) { //b2ShapeType.e_polygonShape
-                    aabb.lowerBound.SelfAddXY(fixture.GetShape().m_radius, fixture.GetShape().m_radius);
-                    aabb.upperBound.SelfSubXY(fixture.GetShape().m_radius, fixture.GetShape().m_radius);
+                    const skinWidth = fixture.GetShape().m_radius;
+                    lowerBound.SelfAddXY(skinWidth, skinWidth);
+                    upperBound.SelfSubXY(skinWidth, skinWidth);
                 }
-                if (aabb.lowerBound.x < minX) minX = aabb.lowerBound.x;
-                if (aabb.lowerBound.y < minY) minY = aabb.lowerBound.y;
-                if (aabb.upperBound.x > maxX) maxX = aabb.upperBound.x;
-                if (aabb.upperBound.y > maxY) maxY = aabb.upperBound.y;
+                if (lowerBound.x < minX) minX = lowerBound.x;
+                if (lowerBound.y < minY) minY = lowerBound.y;
+                if (upperBound.x > maxX) maxX = upperBound.x;
+                if (upperBound.y > maxY) maxY = upperBound.y;
             }
         }
 
@@ -133,7 +137,7 @@ export class b2Shape2D implements IBaseShape {
         return r;
     }
 
-    getFixtureIndex (fixture: b2.Fixture) {
+    getFixtureIndex (fixture: b2.Fixture): number {
         return this._fixtures.indexOf(fixture);
     }
 
@@ -142,7 +146,7 @@ export class b2Shape2D implements IBaseShape {
         return [];
     }
 
-    _init () {
+    _init (): void {
         if (this._inited) return;
 
         const comp = this.collider;
@@ -180,6 +184,10 @@ export class b2Shape2D implements IBaseShape {
             const fixture = this._body.CreateFixture(fixDef);
             fixture.m_userData = this;
 
+            if (body?.enabledContactListener) {
+                (PhysicsSystem2D.instance.physicsWorld as b2PhysicsWorld).registerContactFixture(fixture);
+            }
+
             this._shapes.push(shape);
             this._fixtures.push(fixture);
         }
@@ -187,7 +195,7 @@ export class b2Shape2D implements IBaseShape {
         this._inited = true;
     }
 
-    _destroy () {
+    _destroy (): void {
         if (!this._inited) return;
 
         const fixtures = this._fixtures;
@@ -195,6 +203,9 @@ export class b2Shape2D implements IBaseShape {
 
         for (let i = fixtures.length - 1; i >= 0; i--) {
             const fixture = fixtures[i];
+            fixture.m_userData = null;
+
+            (PhysicsSystem2D.instance.physicsWorld as b2PhysicsWorld).unregisterContactFixture(fixture);
 
             if (body) {
                 body.DestroyFixture(fixture);

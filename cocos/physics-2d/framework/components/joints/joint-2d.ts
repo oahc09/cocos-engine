@@ -22,8 +22,8 @@
  THE SOFTWARE.
 */
 
-import { EDITOR } from 'internal:constants';
-import { Vec2, _decorator, cclegacy, tooltip, serializable, CCBoolean } from '../../../../core';
+import { EDITOR_NOT_IN_PREVIEW } from 'internal:constants';
+import { Vec2, _decorator, tooltip, serializable } from '../../../../core';
 import { RigidBody2D } from '../rigid-body-2d';
 import { IJoint2D } from '../../../spec/i-physics-joint';
 import { EJoint2DType } from '../../physics-types';
@@ -82,11 +82,11 @@ export class Joint2D extends Component {
      * 关节所绑定的刚体组件。
      */
     _body: RigidBody2D | null = null
-    get body () {
+    get body (): RigidBody2D | null {
         return this._body;
     }
 
-    get impl () {
+    get impl (): IJoint2D | null {
         return this._joint;
     }
 
@@ -100,8 +100,8 @@ export class Joint2D extends Component {
      */
     TYPE = EJoint2DType.None;
 
-    protected onLoad () {
-        if (!EDITOR || cclegacy.GAME_VIEW) {
+    protected onLoad (): void {
+        if (!EDITOR_NOT_IN_PREVIEW) {
             this._joint = createJoint(this.TYPE);
             this._joint.initialize(this);
 
@@ -109,25 +109,25 @@ export class Joint2D extends Component {
         }
     }
 
-    protected onEnable () {
+    protected onEnable (): void {
         if (this._joint && this._joint.onEnable) {
             this._joint.onEnable();
         }
     }
 
-    protected onDisable () {
+    protected onDisable (): void {
         if (this._joint && this._joint.onDisable) {
             this._joint.onDisable();
         }
     }
 
-    protected start () {
+    protected start (): void {
         if (this._joint && this._joint.start) {
             this._joint.start();
         }
     }
 
-    protected onDestroy () {
+    protected onDestroy (): void {
         if (this._joint && this._joint.onDestroy) {
             this._joint.onDestroy();
         }

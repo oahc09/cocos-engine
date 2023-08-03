@@ -29,7 +29,7 @@ import { ImageAsset } from './image-asset';
 import { PresumedGFXTextureInfo, PresumedGFXTextureViewInfo, SimpleTexture } from './simple-texture';
 import { ITexture2DCreateInfo, Texture2D } from './texture-2d';
 import { legacyCC, ccwindow } from '../../core/global-exports';
-import { js, sys } from '../../core';
+import { error, js, sys } from '../../core';
 import { OS } from '../../../pal/system-info/enum-type';
 
 export type ITextureCubeCreateInfo = ITexture2DCreateInfo;
@@ -134,25 +134,77 @@ export class TextureCube extends SimpleTexture {
      * @zh 所有层级 Mipmap，注意，这里不包含自动生成的 Mipmap。
      * 当设置 Mipmap 时，贴图的尺寸以及像素格式可能会改变。
      */
-    get mipmaps () {
+    get mipmaps (): ITextureCubeMipmap[] {
         return this._mipmaps;
     }
 
-    set mipmaps (value) {
+    set mipmaps (value: ITextureCubeMipmap[]) {
         this._mipmaps = value;
-        this._setMipmapLevel(this._mipmaps.length);
-        if (this._mipmaps.length > 0) {
-            const imageAsset: ImageAsset = this._mipmaps[0].front;
+
+        const cubeMaps: ITextureCubeMipmap[] = [];
+        if (value.length === 1) {
+            const cubeMipmap = value[0];
+            const front = cubeMipmap.front.extractMipmaps();
+            const back = cubeMipmap.back.extractMipmaps();
+            const left = cubeMipmap.left.extractMipmaps();
+            const right = cubeMipmap.right.extractMipmaps();
+            const top = cubeMipmap.top.extractMipmaps();
+            const bottom = cubeMipmap.bottom.extractMipmaps();
+
+            if (front.length !== back.length
+                || front.length !== left.length
+                || front.length !== right.length
+                || front.length !== top.length
+                || front.length !== bottom.length) {
+                error('The number of mipmaps of each face is different.');
+                this._setMipmapParams([]);
+                return;
+            }
+
+            const level = front.length;
+            for (let i = 0; i < level; ++i) {
+                const cubeMap: ITextureCubeMipmap = {
+                    front: front[i],
+                    back: back[i],
+                    left: left[i],
+                    right: right[i],
+                    top: top[i],
+                    bottom: bottom[i],
+                };
+                cubeMaps.push(cubeMap);
+            }
+        } else if (value.length > 1) {
+            value.forEach((mipmap): void => {
+                const cubeMap: ITextureCubeMipmap = {
+                    front: mipmap.front.extractMipmap0(),
+                    back: mipmap.back.extractMipmap0(),
+                    left: mipmap.left.extractMipmap0(),
+                    right: mipmap.right.extractMipmap0(),
+                    top: mipmap.top.extractMipmap0(),
+                    bottom: mipmap.bottom.extractMipmap0(),
+                };
+                cubeMaps.push(cubeMap);
+            });
+        }
+
+        this._setMipmapParams(cubeMaps);
+    }
+
+    private _setMipmapParams (value: ITextureCubeMipmap[]): void {
+        this._generatedMipmaps = value;
+        this._setMipmapLevel(this._generatedMipmaps.length);
+        if (this._generatedMipmaps.length > 0) {
+            const imageAsset: ImageAsset = this._generatedMipmaps[0].front;
             this.reset({
                 width: imageAsset.width,
                 height: imageAsset.height,
                 format: imageAsset.format,
-                mipmapLevel: this._mipmaps.length,
+                mipmapLevel: this._generatedMipmaps.length,
                 baseLevel: this._baseLevel,
                 maxLevel: this._maxLevel,
             });
-            this._mipmaps.forEach((mipmap, level) => {
-                _forEachFace(mipmap, (face, faceIndex) => {
+            this._generatedMipmaps.forEach((mipmap, level): void => {
+                _forEachFace(mipmap, (face, faceIndex): void => {
                     this._assignImage(face, level, faceIndex);
                 });
             });
@@ -160,7 +212,7 @@ export class TextureCube extends SimpleTexture {
             this.reset({
                 width: 0,
                 height: 0,
-                mipmapLevel: this._mipmaps.length,
+                mipmapLevel: this._generatedMipmaps.length,
                 baseLevel: this._baseLevel,
                 maxLevel: this._maxLevel,
             });
@@ -212,7 +264,7 @@ export class TextureCube extends SimpleTexture {
 
         for (let j = 0; j < layout.length; j++) {
             const layoutInfo = layout[j];
-            _forEachFace(faceAtlas, (face, faceIndex) => {
+            _forEachFace(faceAtlas, (face, faceIndex): void => {
                 ctx.clearRect(0, 0, imageAtlasAsset.width, imageAtlasAsset.height);
                 const drawImg = face.data as HTMLImageElement;
                 // NOTE: on OH platform, drawImage only supports ImageBitmap and PixelMap type, so we mark drawImg as any.
@@ -231,7 +283,7 @@ export class TextureCube extends SimpleTexture {
         }
     }
 
-    get mipmapAtlas () {
+    get mipmapAtlas (): ITextureCubeMipmapAtlas | null {
         return this._mipmapAtlas;
     }
 
@@ -251,7 +303,7 @@ export class TextureCube extends SimpleTexture {
      * 注意，`this.image = img` 等价于 `this.mipmaps = [img]`，
      * 也就是说，通过 `this.image` 设置 0 级 Mipmap 时将隐式地清除之前的所有 Mipmap。
      */
-    get image () {
+    get image (): ITextureCubeMipmap | null {
         return this._mipmaps.length === 0 ? null : this._mipmaps[0];
     }
 
@@ -279,7 +331,7 @@ export class TextureCube extends SimpleTexture {
      * ```
      */
 
-    public static fromTexture2DArray (textures: Texture2D[], out?: TextureCube) {
+    public static fromTexture2DArray (textures: Texture2D[], out?: TextureCube): TextureCube {
         const mipmaps: ITextureCubeMipmap[] = [];
         const nMipmaps = textures.length / 6;
         for (let i = 0; i < nMipmaps; i++) {
@@ -304,7 +356,9 @@ export class TextureCube extends SimpleTexture {
     @serializable
     public _mipmaps: ITextureCubeMipmap[] = [];
 
-    public onLoaded () {
+    private _generatedMipmaps: ITextureCubeMipmap[] = [];
+
+    public onLoaded (): void {
         if (this._mipmapMode === MipmapMode.BAKED_CONVOLUTION_MAP) {
             this.mipmapAtlas = this._mipmapAtlas;
         } else {
@@ -319,7 +373,7 @@ export class TextureCube extends SimpleTexture {
      * mipmap 图像的数据不会自动更新到贴图中，你必须显式调用 [[uploadData]] 来上传贴图数据。
      * @param info @en The create information. @zh 创建贴图的相关信息。
      */
-    public reset (info: ITextureCubeCreateInfo) {
+    public reset (info: ITextureCubeCreateInfo): void {
         this._width = info.width;
         this._height = info.height;
         this._setGFXFormat(info.format);
@@ -338,19 +392,19 @@ export class TextureCube extends SimpleTexture {
      * @param firstLevel @en First level to be updated. @zh 更新指定层的 mipmap。
      * @param count @en Mipmap level count to be updated。 @zh 指定要更新层的数量。
      */
-    public updateMipmaps (firstLevel = 0, count?: number) {
-        if (firstLevel >= this._mipmaps.length) {
+    public updateMipmaps (firstLevel = 0, count?: number): void {
+        if (firstLevel >= this._generatedMipmaps.length) {
             return;
         }
 
         const nUpdate = Math.min(
-            count === undefined ? this._mipmaps.length : count,
-            this._mipmaps.length - firstLevel,
+            count === undefined ? this._generatedMipmaps.length : count,
+            this._generatedMipmaps.length - firstLevel,
         );
 
         for (let i = 0; i < nUpdate; ++i) {
             const level = firstLevel + i;
-            _forEachFace(this._mipmaps[level], (face, faceIndex) => {
+            _forEachFace(this._generatedMipmaps[level], (face, faceIndex): void => {
                 this._assignImage(face, level, faceIndex);
             });
         }
@@ -360,8 +414,9 @@ export class TextureCube extends SimpleTexture {
      * @en Destroys this texture, clear all mipmaps and release GPU resources
      * @zh 销毁此贴图，清空所有 Mipmap 并释放占用的 GPU 资源。
      */
-    public destroy () {
+    public destroy (): boolean {
         this._mipmaps = [];
+        this._generatedMipmaps = [];
         this._mipmapAtlas = null;
         return super.destroy();
     }
@@ -371,9 +426,8 @@ export class TextureCube extends SimpleTexture {
      * @zh 释放占用的 GPU 资源。
      * @deprecated please use [[destroy]] instead
      */
-    public releaseTexture () {
-        this.mipmaps = [];
-        this._mipmapAtlas = null;
+    public releaseTexture (): void {
+        this.destroy();
     }
 
     /**
@@ -438,7 +492,7 @@ export class TextureCube extends SimpleTexture {
     /**
      * @deprecated since v3.5.0, this is an engine private interface that will be removed in the future.
      */
-    public _deserialize (serializedData: ITextureCubeSerializeData, handle: any) {
+    public _deserialize (serializedData: ITextureCubeSerializeData, handle: any): void {
         const data = serializedData;
         super._deserialize(data.base, handle);
         this.isRGBE = data.rgbe;
@@ -498,7 +552,7 @@ export class TextureCube extends SimpleTexture {
         return texInfo;
     }
 
-    protected _getGfxTextureViewCreateInfo (presumed: PresumedGFXTextureViewInfo) {
+    protected _getGfxTextureViewCreateInfo (presumed: PresumedGFXTextureViewInfo): TextureViewInfo {
         const texViewInfo = new TextureViewInfo();
         texViewInfo.type = TextureType.CUBE;
         texViewInfo.baseLayer = 0;
@@ -507,7 +561,7 @@ export class TextureCube extends SimpleTexture {
         return texViewInfo;
     }
 
-    protected _uploadAtlas () {
+    protected _uploadAtlas (): void {
         const layout = this._mipmapAtlas!.layout;
         const mip0Layout = layout[0];
         this.reset({
@@ -517,7 +571,7 @@ export class TextureCube extends SimpleTexture {
             mipmapLevel: layout.length,
         });
 
-        _forEachFace(this._mipmapAtlas!.atlas, (face, faceIndex) => {
+        _forEachFace(this._mipmapAtlas!.atlas, (face, faceIndex): void => {
             const tex = new Texture2D();
             tex.image = face;
             tex.reset({
@@ -530,7 +584,8 @@ export class TextureCube extends SimpleTexture {
             for (let i = 0; i < layout.length; i++) {
                 const layoutInfo = layout[i];
 
-                const buffer = new Uint8Array(4 * layoutInfo.width * layoutInfo.height);
+                const size = tex.getGFXTexture()!.size;
+                const buffer = new Uint8Array(size); // should use the gfxTexture memory size
                 const region = new BufferTextureCopy();
                 region.texOffset.x = layoutInfo.left;
                 region.texOffset.y = layoutInfo.top;
@@ -550,7 +605,7 @@ export class TextureCube extends SimpleTexture {
         });
     }
 
-    public initDefault (uuid?: string) {
+    public initDefault (uuid?: string): void {
         super.initDefault(uuid);
 
         const imageAsset = new ImageAsset();
@@ -565,7 +620,7 @@ export class TextureCube extends SimpleTexture {
         }];
     }
 
-    public validate () {
+    public validate (): boolean {
         if (this._mipmapMode === MipmapMode.BAKED_CONVOLUTION_MAP) {
             if (this.mipmapAtlas === null || this.mipmapAtlas.layout.length === 0) {
                 return false;
@@ -573,7 +628,7 @@ export class TextureCube extends SimpleTexture {
             const atlas = this.mipmapAtlas.atlas;
             return !!(atlas.top && atlas.bottom && atlas.front && atlas.back && atlas.left && atlas.right);
         } else {
-            return this._mipmaps.length !== 0 && !this._mipmaps.find((x) => !(x.top && x.bottom && x.front && x.back && x.left && x.right));
+            return this._mipmaps.length !== 0 && !this._mipmaps.find((x): boolean => !(x.top && x.bottom && x.front && x.back && x.left && x.right));
         }
     }
 }
@@ -607,7 +662,7 @@ interface ITextureCubeSerializeData {
  * @param {Mipmap} mipmap
  * @param {(face: ImageAsset) => void} callback
  */
-function _forEachFace (mipmap: ITextureCubeMipmap, callback: (face: ImageAsset, faceIndex: number) => void) {
+function _forEachFace (mipmap: ITextureCubeMipmap, callback: (face: ImageAsset, faceIndex: number) => void): void {
     callback(mipmap.front, FaceIndex.front);
     callback(mipmap.back, FaceIndex.back);
     callback(mipmap.left, FaceIndex.left);

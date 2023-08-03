@@ -22,11 +22,11 @@
  THE SOFTWARE.
 */
 
-import { AudioPlayer } from 'pal/audio';
+import { AudioPlayer, OneShotAudio } from 'pal/audio';
 import { ccclass, help, menu, tooltip, type, range, serializable } from 'cc.decorator';
 import { AudioPCMDataView, AudioState } from '../../pal/audio/type';
 import { Component } from '../scene-graph/component';
-import { clamp } from '../core';
+import { clamp, error, warn } from '../core';
 import { AudioClip } from './audio-clip';
 import { audioManager } from './audio-manager';
 import { Node } from '../scene-graph';
@@ -49,7 +49,7 @@ enum AudioSourceEventType {
 @help('i18n:cc.AudioSource')
 @menu('Audio/AudioSource')
 export class AudioSource extends Component {
-    static get maxAudioChannel () {
+    static get maxAudioChannel (): number {
         return AudioPlayer.maxAudioChannel;
     }
     public static AudioState = AudioState;
@@ -59,6 +59,7 @@ export class AudioSource extends Component {
     @type(AudioClip)
     protected _clip: AudioClip | null = null;
     protected _player: AudioPlayer | null = null;
+    private _hasRegisterListener: boolean = false;
 
     @serializable
     protected _loop = false;
@@ -75,12 +76,10 @@ export class AudioSource extends Component {
 
     private _lastSetClip: AudioClip | null = null;
 
-    private _resetPlayer () {
+    private _resetPlayer (): void {
         if (this._player) {
             audioManager.removePlaying(this._player);
-            this._player.offEnded();
-            this._player.offInterruptionBegin();
-            this._player.offInterruptionEnd();
+            this._unregisterListener();
             this._player.destroy();
             this._player = null;
         }
@@ -100,10 +99,10 @@ export class AudioSource extends Component {
         this._clip = val;
         this._syncPlayer();
     }
-    get clip () {
+    get clip (): AudioClip | null {
         return this._clip;
     }
-    private _syncPlayer () {
+    private _syncPlayer (): void {
         const clip = this._clip;
         if (this._lastSetClip === clip) {
             return;
@@ -114,7 +113,7 @@ export class AudioSource extends Component {
             return;
         }
         if (!clip._nativeAsset) {
-            console.error('Invalid audio clip');
+            error('Invalid audio clip');
             return;
         }
         // The state of _isloaded cannot be modified if clip is the wrong argument.
@@ -137,6 +136,14 @@ export class AudioSource extends Component {
             // clear old player
             this._resetPlayer();
             this._player = player;
+            this._syncStates();
+            this.node?.emit(_LOADED_EVENT);
+        }).catch((e) => {});
+    }
+
+    private _registerListener (): void {
+        if (!this._hasRegisterListener && this._player) {
+            const player = this._player;
             player.onEnded(() => {
                 audioManager.removePlaying(player);
                 this.node?.emit(AudioSourceEventType.ENDED, this);
@@ -145,11 +152,21 @@ export class AudioSource extends Component {
                 audioManager.removePlaying(player);
             });
             player.onInterruptionEnd(() => {
-                audioManager.addPlaying(player);
+                if (this._player === player) {
+                    audioManager.addPlaying(player);
+                }
             });
-            this._syncStates();
-            this.node?.emit(_LOADED_EVENT);
-        }).catch((e) => {});
+            this._hasRegisterListener = true;
+        }
+    }
+
+    private _unregisterListener (): void {
+        if (this._player && this._hasRegisterListener) {
+            this._player.offEnded();
+            this._player.offInterruptionBegin();
+            this._player.offInterruptionEnd();
+            this._hasRegisterListener = false;
+        }
     }
 
     /**
@@ -161,9 +178,11 @@ export class AudioSource extends Component {
     @tooltip('i18n:audio.loop')
     set loop (val) {
         this._loop = val;
-        this._player && (this._player.loop = val);
+        if (this._player) {
+            this._player.loop = val;
+        }
     }
-    get loop () {
+    get loop (): boolean {
         return this._loop;
     }
 
@@ -182,7 +201,7 @@ export class AudioSource extends Component {
     set playOnAwake (val) {
         this._playOnAwake = val;
     }
-    get playOnAwake () {
+    get playOnAwake (): boolean {
         return this._playOnAwake;
     }
 
@@ -197,7 +216,7 @@ export class AudioSource extends Component {
     @range([0.0, 1.0])
     @tooltip('i18n:audio.volume')
     set volume (val) {
-        if (Number.isNaN(val)) { console.warn('illegal audio volume!'); return; }
+        if (Number.isNaN(val)) { warn('illegal audio volume!'); return; }
         val = clamp(val, 0, 1);
         if (this._player) {
             this._player.volume = val;
@@ -206,22 +225,22 @@ export class AudioSource extends Component {
             this._volume = val;
         }
     }
-    get volume () {
+    get volume (): number {
         return this._volume;
     }
 
-    public onLoad () {
+    public onLoad (): void {
         this._syncPlayer();
     }
 
-    public onEnable () {
+    public onEnable (): void {
         // audio source component may be played before
         if (this._playOnAwake && !this.playing) {
             this.play();
         }
     }
 
-    public onDisable () {
+    public onDisable (): void {
         const rootNode = this._getRootNode();
         if (rootNode?._persistNode) {
             return;
@@ -229,10 +248,9 @@ export class AudioSource extends Component {
         this.pause();
     }
 
-    public onDestroy () {
+    public onDestroy (): void {
         this.stop();
-        this._player?.destroy();
-        this._player = null;
+        this.clip = null;// It will trigger _syncPlayer then call resetPlayer
     }
     /**
      * @en
@@ -251,7 +269,7 @@ export class AudioSource extends Component {
      * audioSource.getPCMData(0).then(dataView => {
      *   if (!dataView)  return;
      *   for (let i = 0; i < dataView.length; ++i) {
-     *     console.log('data: ' + dataView.getData(i));
+     *     log('data: ' + dataView.getData(i));
      *   }
      * });
      * ```
@@ -259,7 +277,7 @@ export class AudioSource extends Component {
     public getPCMData (channelIndex: number): Promise<AudioPCMDataView | undefined> {
         return new Promise((resolve) => {
             if (channelIndex !== 0 && channelIndex !== 1) {
-                console.warn('Only support channel index 0 or 1 to get buffer');
+                warn('Only support channel index 0 or 1 to get buffer');
                 resolve(undefined);
                 return;
             }
@@ -327,21 +345,26 @@ export class AudioSource extends Component {
      * - 在 TOUCH_END 或者 MOUSE_UP 的事件回调里播放音频。
      * - 直接播放音频，引擎会在下一次发生用户交互时自动播放。
      */
-    public play () {
+    public play (): void {
         if (!this._isLoaded && this.clip) {
             this._operationsBeforeLoading.push('play');
             return;
         }
+        this._registerListener();
         audioManager.discardOnePlayingIfNeeded();
         // Replay if the audio is playing
         if (this.state === AudioState.PLAYING) {
             this._player?.stop().catch((e) => {});
         }
         const player = this._player;
-        this._player?.play().then(() => {
-            audioManager.addPlaying(player!);
-            this.node?.emit(AudioSourceEventType.STARTED, this);
-        }).catch((e) => {});
+        if (player) {
+            player.play().then(() => {
+                this.node?.emit(AudioSourceEventType.STARTED, this);
+            }).catch((e) => {
+                audioManager.removePlaying(player);
+            });
+            audioManager.addPlaying(player);
+        }
     }
 
     /**
@@ -350,15 +373,12 @@ export class AudioSource extends Component {
      * @zh
      * 暂停播放。
      */
-    public pause () {
+    public pause (): void {
         if (!this._isLoaded && this.clip) {
             this._operationsBeforeLoading.push('pause');
             return;
         }
-        const player = this._player;
-        this._player?.pause().then(() => {
-            audioManager.removePlaying(player!);
-        }).catch((e) => {});
+        this._player?.pause().catch((e) => {});
     }
 
     /**
@@ -367,15 +387,15 @@ export class AudioSource extends Component {
      * @zh
      * 停止播放。
      */
-    public stop () {
+    public stop (): void {
         if (!this._isLoaded && this.clip) {
             this._operationsBeforeLoading.push('stop');
             return;
         }
-        const player = this._player;
-        this._player?.stop().then(() => {
-            audioManager.removePlaying(player!);
-        }).catch((e) => {});
+        if (this._player) {
+            this._player.stop().catch((e) => {});
+            audioManager.removePlaying(this._player);
+        }
     }
 
     /**
@@ -386,35 +406,39 @@ export class AudioSource extends Component {
      * @param clip The audio clip to be played.
      * @param volumeScale volume scaling factor wrt. current value.
      */
-    public playOneShot (clip: AudioClip, volumeScale = 1) {
+    public playOneShot (clip: AudioClip, volumeScale = 1): void {
         if (!clip._nativeAsset) {
-            console.error('Invalid audio clip');
+            error('Invalid audio clip');
             return;
         }
+        let player: OneShotAudio;
         AudioPlayer.loadOneShotAudio(clip._nativeAsset.url, this._volume * volumeScale, {
             audioLoadMode: clip.loadMode,
         }).then((oneShotAudio) => {
+            player = oneShotAudio;
             audioManager.discardOnePlayingIfNeeded();
-            oneShotAudio.onPlay = () => {
-                audioManager.addPlaying(oneShotAudio);
-            };
-            oneShotAudio.onEnd = () => {
+            oneShotAudio.onEnd = (): void => {
                 audioManager.removePlaying(oneShotAudio);
             };
             oneShotAudio.play();
-        }).catch((e) => {});
+            audioManager.addPlaying(oneShotAudio);
+        }).catch((e): void => {
+            if (player) {
+                audioManager.removePlaying(player);
+            }
+        });
     }
 
-    protected _syncStates () {
+    protected _syncStates (): void {
         if (!this._player) { return; }
-        this._player.seek(this._cachedCurrentTime).then(() => {
+        this._player.seek(this._cachedCurrentTime).then((): void => {
             if (this._player) {
                 this._player.loop = this._loop;
                 this._player.volume = this._volume;
-                this._operationsBeforeLoading.forEach((opName) => { this[opName]?.(); });
+                this._operationsBeforeLoading.forEach((opName): void => { this[opName]?.(); });
                 this._operationsBeforeLoading.length = 0;
             }
-        }).catch((e) => {});
+        }).catch((e): void => {});
     }
 
     /**
@@ -425,10 +449,10 @@ export class AudioSource extends Component {
      * @param num playback time to jump to.
      */
     set currentTime (num: number) {
-        if (Number.isNaN(num)) { console.warn('illegal audio time!'); return; }
+        if (Number.isNaN(num)) { warn('illegal audio time!'); return; }
         num = clamp(num, 0, this.duration);
         this._cachedCurrentTime = num;
-        this._player?.seek(this._cachedCurrentTime).catch((e) => {});
+        this._player?.seek(this._cachedCurrentTime).catch((e): void => {});
     }
 
     /**
@@ -437,7 +461,7 @@ export class AudioSource extends Component {
      * @zh
      * 以秒为单位获取当前播放时间。
      */
-    get currentTime () {
+    get currentTime (): number {
         return this._player ? this._player.currentTime : this._cachedCurrentTime;
     }
 
@@ -447,7 +471,7 @@ export class AudioSource extends Component {
      * @zh
      * 获取以秒为单位的音频总时长。
      */
-    get duration () {
+    get duration (): number {
         return this._clip?.getDuration() ?? (this._player ? this._player.duration : 0);
     }
 
@@ -467,7 +491,7 @@ export class AudioSource extends Component {
      * @zh
      * 当前音频是否正在播放？
      */
-    get playing () {
+    get playing (): boolean {
         return this.state === AudioSource.AudioState.PLAYING;
     }
 }

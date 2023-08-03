@@ -1,8 +1,9 @@
-import { ccclass, disallowMultiple, executeInEditMode, menu, range, rangeMin, serializable, slide, tooltip, type } from '../../../core/data/decorators';
+import { ccclass, disallowMultiple, executeInEditMode, help, menu, range, rangeMin, serializable, slide, tooltip, type } from '../../../core/data/decorators';
 import { CCFloat, CCInteger } from '../../../core/data/utils/attribute';
 import { PostProcessSetting } from './post-process-setting';
 
 @ccclass('cc.Bloom')
+@help('cc.Bloom')
 @menu('PostProcess/Bloom')
 @disallowMultiple
 @executeInEditMode
@@ -14,31 +15,34 @@ export class Bloom extends PostProcessSetting {
     @serializable
     protected _intensity = 2.3;
 
+    @tooltip('i18n:bloom.threshold')
     @rangeMin(0)
     @type(CCFloat)
     set threshold (value: number) {
         this._threshold = value;
     }
-    get threshold () {
+    get threshold (): number {
         return this._threshold;
     }
 
+    @tooltip('i18n:bloom.iterations')
     @slide
     @range([1, 6, 1])
     @type(CCInteger)
     set iterations (value: number) {
         this._iterations = value;
     }
-    get iterations () {
+    get iterations (): number {
         return this._iterations;
     }
 
+    @tooltip('i18n:bloom.intensity')
     @rangeMin(0)
     @type(CCFloat)
     set intensity (value: number) {
         this._intensity = value;
     }
-    get intensity () {
+    get intensity (): number {
         return this._intensity;
     }
 }

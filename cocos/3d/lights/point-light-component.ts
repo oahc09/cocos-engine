@@ -23,7 +23,7 @@
 */
 
 import { ccclass, help, executeInEditMode, menu, tooltip, type, displayOrder,
-    serializable, formerlySerializedAs, editable, rangeMin, slide } from 'cc.decorator';
+    serializable, formerlySerializedAs, editable, rangeMin, range } from 'cc.decorator';
 import { scene } from '../../render-scene';
 import { Camera, LightType } from '../../render-scene/scene';
 import { Light, PhotometricTerm } from './light-component';
@@ -55,9 +55,9 @@ export class PointLight extends Light {
     @displayOrder(-1)
     @tooltip('i18n:lights.luminous_flux')
     @editable
-    @rangeMin(0)
+    @range([0, Number.POSITIVE_INFINITY, 100])
     @type(CCInteger)
-    get luminousFlux () {
+    get luminousFlux (): number {
         const isHDR = cclegacy.director.root.pipeline.pipelineSceneData.isHDR;
         if (isHDR) {
             return this._luminanceHDR * scene.nt2lm(1.0);
@@ -86,9 +86,9 @@ export class PointLight extends Light {
     @displayOrder(-1)
     @tooltip('i18n:lights.luminance')
     @editable
-    @rangeMin(0)
+    @range([0, Number.POSITIVE_INFINITY, 10])
     @type(CCInteger)
-    get luminance () {
+    get luminance (): number {
         const isHDR = cclegacy.director.root.pipeline.pipelineSceneData.isHDR;
         if (isHDR) {
             return this._luminanceHDR;
@@ -117,8 +117,6 @@ export class PointLight extends Light {
     @displayOrder(-2)
     @tooltip('i18n:lights.term')
     @editable
-    @rangeMin(0)
-    @type(CCInteger)
     get term (): number {
         return this._term;
     }
@@ -134,7 +132,7 @@ export class PointLight extends Light {
     @editable
     @rangeMin(0)
     @type(CCFloat)
-    get range () {
+    get range (): number {
         return this._range;
     }
     set range (val) {
@@ -147,7 +145,7 @@ export class PointLight extends Light {
         this._lightType = scene.PointLight;
     }
 
-    protected _createLight () {
+    protected _createLight (): void {
         super._createLight();
         this._type = LightType.POINT;
         this.range = this._range;

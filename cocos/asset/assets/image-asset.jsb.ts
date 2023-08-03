@@ -25,7 +25,7 @@
 import { ALIPAY, XIAOMI, JSB, TEST, BAIDU, EDITOR } from 'internal:constants';
 import { Format, FormatFeatureBit, deviceManager } from '../../gfx';
 import { PixelFormat } from './asset-enum';
-import { sys, macro, warnID, cclegacy } from '../../core';
+import { sys, macro, warnID, cclegacy, error } from '../../core';
 import { patch_cc_ImageAsset } from '../../native-binding/decorators';
 import './asset';
 import type { ImageAsset as JsbImageAsset } from './image-asset';
@@ -181,7 +181,7 @@ imageAssetProto._syncDataToNative = function () {
     }
     else {
         if(!this._nativeData._data){
-            console.error(`[ImageAsset] setData bad argument ${this._nativeData}`);
+            error(`[ImageAsset] setData bad argument ${this._nativeData}`);
             return;
         }
         this.setData(this._nativeData._data);

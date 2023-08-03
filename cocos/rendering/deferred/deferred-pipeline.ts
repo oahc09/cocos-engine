@@ -41,7 +41,7 @@ import { Format, StoreOp,
     TextureInfo, TextureType, TextureUsageBit, FramebufferInfo, Swapchain, GeneralBarrierInfo } from '../../gfx';
 import { UBOGlobal, UBOCamera, UBOShadow, UNIFORM_SHADOWMAP_BINDING, UNIFORM_SPOT_SHADOW_MAP_TEXTURE_BINDING } from '../define';
 import { Camera } from '../../render-scene/scene';
-import { errorID } from '../../core/platform/debug';
+import { errorID, log } from '../../core/platform/debug';
 import { DeferredPipelineSceneData } from './deferred-pipeline-scene-data';
 import { PipelineEventType } from '../pipeline-event';
 
@@ -84,7 +84,7 @@ export class DeferredPipeline extends RenderPipeline {
 
     public activate (swapchain: Swapchain): boolean {
         if (EDITOR) {
-            console.info('Deferred render pipeline initialized. '
+            log('Deferred render pipeline initialized. '
                 + 'Note that non-transparent materials with no lighting will not be rendered, such as builtin-unlit.');
         }
 
@@ -103,7 +103,7 @@ export class DeferredPipeline extends RenderPipeline {
         return true;
     }
 
-    public destroy () {
+    public destroy (): boolean {
         this._destroyUBOs();
         this._destroyQuadInputAssembler();
         this._destroyDeferredData();
@@ -120,7 +120,7 @@ export class DeferredPipeline extends RenderPipeline {
         return super.destroy();
     }
 
-    public onGlobalPipelineStateChanged () {
+    public onGlobalPipelineStateChanged (): void {
         (this.pipelineSceneData as DeferredPipelineSceneData).updatePipelineSceneData();
     }
 
@@ -132,7 +132,7 @@ export class DeferredPipeline extends RenderPipeline {
         return this._pipelineRenderData as DeferredRenderData;
     }
 
-    private _activeRenderer (swapchain: Swapchain) {
+    private _activeRenderer (swapchain: Swapchain): boolean {
         const device = this.device;
 
         this._commandBuffers.push(device.commandBuffer);
@@ -221,7 +221,7 @@ export class DeferredPipeline extends RenderPipeline {
         return true;
     }
 
-    private _destroyUBOs () {
+    private _destroyUBOs (): void {
         if (this._descriptorSet) {
             this._descriptorSet.getBuffer(UBOGlobal.BINDING).destroy();
             this._descriptorSet.getBuffer(UBOShadow.BINDING).destroy();
@@ -231,7 +231,7 @@ export class DeferredPipeline extends RenderPipeline {
         }
     }
 
-    private _destroyDeferredData () {
+    private _destroyDeferredData (): void {
         const deferredData = this._pipelineRenderData as DeferredRenderData;
         if (deferredData) {
             if (deferredData.gbufferFrameBuffer) deferredData.gbufferFrameBuffer.destroy();
@@ -254,7 +254,7 @@ export class DeferredPipeline extends RenderPipeline {
         this._pipelineRenderData = null;
     }
 
-    protected _ensureEnoughSize (cameras: Camera[]) {
+    protected _ensureEnoughSize (cameras: Camera[]): void {
         let newWidth = this._width;
         let newHeight = this._height;
         for (let i = 0; i < cameras.length; ++i) {
@@ -270,7 +270,7 @@ export class DeferredPipeline extends RenderPipeline {
         }
     }
 
-    private _generateDeferredRenderData () {
+    private _generateDeferredRenderData (): void {
         const device = this.device;
 
         const data: DeferredRenderData = this._pipelineRenderData = new DeferredRenderData();
@@ -314,7 +314,7 @@ export class DeferredPipeline extends RenderPipeline {
         data.sampler = this.globalDSManager.pointSampler;
 
         // Listens when the attachment texture is scaled
-        this.on(PipelineEventType.ATTACHMENT_SCALE_CAHNGED, (val: number) => {
+        this.on(PipelineEventType.ATTACHMENT_SCALE_CAHNGED, (val: number): void => {
             data.sampler = val < 1 ? this.globalDSManager.pointSampler : this.globalDSManager.linearSampler;
             data.gbufferFrameBuffer = this.newFramebufferByRatio(data.gbufferFrameBuffer);
             data.gbufferFrameBuffer = this.newFramebufferByRatio(data.outputFrameBuffer);

@@ -158,6 +158,10 @@ void GLES3PrimaryCommandBuffer::copyBuffersToTexture(const uint8_t *const *buffe
     }
 }
 
+void GLES3PrimaryCommandBuffer::resolveTexture(Texture *srcTexture, Texture *dstTexture, const TextureCopy *regions, uint32_t count) {
+    copyTexture(srcTexture, dstTexture, regions, count);
+}
+
 void GLES3PrimaryCommandBuffer::copyTexture(Texture *srcTexture, Texture *dstTexture, const TextureCopy *regions, uint32_t count) {
     GLES3GPUTexture *gpuTextureSrc = nullptr;
     GLES3GPUTexture *gpuTextureDst = nullptr;
@@ -179,6 +183,13 @@ void GLES3PrimaryCommandBuffer::copyTexture(Texture *srcTexture, Texture *dstTex
         blit.dstExtent = copy.extent;
     }
     cmdFuncGLES3BlitTexture(GLES3Device::getInstance(), gpuTextureSrc, gpuTextureDst, blitRegions.data(), count, Filter::POINT);
+}
+
+void GLES3PrimaryCommandBuffer::copyBuffer(Buffer *srcBuffer, Buffer *dstBuffer, const BufferCopy *regions, uint32_t count) {
+    GLES3GPUBuffer *srcGLBuffer = static_cast<GLES3Buffer *>(srcBuffer)->gpuBuffer();
+    GLES3GPUBuffer *dstGLBuffer = static_cast<GLES3Buffer *>(dstBuffer)->gpuBuffer();
+
+    cmdFuncGLES3CopyBuffer(srcGLBuffer, dstGLBuffer, regions, count);
 }
 
 void GLES3PrimaryCommandBuffer::blitTexture(Texture *srcTexture, Texture *dstTexture, const TextureBlit *regions, uint32_t count, Filter filter) {

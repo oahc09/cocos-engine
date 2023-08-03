@@ -87,7 +87,7 @@ export abstract class PVNodeGetVariableBase<T> extends SingleOutputPVNode<T> {
     @serializable
     public variableName = '';
 
-    link (context: PureValueNodeLinkContext) {
+    link (context: PureValueNodeLinkContext): void {
         this._varInstance = context.getVar(this.variableName);
     }
 
@@ -95,7 +95,7 @@ export abstract class PVNodeGetVariableBase<T> extends SingleOutputPVNode<T> {
 }
 
 if (EDITOR) {
-    PVNodeGetVariableBase.prototype.getTitle = function getTitle (this: PVNodeGetVariableBase<any>) {
+    PVNodeGetVariableBase.prototype.getTitle = function getTitle (this: PVNodeGetVariableBase<any>): [string, { variableName: string; }] | undefined {
         if (!this.variableName) {
             return undefined;
         }
@@ -123,7 +123,7 @@ export class PVNodeGetVariableFloat extends PVNodeGetVariableBase<number> {
 @poseGraphNodeHide()
 @poseGraphNodeAppearance({
     inline: true,
-    themeColor: '#8471CF',
+    themeColor: '#2A90DC',
 })
 export class PVNodeGetVariableInteger extends PVNodeGetVariableBase<number> {
     constructor () {

@@ -57,7 +57,7 @@ public:
 
     bool initialize(const DeviceInfo &info);
     void destroy();
-    
+
     // aim to ensure waiting for work on gpu done when cpu encodes ahead of gpu certain frame(s).
     virtual void frameSync() = 0;
 
@@ -122,6 +122,12 @@ public:
     void registerOnAcquireCallback(ExecuteMethod &&execute);
 
     virtual void enableAutoBarrier(bool en) { _options.enableBarrierDeduce = en; }
+    virtual SampleCount getMaxSampleCount(Format format, TextureUsage usage, TextureFlags flags) const {
+        std::ignore = format;
+        std::ignore = usage;
+        std::ignore = flags;
+        return SampleCount::X1;
+    };
 
 protected:
     static Device *instance;
@@ -199,12 +205,14 @@ public:
     ~DefaultResource() = default;
 
     Texture *getTexture(TextureType type) const;
+    Buffer *getBuffer() const;
 
 private:
     IntrusivePtr<Texture> _texture2D;
     IntrusivePtr<Texture> _texture2DArray;
     IntrusivePtr<Texture> _textureCube;
     IntrusivePtr<Texture> _texture3D;
+    IntrusivePtr<Buffer> _buffer;
 };
 
 //////////////////////////////////////////////////////////////////////////

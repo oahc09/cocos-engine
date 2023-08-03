@@ -22,10 +22,10 @@
  THE SOFTWARE.
 */
 
-import { EDITOR } from 'internal:constants';
+import { EDITOR_NOT_IN_PREVIEW } from 'internal:constants';
 import { Asset } from '../asset/assets';
 import { ArmatureCache } from './ArmatureCache';
-import { Enum, cclegacy, _decorator } from '../core';
+import { Enum, cclegacy, _decorator, warn } from '../core';
 import { CCFactory } from './CCFactory';
 import { Node } from '../scene-graph';
 
@@ -49,7 +49,7 @@ export class DragonBonesAsset extends Asset {
     @serializable
     protected _dragonBonesJson = '';
 
-    get dragonBonesJson () {
+    get dragonBonesJson (): string {
         return this._dragonBonesJson;
     }
 
@@ -64,14 +64,14 @@ export class DragonBonesAsset extends Asset {
 
     private _armaturesEnum: any = null;
 
-    constructctor () {
+    constructctor (): void {
         this.reset();
     }
     /**
      * @en Create a new node with Dragonbones component.
      * @zh 创建一个附带龙骨组件的 node 节点。
      */
-    createNode (callback: (err: Error | null, node: Node) => void) {
+    createNode (callback: (err: Error | null, node: Node) => void): void {
         const node = new Node(this.name);
         const armatureDisplay = node.addComponent('dragonBones.ArmatureDisplay') as any;
         armatureDisplay.dragonAsset = this;
@@ -82,9 +82,9 @@ export class DragonBonesAsset extends Asset {
      * @en Reset DragonBonesAsset data and state.
      * @zh 重置 DragonBonesAsset 数据和状态。
      */
-    reset () {
+    reset (): void {
         this._clear();
-        if (EDITOR && !cclegacy.GAME_VIEW) {
+        if (EDITOR_NOT_IN_PREVIEW) {
             this._armaturesEnum = null;
         }
     }
@@ -95,7 +95,7 @@ export class DragonBonesAsset extends Asset {
      *                  @zh 全局的 CCFactory 对象。
      * @param atlasUUID @en Atlas uuid. @zh Atlas uuid。
      */
-    init (factory?: CCFactory, atlasUUID?: string) {
+    init (factory?: CCFactory, atlasUUID?: string): string {
         this._factory = factory || CCFactory.getInstance();
 
         if (!this._dragonBonesJsonData && this.dragonBonesJson) {
@@ -115,7 +115,7 @@ export class DragonBonesAsset extends Asset {
             if (dbData) {
                 this._uuid = dbData.name;
             } else {
-                console.warn('dragonbones name is empty');
+                warn('dragonbones name is empty');
             }
         }
 
@@ -152,7 +152,7 @@ export class DragonBonesAsset extends Asset {
     /**
      * @engineInternal Since v3.7.2, this is an engine private function.
      */
-    public getAnimsEnum (armatureName: string) {
+    public getAnimsEnum (armatureName: string): { '<None>': number; } | null {
         this.init();
         const dragonBonesData = this._factory!.getDragonBonesDataByUUID(this._uuid);
         if (dragonBonesData) {
@@ -179,12 +179,12 @@ export class DragonBonesAsset extends Asset {
      * @en Destroy DragonBonesAsset data.
      * @zh 销毁 DragonBonesAsset 资产数据。
      */
-    public destroy () {
+    public destroy (): boolean {
         this._clear();
         return super.destroy();
     }
 
-    protected _clear () {
+    protected _clear (): void {
         if (this._factory) {
             ArmatureCache.sharedCache.resetArmature(this._uuid);
             this._factory.removeDragonBonesDataByUUID(this._uuid, true);

@@ -2,14 +2,15 @@ import { DEBUG } from 'internal:constants';
 import { error, Quat, RealCurve, Vec3, warnID } from '../../core';
 import { assertIsTrue } from '../../core/data/utils/asserts';
 import { Node } from '../../scene-graph/node';
-import { AnimationClip, exoticAnimationTag } from '../animation-clip';
+import { additiveSettingsTag, AnimationClip, exoticAnimationTag } from '../animation-clip';
 import { AuxiliaryCurveEntry } from '../auxiliary-curve-entry';
 import { AuxiliaryCurveHandle, TransformHandle } from '../core/animation-handle';
-import { Pose } from '../core/pose';
+import { calculateDeltaPose, Pose } from '../core/pose';
 import { createEvalSymbol } from '../define';
 import { ExoticTrsAGEvaluation } from '../exotic-animation/exotic-animation';
 import { isTrsPropertyName, normalizedFollowTag, Track, TrackBinding, trackBindingTag, TrackEval } from '../tracks/track';
 import { UntypedTrack } from '../tracks/untyped-track';
+import { AnimationGraphEvaluationContext } from './animation-graph-context';
 
 /**
  * This module contains utilities to marry animation clip with animation graph.
@@ -94,7 +95,7 @@ class PoseBindingBase {
     /**
      * Releases the held transform handle.
      */
-    public destroy () {
+    public destroy (): void {
         this._transformHandle.destroy();
     }
 
@@ -112,7 +113,7 @@ class PosePositionBinding extends PoseBindingBase implements PoseBinding<Vec3> {
         pose.transforms.setPosition(this._transformHandle.index, value);
     }
 
-    public getValue (pose: Pose) {
+    public getValue (pose: Pose): Readonly<Vec3> {
         return pose.transforms.getPosition(this._transformHandle.index, CACHE_VEC3_GET_VALUE) as Readonly<Vec3>;
     }
 }
@@ -125,7 +126,7 @@ class PoseRotationBinding extends PoseBindingBase implements PoseBinding<Quat> {
         pose.transforms.setRotation(this._transformHandle.index, value);
     }
 
-    public getValue (pose: Pose) {
+    public getValue (pose: Pose): Readonly<Quat> {
         return pose.transforms.getRotation(this._transformHandle.index, CACHE_QUAT_GET_VALUE) as Readonly<Quat>;
     }
 }
@@ -139,7 +140,7 @@ class PoseEulerAnglesBinding extends PoseBindingBase implements PoseBinding<Vec3
         pose.transforms.setRotation(this._transformHandle.index, quat);
     }
 
-    public getValue (pose: Pose) {
+    public getValue (pose: Pose): Readonly<Vec3> {
         const q = pose.transforms.getRotation(this._transformHandle.index, CACHE_QUAT_GET_VALUE) as Readonly<Quat>;
         return Quat.toEuler(CACHE_VEC3_GET_VALUE, q) as Readonly<Vec3>;
     }
@@ -155,7 +156,7 @@ class PoseScaleBinding extends PoseBindingBase implements PoseBinding<Vec3> {
         pose.transforms.setScale(this._transformHandle.index, value);
     }
 
-    public getValue (pose: Pose) {
+    public getValue (pose: Pose): Readonly<Vec3> {
         return pose.transforms.getScale(this._transformHandle.index, CACHE_VEC3_GET_VALUE) as Readonly<Vec3>;
     }
 }
@@ -173,7 +174,7 @@ class AuxiliaryCurveBinding implements PoseBinding<number> {
         pose.auxiliaryCurves[this._handle.index] = value;
     }
 
-    public getValue (pose: Pose) {
+    public getValue (pose: Pose): number {
         return pose.auxiliaryCurves[this._handle.index];
     }
 }
@@ -212,11 +213,11 @@ class AGTrackEvaluation<TValue> {
         this._trackSampler = trackEvaluation;
     }
 
-    public destroy () {
+    public destroy (): void {
         this._binding.destroy();
     }
 
-    public evaluate (time: number, pose: Pose) {
+    public evaluate (time: number, pose: Pose): void {
         const { _trackSampler: trackSampler, _binding: binding  } = this;
         const defaultValue = /* binding.getValue && */trackSampler.requiresDefault
             ? binding.getValue(pose) as TValue extends unknown ? unknown : TValue
@@ -229,7 +230,7 @@ class AGTrackEvaluation<TValue> {
     private _trackSampler: TrackEval<TValue>;
 }
 
-function bindTrackAG (animationClip: AnimationClip, track: Track, bindContext: AnimationClipGraphBindingContext) {
+function bindTrackAG (animationClip: AnimationClip, track: Track, bindContext: AnimationClipGraphBindingContext): PoseBinding<unknown> | undefined {
     const trackBinding = track[trackBindingTag];
     const trackTarget = createRuntimeBindingAG(trackBinding, bindContext);
     if (DEBUG && !trackTarget) {
@@ -246,7 +247,7 @@ function bindTrackAG (animationClip: AnimationClip, track: Track, bindContext: A
     return trackTarget ?? undefined;
 }
 
-function createRuntimeBindingAG (track: TrackBinding, bindContext: AnimationClipGraphBindingContext) {
+function createRuntimeBindingAG (track: TrackBinding, bindContext: AnimationClipGraphBindingContext): PoseBinding<unknown> | null | undefined {
     const {
         origin,
     } = bindContext;
@@ -265,7 +266,7 @@ function createRuntimeBindingAG (track: TrackBinding, bindContext: AnimationClip
         }
 
         if (resultTarget instanceof Node && isTrsPropertyName(lastPropertyKey)) {
-            const transformPath = (() => {
+            const transformPath = ((): string | undefined => {
                 const segments = [] as string[];
                 let node: Node | null = resultTarget;
                 for (; node && node !== origin; node = node.parent) {
@@ -302,7 +303,7 @@ class AuxiliaryCurveEvaluation {
      * @param time The time.
      * @param context The evaluation context.
      */
-    public evaluate (time: number, context: AnimationClipGraphEvaluationContext) {
+    public evaluate (time: number, context: AnimationClipGraphEvaluationContext): void {
         const {
             _curve: curve,
             _binding: binding,
@@ -317,7 +318,32 @@ class AuxiliaryCurveEvaluation {
 /**
  * Describes the evaluation of a animation clip in sense of animation graph.
  */
-export class AnimationClipAGEvaluation {
+export interface AnimationClipAGEvaluation {
+    /**
+     * Destroys all the track evaluations and exotic animation evaluation.
+     */
+    destroy(): void;
+
+    /**
+     * Evaluates.
+     * @param time The time.
+     * @param context The evaluation context.
+     */
+    evaluate(time: number, context: AnimationGraphEvaluationContext): Pose;
+}
+
+export function createAnimationAGEvaluation (
+    clip: AnimationClip,
+    context: AnimationClipGraphBindingContext,
+): AnimationClipAGEvaluation {
+    if (clip.isAdditive_experimental) {
+        return new AnimationClipAGEvaluationAdditive(clip, context);
+    } else {
+        return new AnimationClipAGEvaluationRegular(clip, context);
+    }
+}
+
+class AnimationClipAGEvaluationRegular implements AnimationClipAGEvaluation {
     constructor (
         clip: AnimationClip,
         context: AnimationClipGraphBindingContext,
@@ -372,10 +398,7 @@ export class AnimationClipAGEvaluation {
         this._auxiliaryCurveEvaluations = auxiliaryCurveEvaluations;
     }
 
-    /**
-     * Destroys all the track evaluations and exotic animation evaluation.
-     */
-    public destroy () {
+    public destroy (): void {
         this._exoticAnimationEvaluation?.destroy();
 
         const {
@@ -387,19 +410,14 @@ export class AnimationClipAGEvaluation {
         }
     }
 
-    /**
-     * Evaluates.
-     * @param time The time.
-     * @param context The evaluation context.
-     */
-    public evaluate (time: number, context: AnimationClipGraphEvaluationContext) {
+    public evaluate (time: number, context: AnimationGraphEvaluationContext): Pose {
         const {
             _trackEvaluations: trackEvaluations,
             _exoticAnimationEvaluation: exoticAnimationEvaluation,
             _auxiliaryCurveEvaluations: auxiliaryCurveEvaluations,
         } = this;
 
-        const pose = context;
+        const pose = context.pushDefaultedPose();
 
         const nTrackEvaluations = trackEvaluations.length;
         for (let iNodeEvaluation = 0; iNodeEvaluation < nTrackEvaluations; ++iNodeEvaluation) {
@@ -412,8 +430,10 @@ export class AnimationClipAGEvaluation {
 
         const nAuxiliaryCurveEvaluations = auxiliaryCurveEvaluations.length;
         for (let iAuxiliaryCurveEvaluation = 0; iAuxiliaryCurveEvaluation < nAuxiliaryCurveEvaluations; ++iAuxiliaryCurveEvaluation) {
-            auxiliaryCurveEvaluations[iAuxiliaryCurveEvaluation].evaluate(time, context);
+            auxiliaryCurveEvaluations[iAuxiliaryCurveEvaluation].evaluate(time, pose);
         }
+
+        return pose;
     }
 
     private _trackEvaluations: AGTrackEvaluation<any>[] = [];
@@ -421,4 +441,49 @@ export class AnimationClipAGEvaluation {
     private _exoticAnimationEvaluation: ExoticTrsAGEvaluation | undefined;
 
     private _auxiliaryCurveEvaluations: AuxiliaryCurveEvaluation[] = [];
+}
+
+class AnimationClipAGEvaluationAdditive implements AnimationClipAGEvaluation {
+    constructor (
+        clip: AnimationClip,
+        context: AnimationClipGraphBindingContext,
+    ) {
+        this._clipEval = new AnimationClipAGEvaluationRegular(clip, context);
+        const refClip = clip[additiveSettingsTag].refClip;
+        if (refClip && refClip !== clip) {
+            this._refClipEval = new AnimationClipAGEvaluationRegular(refClip, context);
+        }
+    }
+
+    public destroy (): void {
+        this._clipEval.destroy();
+        this._refClipEval?.destroy();
+    }
+
+    /**
+     * Evaluates.
+     * @param time The time.
+     * @param context The evaluation context.
+     */
+    public evaluate (time: number, context: AnimationGraphEvaluationContext): Pose {
+        // Evaluate this clip.
+        const pose = this._clipEval.evaluate(time, context);
+
+        let refPose: Pose;
+        if (this._refClipEval) {
+            const refClipTime = 0.0; // TODO: ref clip may specify a time?
+            refPose = this._refClipEval.evaluate(refClipTime, context);
+        } else {
+            // If the ref clip is not specified,
+            // The effect is as if the ref pose is the 0 time of original clip.
+            refPose = this._clipEval.evaluate(0.0, context);
+        }
+        calculateDeltaPose(pose, refPose);
+        context.popPose();
+
+        return pose;
+    }
+
+    private _clipEval: AnimationClipAGEvaluationRegular;
+    private _refClipEval: AnimationClipAGEvaluationRegular | undefined;
 }

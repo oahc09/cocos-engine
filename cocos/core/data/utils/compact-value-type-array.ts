@@ -24,6 +24,7 @@
 
 import { ccclass, serializable } from 'cc.decorator';
 import { Vec3, Quat, Vec4, Vec2, Mat4 } from '../../math';
+import { error } from '../../platform';
 
 export enum StorageUnit {
     Uint8, Uint16, Uint32,
@@ -44,11 +45,14 @@ const elementTypeBits = 3;
 
 export type StorageUnitElementType = number;
 
-export function combineStorageUnitElementType (unit: StorageUnit, elementType: ElementType) {
+export function combineStorageUnitElementType (unit: StorageUnit, elementType: ElementType): number {
     return (elementType << elementTypeBits) + unit;
 }
 
-export function extractStorageUnitElementType (combined: StorageUnitElementType) {
+export function extractStorageUnitElementType (combined: StorageUnitElementType): {
+    storageUnit: number;
+    elementType: number;
+} {
     return {
         storageUnit: ~(-1 << elementTypeBits) & combined,
         elementType: combined >> elementTypeBits,
@@ -107,9 +111,9 @@ export class CompactValueTypeArray {
      */
     public static compress (values: any[], elementType: ElementType, unit: StorageUnit, arrayBuffer: ArrayBuffer, byteOffset: number, presumedByteOffset: number): CompactValueTypeArray {
         const elementTraits = getElementTraits(elementType);
-        const storageConstructor = getStorageConstructor(unit);
+        const StorageConstructor = getStorageConstructor(unit);
         const unitCount = elementTraits.requiredUnits * values.length;
-        const storage = new storageConstructor(arrayBuffer, byteOffset, unitCount);
+        const storage = new StorageConstructor(arrayBuffer, byteOffset, unitCount);
         for (let i = 0; i < values.length; ++i) {
             elementTraits.compress(storage, i, values[i]);
         }
@@ -129,8 +133,8 @@ export class CompactValueTypeArray {
     public decompress<T> (arrayBuffer: ArrayBuffer): T[] {
         const { storageUnit, elementType } = extractStorageUnitElementType(this._unitElement);
         const elementTraits = getElementTraits(elementType);
-        const storageConstructor = getStorageConstructor(storageUnit);
-        const storage = new storageConstructor(arrayBuffer, this._byteOffset, this._unitCount);
+        const StorageConstructor = getStorageConstructor(storageUnit);
+        const storage = new StorageConstructor(arrayBuffer, this._byteOffset, this._unitCount);
         const result = new Array<T>(this._length);
         for (let i = 0; i < this._length; ++i) {
             result[i] = elementTraits.decompress(storage, i);
@@ -139,11 +143,11 @@ export class CompactValueTypeArray {
     }
 }
 
-function getElementTraits (elementType: ElementType) {
+function getElementTraits (elementType: ElementType): CompactTraits {
     return BuiltinElementTypeTraits[elementType];
 }
 
-function getStorageConstructor (unit: StorageUnit) {
+function getStorageConstructor (unit: StorageUnit): TypedArrayConstructor {
     switch (unit) {
     case StorageUnit.Uint8:
         return Uint8Array;
@@ -161,6 +165,9 @@ function getStorageConstructor (unit: StorageUnit) {
         return Float32Array;
     case StorageUnit.Float64:
         return Float64Array;
+    default:
+        error('Unknown uint type. Return Uint8Array.');
+        return Uint8Array;
     }
 }
 

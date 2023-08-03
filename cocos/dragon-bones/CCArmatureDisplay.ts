@@ -24,7 +24,7 @@
 */
 
 import { Armature, DisplayData, IEventDispatcher, Slot } from '@cocos/dragonbones-js';
-import { Vec3, EventTarget, _decorator } from '../core';
+import { Vec3, EventTarget, _decorator, warn } from '../core';
 // eslint-disable-next-line import/named
 import { CCSlot } from './CCSlot';
 import { ArmatureDisplay } from './ArmatureDisplay';
@@ -42,7 +42,7 @@ export class CCArmatureDisplay extends DisplayData implements IEventDispatcher {
      * @en Return this.
      * @zh 返回自身。
      */
-    get node () { return this; }
+    get node (): CCArmatureDisplay { return this; }
     /**
      * @deprecated This variable will be removed in the future.
      */
@@ -77,7 +77,7 @@ export class CCArmatureDisplay extends DisplayData implements IEventDispatcher {
      * @zh 方法未实现总返回 false。
      */
     hasEvent (type: string): boolean {
-        console.warn('Method not implemented.');
+        warn('Method not implemented.');
         return false;
     }
     /**
@@ -85,20 +85,20 @@ export class CCArmatureDisplay extends DisplayData implements IEventDispatcher {
      * @zh 方法未实现。
      */
     addEvent (type: string, listener: any, thisObject: any): void {
-        console.warn('Method not implemented.');
+        warn('Method not implemented.');
     }
     /**
      * @en The funciton has no realization.
      * @zh 方法未实现。
      */
     removeEvent (type: string, listener: any, thisObject: any): void {
-        console.warn('Method not implemented.');
+        warn('Method not implemented.');
     }
     /**
      * @en Sets EventTarget object.
      * @zh 设置事件目标。
      */
-    setEventTarget (eventTarget: EventTarget) {
+    setEventTarget (eventTarget: EventTarget): void {
         this._eventTarget = eventTarget;
     }
     /**
@@ -122,7 +122,7 @@ export class CCArmatureDisplay extends DisplayData implements IEventDispatcher {
      * @en Convert pos to parent slot coordination.
      * @zh 将坐标转换到父插槽的坐标系下。
      */
-    convertToRootSpace (pos: Vec3) {
+    convertToRootSpace (pos: Vec3): Vec3 {
         const slot = this._armature!._parent as CCSlot;
         if (!slot) {
             return pos;
@@ -139,7 +139,7 @@ export class CCArmatureDisplay extends DisplayData implements IEventDispatcher {
      * @en Convert pos to world coordination.
      * @zh 将坐标转换到世界坐标系下。
      */
-    convertToWorldSpace (point: Vec3) {
+    convertToWorldSpace (point: Vec3): Vec3 | undefined {
         const newPos = this.convertToRootSpace(point);
         const ccNode = this.getRootNode();
         return ccNode?._uiProps.uiTransformComp?.convertToWorldSpaceAR(newPos);
@@ -148,7 +148,7 @@ export class CCArmatureDisplay extends DisplayData implements IEventDispatcher {
      * @en Get the node of root ArmatureDisplay component in.
      * @zh 获取顶层 ArmatureDisplay 组件所在的 node。
      */
-    getRootNode () {
+    getRootNode (): Node | null {
         const rootDisplay = this.getRootDisplay();
         return rootDisplay && rootDisplay._ccNode;
     }
@@ -158,21 +158,21 @@ export class CCArmatureDisplay extends DisplayData implements IEventDispatcher {
      * @zh 初始时设置骨架。
      */
     // dragonbones api
-    dbInit (armature: Armature | null) {
+    dbInit (armature: Armature | null): void {
         this._armature = armature;
     }
     /**
      * @en Clears Armature object.
      * @zh 清除骨架对象。
      */
-    dbClear () {
+    dbClear (): void {
         this._armature = null;
     }
     /**
      * @en Trigger ArmatureDisplay component to update render data.
      * @zh 触发 ArmatureDisplay 组件更新渲染数据。
      */
-    dbUpdate () {
+    dbUpdate (): void {
         if (this._ccComponent) {
             this._ccComponent.markForUpdateRenderData();
         }
@@ -181,23 +181,23 @@ export class CCArmatureDisplay extends DisplayData implements IEventDispatcher {
      * @engineInternal Since v3.7.2.
      * @deprecated This variable will be removed in the future.
      */
-    advanceTimeBySelf (on: boolean | number) {
+    advanceTimeBySelf (on: boolean | number): void {
         this.shouldAdvanced = !!on;
     }
 
-    hasDBEventListener (type) {
+    hasDBEventListener (type): boolean {
         return this._eventTarget.hasEventListener(type);
     }
 
-    addDBEventListener (type: string, listener, target) {
+    addDBEventListener (type: string, listener, target): void {
         this._eventTarget.on(type, listener, target);
     }
 
-    removeDBEventListener (type: string, listener, target) {
+    removeDBEventListener (type: string, listener, target): void {
         this._eventTarget.off(type, listener, target);
     }
 
-    dispatchDBEvent (type: string, eventObject) {
+    dispatchDBEvent (type: string, eventObject): void {
         this._eventTarget.emit(type, eventObject);
     }
 }

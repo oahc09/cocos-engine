@@ -322,7 +322,7 @@ bool Root::setRenderPipeline(pipeline::RenderPipeline *rppl /* = nullptr*/) {
         }
     } else {
         CC_ASSERT(!_pipelineRuntime);
-        _pipelineRuntime.reset(render::Factory::createPipeline());
+        _pipelineRuntime.reset(render::Factory::createPipeline(false));
         if (!_pipelineRuntime->activate(_mainRenderWindow->getSwapchain())) {
             _pipelineRuntime->destroy();
             _pipelineRuntime.reset();
@@ -561,7 +561,9 @@ void Root::doXRFrameMove(int32_t totalFrames) {
     if (_xr->isRenderAllowable()) {
         bool isSceneUpdated = false;
         int viewCount = _xr->getXRConfig(xr::XRConfigKey::VIEW_COUNT).getInt();
-        bool forceUpdateSceneTwice = _xr->getXRConfig(xr::XRConfigKey::EYE_RENDER_JS_CALLBACK).getBool();
+        // compatible native pipeline
+        static bool isNativePipeline = dynamic_cast<cc::render::NativePipeline*>(_pipelineRuntime.get()) != nullptr;
+        bool forceUpdateSceneTwice = isNativePipeline ? true : _xr->getXRConfig(xr::XRConfigKey::EYE_RENDER_JS_CALLBACK).getBool();
         for (int xrEye = 0; xrEye < viewCount; xrEye++) {
             _xr->beginRenderEyeFrame(xrEye);
 

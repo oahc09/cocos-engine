@@ -31,11 +31,11 @@ import type { ClipStatus } from '../state-machine/state-machine-eval';
 import type { ReadonlyClipOverrideMap } from '../clip-overriding';
 import { Motion, MotionEval, MotionPort } from './motion';
 import { wrap } from '../../wrap';
-import { calculateDeltaPose, Pose } from '../../core/pose';
+import { Pose } from '../../core/pose';
 import { AnimationGraphEvaluationContext, AnimationGraphBindingContext } from '../animation-graph-context';
 import { WrappedInfo } from '../../types';
 import { WrapModeMask } from '../../../core/geometry';
-import { AnimationClipAGEvaluation } from '../animation-graph-animation-clip-binding';
+import { AnimationClipAGEvaluation, createAnimationAGEvaluation } from '../animation-graph-animation-clip-binding';
 
 const { ccclass, type } = _decorator;
 
@@ -50,7 +50,7 @@ export class ClipMotion extends Motion {
         context: AnimationGraphBindingContext,
         overrides: ReadonlyClipOverrideMap | null,
         ignoreEmbeddedPlayers: boolean,
-    ) {
+    ): ClipMotionEval | null {
         if (!this.clip) {
             return null;
         }
@@ -61,7 +61,7 @@ export class ClipMotion extends Motion {
         return clipMotionEval;
     }
 
-    public clone () {
+    public clone (): ClipMotion {
         const that = new ClipMotion();
         that.clip = this.clip;
         that[editorExtrasTag] = cloneAnimationGraphEditorExtrasFrom(this);
@@ -91,7 +91,7 @@ class ClipMotionEval implements MotionEval {
         this._setClip(overriding, context);
     }
 
-    get duration () {
+    get duration (): number {
         return this._duration;
     }
 
@@ -99,10 +99,10 @@ class ClipMotionEval implements MotionEval {
         return new ClipMotionPort(this);
     }
 
-    public getClipStatuses (baseWeight: number): Iterator<ClipStatus, any, undefined> {
+    public getClipStatuses (baseWeight: number): Iterator<ClipStatus> {
         let got = false;
         return {
-            next: () => {
+            next: (): IteratorResult<ClipStatus, any> => {
                 if (got) {
                     return {
                         done: true,
@@ -112,23 +112,24 @@ class ClipMotionEval implements MotionEval {
                     got = true;
                     return {
                         done: false,
+                        // TODO: `__DEBUG_ID__` does not exist on ClipStatus, please fix it @Leslie Leigh
+                        // tracking issue: https://github.com/cocos/cocos-engine/issues/15307
                         value: {
                             __DEBUG_ID__: this.__DEBUG__ID__,
                             clip: this._clip,
                             weight: baseWeight,
-                        },
+                        } as any,
                     };
                 }
             },
         };
     }
 
-    public [evaluatePortTag] (progress: number, context: AnimationGraphEvaluationContext) {
+    public [evaluatePortTag] (progress: number, context: AnimationGraphEvaluationContext): Pose {
         const {
             _duration: duration,
             _clip: { duration: clipDuration },
             _clipEval: clipEval,
-            _baseClipEval: baseClipEval,
         } = this;
 
         const elapsedTime = duration * progress;
@@ -148,17 +149,10 @@ class ClipMotionEval implements MotionEval {
         // Transform the motion space time(scaled by clip speed) into clip space time.
         const clipTime = wrapInfo.ratio * clipDuration;
 
-        // Evaluate this clip.
-        const pose = context.pushDefaultedPose();
-        clipEval.evaluate(clipTime, pose);
+        const pose = clipEval.evaluate(clipTime, context);
 
-        if (baseClipEval) {
-            const basePose = context.pushDefaultedPose();
-            const baseEvalTime = 0.0; // TODO: base clip may specify a time?
-            baseClipEval.evaluate(baseEvalTime, basePose);
-            calculateDeltaPose(pose, basePose);
-            context.popPose();
-        }
+        // Sample frame events.
+        this._frameEventEval?.sample(wrapInfo.ratio, wrapInfo.direction, wrapInfo.iterations);
 
         // Evaluate embedded players.
         this._clipEmbeddedPlayerEval?.evaluate(clipTime, Math.trunc(wrapInfo.iterations));
@@ -174,6 +168,10 @@ class ClipMotionEval implements MotionEval {
         }
     }
 
+    public reenter (): void {
+        this._frameEventEval?.reset();
+    }
+
     /**
      * Preserved here for clip overriding.
      */
@@ -184,13 +182,14 @@ class ClipMotionEval implements MotionEval {
     private declare _clip: AnimationClip;
     private declare _clipEval: AnimationClipAGEvaluation;
     private _clipEmbeddedPlayerEval: ReturnType<AnimationClip['createEmbeddedPlayerEvaluator']> | null = null;
+    private _frameEventEval: ReturnType<AnimationClip['createEventEvaluator']> | null = null;
     private _wrapInfo = new WrappedInfo();
-    private _baseClipEval: AnimationClipAGEvaluation | null = null;
     private _duration = 0.0;
     private _ignoreEmbeddedPlayers: boolean;
 
-    private _setClip (clip: AnimationClip, context: AnimationGraphBindingContext) {
+    private _setClip (clip: AnimationClip, context: AnimationGraphBindingContext): void {
         this._clipEval?.destroy();
+        this._frameEventEval = null;
         if (this._clipEmbeddedPlayerEval) {
             this._clipEmbeddedPlayerEval.destroy();
             this._clipEmbeddedPlayerEval = null;
@@ -200,15 +199,10 @@ class ClipMotionEval implements MotionEval {
         this._duration = clip.speed === 0.0
             ? 0.0
             : clip.duration / clip.speed; // TODO, a test for `clip.speed === 0` is required!
-        const clipEval = new AnimationClipAGEvaluation(clip, context);
-        this._clipEval = clipEval;
+        this._clipEval = createAnimationAGEvaluation(clip, context);
+        this._frameEventEval = clip.createEventEvaluator(context.origin);
         if (!this._ignoreEmbeddedPlayers && clip.containsAnyEmbeddedPlayer()) {
             this._clipEmbeddedPlayerEval = clip.createEmbeddedPlayerEvaluator(context.origin);
-        }
-        if (context.additive) {
-            const additiveSettings = clip[additiveSettingsTag];
-            const baseClip = additiveSettings.base ?? clip;
-            this._baseClipEval = new AnimationClipAGEvaluation(baseClip, context);
         }
     }
 }
@@ -220,6 +214,10 @@ class ClipMotionPort implements MotionPort {
 
     public evaluate (progress: number, context: AnimationGraphEvaluationContext): Pose {
         return this._eval[evaluatePortTag](progress, context);
+    }
+
+    public reenter (): void {
+        this._eval.reenter();
     }
 
     private _eval: ClipMotionEval;

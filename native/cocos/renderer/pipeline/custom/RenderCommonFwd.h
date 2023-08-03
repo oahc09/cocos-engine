@@ -62,13 +62,8 @@ enum class SceneFlags : uint32_t;
 enum class LightingMode : uint32_t;
 enum class AttachmentType;
 enum class AccessType;
-
-struct RasterView;
-
 enum class ClearValueType;
 
-struct ClearValue;
-struct ComputeView;
 struct LightInfo;
 
 enum class DescriptorTypeOrder;
@@ -93,18 +88,8 @@ struct PipelineStatistics;
 namespace ccstd {
 
 template <>
-struct hash<cc::render::RasterView> {
-    hash_t operator()(const cc::render::RasterView& val) const noexcept;
-};
-
-template <>
-struct hash<cc::render::ClearValue> {
-    hash_t operator()(const cc::render::ClearValue& val) const noexcept;
-};
-
-template <>
-struct hash<cc::render::ComputeView> {
-    hash_t operator()(const cc::render::ComputeView& val) const noexcept;
+struct hash<cc::render::ResolvePair> {
+    hash_t operator()(const cc::render::ResolvePair& val) const noexcept;
 };
 
 } // namespace ccstd

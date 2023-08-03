@@ -23,12 +23,15 @@
 */
 
 import b2 from '@cocos/box2d';
-import { b2Contact } from '@cocos/box2d/src/box2d';
 import { Vec2 } from '../../core';
 import { PHYSICS_2D_PTM_RATIO } from '../framework/physics-types';
 import { Collider2D, Contact2DType, PhysicsSystem2D } from '../framework';
 import { b2Shape2D } from './shapes/shape-2d';
 import { IPhysics2DContact, IPhysics2DImpulse, IPhysics2DManifoldPoint, IPhysics2DWorldManifold } from '../spec/i-physics-contact';
+
+export type b2ContactExtends = b2.Contact & {
+    m_userData: any
+}
 
 const pools: PhysicsContact[] = [];
 
@@ -64,29 +67,40 @@ const impulse: IPhysics2DImpulse = {
 };
 
 export class PhysicsContact implements IPhysics2DContact {
-    public constructor (b2contact: b2Contact) {
-        this.ref = 1;
-        this.init(b2contact);
+    static get (b2contact: b2ContactExtends): PhysicsContact {
+        let c = pools.pop();
+
+        if (!c) {
+            c = new PhysicsContact();
+        }
+
+        c.init(b2contact);
+        return c;
     }
 
-    public ref = 0;
-    public status = Contact2DType.None;
+    static put (b2contact: b2ContactExtends): void {
+        const c: PhysicsContact = b2contact.m_userData as PhysicsContact;
+        if (!c) return;
 
-    public colliderA: Collider2D | null = null;
-    public colliderB: Collider2D | null = null;
+        pools.push(c);
+        c.reset();
+    }
 
-    public disabled = false;
-    public disabledOnce = false;
+    colliderA: Collider2D | null = null;
+    colliderB: Collider2D | null = null;
+
+    disabled = false;
+    disabledOnce = false;
 
     private _impulse: b2.ContactImpulse | null = null;
     private _inverted = false;
-    private _b2contact: b2Contact | null = null;
+    private _b2contact: b2ContactExtends | null = null;
 
-    _setImpulse (impulse: b2.ContactImpulse | null) {
+    _setImpulse (impulse: b2.ContactImpulse | null): void {
         this._impulse = impulse;
     }
 
-    private init (b2contact) {
+    init (b2contact: b2ContactExtends): void {
         this.colliderA = (b2contact.m_fixtureA.m_userData as b2Shape2D).collider;
         this.colliderB = (b2contact.m_fixtureB.m_userData as b2Shape2D).collider;
         this.disabled = false;
@@ -96,9 +110,10 @@ export class PhysicsContact implements IPhysics2DContact {
         this._inverted = false;
 
         this._b2contact = b2contact;
+        b2contact.m_userData = this;
     }
 
-    reset () {
+    reset (): void {
         this.setTangentSpeed(0);
         this.resetFriction();
         this.resetRestitution();
@@ -107,10 +122,12 @@ export class PhysicsContact implements IPhysics2DContact {
         this.colliderB = null;
         this.disabled = false;
         this._impulse = null;
+
+        this._b2contact!.m_userData = null;
         this._b2contact = null;
     }
 
-    getWorldManifold () {
+    getWorldManifold (): IPhysics2DWorldManifold {
         const points = worldmanifold.points;
         const separations = worldmanifold.separations;
         const normal = worldmanifold.normal;
@@ -142,7 +159,7 @@ export class PhysicsContact implements IPhysics2DContact {
         return worldmanifold;
     }
 
-    getManifold () {
+    getManifold (): { type: number; localPoint: Vec2; localNormal: Vec2; points: ManifoldPoint[]; } {
         const points = manifold.points;
         const localNormal = manifold.localNormal;
         const localPoint = manifold.localPoint;
@@ -176,7 +193,7 @@ export class PhysicsContact implements IPhysics2DContact {
         return manifold;
     }
 
-    getImpulse () {
+    getImpulse (): IPhysics2DImpulse | null {
         const b2impulse = this._impulse;
         if (!b2impulse) return null;
 
@@ -193,43 +210,86 @@ export class PhysicsContact implements IPhysics2DContact {
         return impulse;
     }
 
-    setEnabled (value) {
+    emit (contactType: string): void {
+        let func = '';
+        switch (contactType) {
+        case Contact2DType.BEGIN_CONTACT:
+            func = 'onBeginContact';
+            break;
+        case Contact2DType.END_CONTACT:
+            func = 'onEndContact';
+            break;
+        case Contact2DType.PRE_SOLVE:
+            func = 'onPreSolve';
+            break;
+        case Contact2DType.POST_SOLVE:
+            func = 'onPostSolve';
+            break;
+        default:
+            break;
+        }
+
+        const colliderA = this.colliderA;
+        const colliderB = this.colliderB;
+
+        const bodyA = colliderA!.body;
+        const bodyB = colliderB!.body;
+
+        if (bodyA!.enabledContactListener) {
+            colliderA?.emit(contactType, colliderA, colliderB, this);
+        }
+
+        if (bodyB!.enabledContactListener) {
+            colliderB?.emit(contactType, colliderB, colliderA, this);
+        }
+
+        if (bodyA!.enabledContactListener || bodyB!.enabledContactListener) {
+            PhysicsSystem2D.instance.emit(contactType, colliderA, colliderB, this);
+        }
+
+        if (this.disabled || this.disabledOnce) {
+            this.setEnabled(false);
+            this.disabledOnce = false;
+        }
+    }
+
+    setEnabled (value): void {
         this._b2contact!.SetEnabled(value);
     }
 
-    isTouching () {
+    isTouching (): boolean {
         return this._b2contact!.IsTouching();
     }
 
-    setTangentSpeed (value) {
+    setTangentSpeed (value): void {
         this._b2contact!.SetTangentSpeed(value);
     }
 
-    getTangentSpeed () {
+    getTangentSpeed (): number {
         return this._b2contact!.GetTangentSpeed();
     }
 
-    setFriction (value) {
+    setFriction (value): void {
         this._b2contact!.SetFriction(value);
     }
 
-    getFriction () {
+    getFriction (): number {
         return this._b2contact!.GetFriction();
     }
 
-    resetFriction () {
+    resetFriction (): void {
         return this._b2contact!.ResetFriction();
     }
 
-    setRestitution (value) {
+    setRestitution (value): void {
         this._b2contact!.SetRestitution(value);
     }
 
-    getRestitution () {
+    getRestitution (): number {
         return this._b2contact!.GetRestitution();
     }
 
-    resetRestitution () {
+    resetRestitution (): void {
         return this._b2contact!.ResetRestitution();
     }
 }

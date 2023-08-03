@@ -32,7 +32,7 @@
  * returns the complement of array's length if no element is greater than the element to be searched or the array is empty.
  * @engineInternal
  */
-export function binarySearch (array: number[], value: number) {
+export function binarySearch (array: number[], value: number): number {
     return binarySearchEpsilon(array, value, 0);
 }
 
@@ -46,7 +46,7 @@ export function binarySearch (array: number[], value: number) {
  * returns the complement of array's length if no element is greater than the element to be searched or the array is empty.
  * @engineInternal
  */
-export function binarySearchEpsilon (array: Readonly<ArrayLike<number>>, value: number, EPSILON = 1e-6) {
+export function binarySearchEpsilon (array: Readonly<ArrayLike<number>>, value: number, EPSILON = 1e-6): number {
     let low = 0;
     let high = array.length - 1;
     let middle = high >>> 1;
@@ -67,13 +67,13 @@ export function binarySearchEpsilon (array: Readonly<ArrayLike<number>>, value: 
  * Searches the **ascending sorted** array for an element and returns the index of that element.
  * @param array The array to search in.
  * @param value The value to search.
- * @param lessThan Comparison function object which returns ​true if the first argument is less than the second.
+ * @param lessThan Comparison function object which returns true if the first argument is less than the second.
  * @returns The index of the searched element in the sorted array, if found;
  * otherwise, returns the complement of the index of the next element greater than the searching element or,
  * returns the complement of array's length if no element is greater than the searching element or the array is empty.
  * @engineInternal
  */
-export function binarySearchBy<T, U> (array: T[], value: U, lessThan: (lhs: T, rhs: U) => number) {
+export function binarySearchBy<T, U> (array: T[], value: U, lessThan: (lhs: T, rhs: U) => number): number {
     let low = 0;
     let high = array.length - 1;
     let middle = high >>> 1;

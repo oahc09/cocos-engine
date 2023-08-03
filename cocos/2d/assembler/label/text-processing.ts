@@ -21,11 +21,11 @@
  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  THE SOFTWARE.
 */
-import { JSB } from 'internal:constants';
+import { ANDROID, JSB } from 'internal:constants';
 import { Texture2D } from '../../../asset/assets';
 import { WrapMode } from '../../../asset/assets/asset-enum';
 import { cclegacy, Color, Pool, Rect, Vec2 } from '../../../core';
-import { logID } from '../../../core/platform';
+import { log, logID, warn } from '../../../core/platform';
 import { SpriteFrame } from '../../assets';
 import { FontLetterDefinition } from '../../assets/bitmap-font';
 import { HorizontalTextAlignment, Overflow, VerticalTextAlignment } from '../../components/label';
@@ -43,6 +43,7 @@ const Alignment = [
 const MAX_SIZE = 2048;
 const _BASELINE_OFFSET = getBaselineOffset();
 const _invisibleAlpha = (1 / 255).toFixed(3);
+const MAX_CALCULATION_NUM = 3;
 
 export interface IRenderData {
     x: number;
@@ -52,15 +53,6 @@ export interface IRenderData {
     v: number;
     color: Color;
 }
-
-const _dataPool = new Pool(() => ({
-    x: 0,
-    y: 0,
-    z: 0,
-    u: 0,
-    v: 0,
-    color: Color.WHITE.clone(),
-}), 128);
 
 class LetterInfo {
     public char = '';
@@ -80,17 +72,41 @@ export class TextProcessing {
         this._context = this._canvasData.context;
     }
 
-    public destroy () {
+    public destroy (): void {
         CanvasPool.getInstance().put(this._canvasData!);
         this._lettersInfo.length = 0;
     }
 
     public processingString (isBmFont: boolean, style: TextStyle, layout: TextLayout,
-        outputLayoutData: TextOutputLayoutData, inputString: string, out?: string[]) {
+        outputLayoutData: TextOutputLayoutData, inputString: string, out?: string[]): void {
         if (!isBmFont) {
+            let loopTime = 0;
+            this._fontScale = this._getStyleFontScale(style.fontSize, style.fontScale);
             this._updatePaddingRect(style, outputLayoutData);
             this._calculateLabelFont(style, layout, outputLayoutData, inputString);
+            // check & limit canvas size
+            while ((outputLayoutData.canvasSize.width > MAX_SIZE || outputLayoutData.canvasSize.height > MAX_SIZE)
+                && (loopTime <= MAX_CALCULATION_NUM)) {
+                loopTime++;
+                if (loopTime > MAX_CALCULATION_NUM) {
+                    this._fontScale = 1;
+                } else {
+                    const maxValue = Math.max(outputLayoutData.canvasSize.width, outputLayoutData.canvasSize.height); // Current Canvas Size max dimension
+                    const canvasScaleToMaxSizeRatio = MAX_SIZE / maxValue;
+                    this._fontScale *=  canvasScaleToMaxSizeRatio;
+                    this._fontScale = Math.max(1, this._fontScale);
+                }
+
+                this._updatePaddingRect(style, outputLayoutData);
+                this._calculateLabelFont(style, layout, outputLayoutData, inputString);
+            }
         } else {
+            if (!style.fntConfig) { // for char
+                this._fontScale = this._getStyleFontScale(style.originFontSize, style.fontScale);
+            } else {
+                this._fontScale = 1;
+            }
+            shareLabelInfo.fontScale = this._fontScale;
             this._setupBMFontOverflowMetrics(layout, outputLayoutData);
             this._updateFontScale(style);
             this._computeHorizontalKerningForText(style, layout, inputString);
@@ -102,7 +118,7 @@ export class TextProcessing {
     }
 
     public generateRenderInfo (isBmFont: boolean, style: TextStyle, layout: TextLayout, outputLayoutData: TextOutputLayoutData,
-        outputRenderData: TextOutputRenderData, inputString: string, callback: AnyFunction) {
+        outputRenderData: TextOutputRenderData, inputString: string, callback: AnyFunction): void {
         if (!isBmFont) {
             this._updateLabelDimensions(style, layout, outputLayoutData);
             this._updateTexture(style, layout, outputLayoutData, outputRenderData);
@@ -113,7 +129,7 @@ export class TextProcessing {
         }
     }
 
-    public setCanvasUsed (canvas: HTMLCanvasElement, content: CanvasRenderingContext2D | null) {
+    public setCanvasUsed (canvas: HTMLCanvasElement, content: CanvasRenderingContext2D | null): void {
         this._canvas = canvas;
         this._context = content;
     }
@@ -129,13 +145,30 @@ export class TextProcessing {
     private _lettersInfo: LetterInfo[] = [];
     private _tmpRect = new Rect();
 
+    private _maxFontSize = 100;
+    private _fontScale = 1;
+
+    private _getStyleFontScale (fontSize: number, fontScale: number): number {
+        let scale = fontScale;
+        if (scale * fontSize > this._maxFontSize && fontSize < this._maxFontSize) { // Font size limit
+            scale = this._maxFontSize / fontSize;
+        }
+        if (scale < 1) { scale = 1; }
+        return scale;
+    }
+
     private _calculateLabelFont (style: TextStyle, layout: TextLayout,
-        outputLayoutData: TextOutputLayoutData, inputString: string) {
+        outputLayoutData: TextOutputLayoutData, inputString: string): void {
         if (!this._context) {
             return;
         }
 
-        style.actualFontSize = style.fontSize;
+        style.actualFontSize = style.fontSize * this._fontScale;
+        if (ANDROID) {
+            // Android restriction only accepts integer font sizes
+            style.actualFontSize = Math.floor(style.actualFontSize);
+            this._fontScale = style.actualFontSize / style.fontSize;
+        }
         const paragraphedStrings = inputString.split('\n');
 
         const _splitStrings = outputLayoutData.parsedString = paragraphedStrings;
@@ -150,23 +183,28 @@ export class TextProcessing {
                 const paraLength = safeMeasureText(this._context, paragraphedStrings[i], _fontDesc);
                 canvasSizeX = canvasSizeX > paraLength ? canvasSizeX : paraLength;
             }
-            canvasSizeY = (_splitStrings.length + BASELINE_RATIO) * this._getLineHeight(layout.lineHeight, style.actualFontSize, style.fontSize);
-            const rawWidth = parseFloat(canvasSizeX.toFixed(2));
-            const rawHeight = parseFloat(canvasSizeY.toFixed(2));
+            canvasSizeY = (_splitStrings.length + BASELINE_RATIO)
+            * this._getLineHeight(layout.lineHeight, style.actualFontSize, style.fontSize);
+            const rawWidth = canvasSizeX;
+            const rawHeight = canvasSizeY;
 
-            outputLayoutData.canvasSize.width = rawWidth + outputLayoutData.canvasPadding.width;
-            outputLayoutData.canvasSize.height = rawHeight + outputLayoutData.canvasPadding.height;
-            outputLayoutData.nodeContentSize.width = rawWidth + outputLayoutData.contentSizeExtend.width;
-            outputLayoutData.nodeContentSize.height = rawHeight + outputLayoutData.contentSizeExtend.height;
+            outputLayoutData.canvasSize.width = rawWidth + outputLayoutData.canvasPadding.width * this._fontScale;
+            outputLayoutData.canvasSize.height = rawHeight + outputLayoutData.canvasPadding.height * this._fontScale;
+            outputLayoutData.nodeContentSize.width = (rawWidth + outputLayoutData.contentSizeExtend.width * this._fontScale) / this._fontScale;
+            outputLayoutData.nodeContentSize.height = (rawHeight + outputLayoutData.contentSizeExtend.height * this._fontScale) / this._fontScale;
             break;
         }
         case Overflow.SHRINK: {
             this._calculateShrinkFont(paragraphedStrings, style, layout, outputLayoutData);
             this._calculateWrapText(paragraphedStrings, style, layout, outputLayoutData);
+            outputLayoutData.canvasSize.width  = outputLayoutData.nodeContentSize.width * this._fontScale;
+            outputLayoutData.canvasSize.height = outputLayoutData.nodeContentSize.height * this._fontScale;
             break;
         }
         case Overflow.CLAMP: {
             this._calculateWrapText(paragraphedStrings, style, layout, outputLayoutData);
+            outputLayoutData.canvasSize.width  = outputLayoutData.nodeContentSize.width * this._fontScale;
+            outputLayoutData.canvasSize.height = outputLayoutData.nodeContentSize.height * this._fontScale;
             break;
         }
         case Overflow.RESIZE_HEIGHT: {
@@ -174,9 +212,10 @@ export class TextProcessing {
             const rawHeight = (outputLayoutData.parsedString.length + BASELINE_RATIO)
             * this._getLineHeight(layout.lineHeight, style.actualFontSize, style.fontSize);
 
-            outputLayoutData.canvasSize.height = rawHeight + outputLayoutData.canvasPadding.height;
+            outputLayoutData.canvasSize.width  = outputLayoutData.nodeContentSize.width * this._fontScale;
+            outputLayoutData.canvasSize.height = (rawHeight + outputLayoutData.canvasPadding.height * this._fontScale);
             // set node height
-            outputLayoutData.nodeContentSize.height = rawHeight + outputLayoutData.contentSizeExtend.height;
+            outputLayoutData.nodeContentSize.height = (rawHeight + outputLayoutData.contentSizeExtend.height * this._fontScale) / this._fontScale;
             break;
         }
         default: {
@@ -186,7 +225,7 @@ export class TextProcessing {
     }
 
     // can cache
-    private _getFontDesc (fontSize: number, fontFamily: string, isBold: boolean, isItalic: boolean) {
+    private _getFontDesc (fontSize: number, fontFamily: string, isBold: boolean, isItalic: boolean): string {
         let fontDesc = `${fontSize.toString()}px `;
         fontDesc += fontFamily;
         if (isBold) {
@@ -201,7 +240,7 @@ export class TextProcessing {
     }
 
     // can cache
-    private _getLineHeight (lineHeight: number, fontSize: number, drawFontsize: number) {
+    private _getLineHeight (lineHeight: number, fontSize: number, drawFontsize: number): number {
         let nodeSpacingY = lineHeight;
         if (nodeSpacingY === 0) {
             nodeSpacingY = fontSize;
@@ -209,10 +248,10 @@ export class TextProcessing {
             nodeSpacingY = nodeSpacingY * fontSize / drawFontsize;
         }
 
-        return nodeSpacingY | 0;
+        return nodeSpacingY;
     }
 
-    private _calculateShrinkFont (paragraphedStrings: string[], style: TextStyle, layout: TextLayout, outputLayoutData: TextOutputLayoutData) {
+    private _calculateShrinkFont (paragraphedStrings: string[], style: TextStyle, layout: TextLayout, outputLayoutData: TextOutputLayoutData): void {
         if (!this._context) return;
         let _fontDesc = this._getFontDesc(style.actualFontSize, style.fontFamily, style.isBold, style.isItalic);
         this._context.font = _fontDesc;
@@ -224,13 +263,13 @@ export class TextProcessing {
         let _fontSize = style.actualFontSize;
 
         if (layout.wrapping) {
-            const canvasWidthNoMargin = outputLayoutData.nodeContentSize.width;
-            const canvasHeightNoMargin = outputLayoutData.nodeContentSize.height;
+            const canvasWidthNoMargin = outputLayoutData.nodeContentSize.width * this._fontScale;
+            const canvasHeightNoMargin = outputLayoutData.nodeContentSize.height * this._fontScale;
             if (canvasWidthNoMargin < 0 || canvasHeightNoMargin < 0) {
                 return;
             }
             totalHeight = canvasHeightNoMargin + 1;
-            const actualFontSize = style.fontSize + 1;
+            const actualFontSize = style.actualFontSize + 1;
             let textFragment: string[] = [];
             let left = 0;
             let right = actualFontSize | 0;
@@ -281,10 +320,10 @@ export class TextProcessing {
                     maxLength = paragraphLength[i];
                 }
             }
-            const scaleX = (outputLayoutData.canvasSize.width - outputLayoutData.canvasPadding.width) / maxLength;
-            const scaleY = outputLayoutData.canvasSize.height / totalHeight;
+            const scaleX = (outputLayoutData.canvasSize.width - outputLayoutData.canvasPadding.width) * this._fontScale / maxLength;
+            const scaleY = (outputLayoutData.canvasSize.height * this._fontScale) / totalHeight;
 
-            _fontSize = (style.fontSize * Math.min(1, scaleX, scaleY)) | 0;
+            _fontSize = (style.actualFontSize * Math.min(1, scaleX, scaleY)) | 0;
             _fontDesc = this._getFontDesc(_fontSize, style.fontFamily, style.isBold, style.isItalic);
             this._context.font = _fontDesc;
         }
@@ -293,11 +332,11 @@ export class TextProcessing {
         style.fontDesc = _fontDesc;
     }
 
-    private _calculateWrapText (paragraphedStrings: string[], style: TextStyle, layout: TextLayout, outputLayoutData: TextOutputLayoutData) {
+    private _calculateWrapText (paragraphedStrings: string[], style: TextStyle, layout: TextLayout, outputLayoutData: TextOutputLayoutData): void {
         if (!layout.wrapping || !this._context) return;
 
         let _splitStrings: string[] = [];
-        const canvasWidthNoMargin = outputLayoutData.nodeContentSize.width;
+        const canvasWidthNoMargin = outputLayoutData.nodeContentSize.width * this._fontScale;
         const _fontDesc = this._getFontDesc(style.actualFontSize, style.fontFamily, style.isBold, style.isItalic);
         this._context.font = _fontDesc;
         for (let i = 0; i < paragraphedStrings.length; ++i) {
@@ -312,11 +351,11 @@ export class TextProcessing {
         style.fontDesc = _fontDesc;
     }
 
-    private _measureText (ctx: CanvasRenderingContext2D, fontDesc) {
-        return (string: string) => safeMeasureText(ctx, string, fontDesc);
+    private _measureText (ctx: CanvasRenderingContext2D, fontDesc): (str: string) => number {
+        return (str: string): number => safeMeasureText(ctx, str, fontDesc);
     }
 
-    private _calculateParagraphLength (paragraphedStrings: string[], ctx: CanvasRenderingContext2D, fontDesc: string) {
+    private _calculateParagraphLength (paragraphedStrings: string[], ctx: CanvasRenderingContext2D, fontDesc: string): number[] {
         const paragraphLength: number[] = [];
 
         for (const para of paragraphedStrings) {
@@ -327,7 +366,7 @@ export class TextProcessing {
         return paragraphLength;
     }
 
-    private _updatePaddingRect (style: TextStyle, outputLayoutData: TextOutputLayoutData) {
+    private _updatePaddingRect (style: TextStyle, outputLayoutData: TextOutputLayoutData): void {
         let top = 0; let bottom = 0; let left = 0; let right = 0;
         let outlineWidth = 0;
         outputLayoutData.contentSizeExtend.width = outputLayoutData.contentSizeExtend.height = 0;
@@ -347,7 +386,7 @@ export class TextProcessing {
         }
         if (style.isItalic) {
             // 0.0174532925 = 3.141592653 / 180
-            const offset = style.actualFontSize * Math.tan(12 * 0.0174532925);
+            const offset = style.fontSize * Math.tan(12 * 0.0174532925);
             right += offset;
             outputLayoutData.contentSizeExtend.width += offset;
         }
@@ -361,7 +400,7 @@ export class TextProcessing {
 
     // -------------------- Render Processing Part --------------------------
 
-    private _updateLabelDimensions (style: TextStyle, layout: TextLayout, outputLayoutData: TextOutputLayoutData) {
+    private _updateLabelDimensions (style: TextStyle, layout: TextLayout, outputLayoutData: TextOutputLayoutData): void {
         outputLayoutData.canvasSize.width = Math.min(outputLayoutData.canvasSize.width, MAX_SIZE);
         outputLayoutData.canvasSize.height = Math.min(outputLayoutData.canvasSize.height, MAX_SIZE);
 
@@ -374,7 +413,7 @@ export class TextProcessing {
         this._context!.textBaseline = 'alphabetic';
     }
 
-    private _calculateFillTextStartPosition (style: TextStyle, layout: TextLayout, outputLayoutData: TextOutputLayoutData) {
+    private _calculateFillTextStartPosition (style: TextStyle, layout: TextLayout, outputLayoutData: TextOutputLayoutData): void {
         let labelX = 0;
         if (layout.horizontalAlign === HorizontalTextAlignment.RIGHT) {
             labelX = outputLayoutData.canvasSize.width - outputLayoutData.canvasPadding.width;
@@ -405,7 +444,7 @@ export class TextProcessing {
         outputLayoutData.startPosition.set(labelX + outputLayoutData.canvasPadding.x, firstLinelabelY + outputLayoutData.canvasPadding.y);
     }
 
-    private _updateTexture (style: TextStyle, layout: TextLayout, outputLayoutData: TextOutputLayoutData, outputRenderData: TextOutputRenderData) {
+    private _updateTexture (style: TextStyle, layout: TextLayout, outputLayoutData: TextOutputLayoutData, outputRenderData: TextOutputRenderData): void {
         if (!this._context || !this._canvas) {
             return;
         }
@@ -427,13 +466,15 @@ export class TextProcessing {
             this._context.fillRect(0, 0, this._canvas.width, this._canvas.height);
         }
         this._context.fillStyle = `rgb(${style.color.r}, ${style.color.g}, ${style.color.b})`;
-        const drawTextPosX = outputLayoutData.startPosition.x;
+        // Use the value that has been amplified by fontScale
+        const tempPos = new Vec2(outputLayoutData.startPosition.x, outputLayoutData.startPosition.y);
+        const drawTextPosX = tempPos.x;
         let drawTextPosY = 0;
         // draw shadow and underline
-        this._drawTextEffect(outputLayoutData.startPosition, lineHeight, style, layout, outputLayoutData);
+        this._drawTextEffect(tempPos, lineHeight, style, layout, outputLayoutData);
         // draw text and outline
         for (let i = 0; i < outputLayoutData.parsedString.length; ++i) {
-            drawTextPosY = outputLayoutData.startPosition.y + i * lineHeight;
+            drawTextPosY = tempPos.y + i * lineHeight;
             if (style.isOutlined) {
                 this._context.strokeText(outputLayoutData.parsedString[i], drawTextPosX, drawTextPosY);
             }
@@ -447,7 +488,7 @@ export class TextProcessing {
         this._uploadTexture(outputRenderData);
     }
 
-    private _uploadTexture (outputRenderData: TextOutputRenderData) {
+    private _uploadTexture (outputRenderData: TextOutputRenderData): void {
         if (outputRenderData.texture && this._canvas) {
             let tex: Texture2D;
             if (outputRenderData.texture instanceof SpriteFrame) {
@@ -481,7 +522,7 @@ export class TextProcessing {
         }
     }
 
-    private _drawTextEffect (startPosition: Vec2, lineHeight: number, style: TextStyle, layout: TextLayout, outputLayoutData: TextOutputLayoutData) {
+    private _drawTextEffect (startPosition: Vec2, lineHeight: number, style: TextStyle, layout: TextLayout, outputLayoutData: TextOutputLayoutData): void {
         if (!style.hasShadow && !style.isOutlined && !style.isUnderline) return;
 
         const isMultiple = outputLayoutData.parsedString.length > 1 && style.hasShadow;
@@ -522,7 +563,7 @@ export class TextProcessing {
                     _drawUnderlinePos.x = startPosition.x;
                 }
                 _drawUnderlinePos.y = drawTextPosY + style.actualFontSize / 8;
-                this._context!.fillRect(_drawUnderlinePos.x, _drawUnderlinePos.y, _drawUnderlineWidth, style.underlineHeight);
+                this._context!.fillRect(_drawUnderlinePos.x, _drawUnderlinePos.y, _drawUnderlineWidth, style.underlineHeight * this._fontScale);
             }
         }
 
@@ -531,22 +572,23 @@ export class TextProcessing {
         }
     }
 
-    private _setupOutline (style: TextStyle) {
+    private _setupOutline (style: TextStyle): void {
         this._context!.strokeStyle = `rgba(${style.outlineColor.r}, ${style.outlineColor.g}, ${style.outlineColor.b}, ${style.outlineColor.a / 255})`;
-        this._context!.lineWidth = style.outlineWidth * 2;
+        this._context!.lineWidth = style.outlineWidth * 2 * this._fontScale;
     }
 
-    private _setupShadow (style: TextStyle) {
+    private _setupShadow (style: TextStyle): void {
+        const fontScale = this._fontScale;
         this._context!.shadowColor = `rgba(${style.shadowColor.r}, ${style.shadowColor.g}, ${style.shadowColor.b}, ${style.shadowColor.a / 255})`;
-        this._context!.shadowBlur = style.shadowBlur;
-        this._context!.shadowOffsetX = style.shadowOffsetX;
-        this._context!.shadowOffsetY = -style.shadowOffsetY;
+        this._context!.shadowBlur = style.shadowBlur * fontScale;
+        this._context!.shadowOffsetX = style.shadowOffsetX * fontScale;
+        this._context!.shadowOffsetY = -style.shadowOffsetY * fontScale;
     }
 
     // -------------------- Render Processing Part --------------------------
 
     private generateVertexData (isBmFont: boolean, style: TextStyle, layout: TextLayout, outputLayoutData: TextOutputLayoutData,
-        outputRenderData: TextOutputRenderData, inputString: string, callback: AnyFunction) {
+        outputRenderData: TextOutputRenderData, inputString: string, callback: AnyFunction): void {
         if (!isBmFont) {
             this.updateQuatCount(outputRenderData); // update vbBuffer count
             callback(style, outputLayoutData, outputRenderData);
@@ -555,19 +597,19 @@ export class TextProcessing {
         }
     }
 
-    private updateQuatCount (outputRenderData: TextOutputRenderData) {
+    private updateQuatCount (outputRenderData: TextOutputRenderData): void {
         const data: IRenderData[] = outputRenderData.vertexBuffer;
         const count = outputRenderData.quadCount;
         if (data.length !== count) {
-            // // Free extra data
-            const value = data.length;
-            let i = 0;
-            for (i = count; i < value; i++) {
-                _dataPool.free(data[i]);
-            }
-
-            for (i = value; i < count; i++) {
-                data[i] = _dataPool.alloc();
+            for (let i = data.length; i < count; i++) {
+                data.push({
+                    x: 0,
+                    y: 0,
+                    z: 0,
+                    u: 0,
+                    v: 0,
+                    color: Color.WHITE.clone(),
+                });
             }
 
             data.length = count;
@@ -577,7 +619,7 @@ export class TextProcessing {
     // -------------------- Canvas Mode Part ---------------------------
     // -------------------- Multiple Quad Mode Part --------------------
 
-    private _setupBMFontOverflowMetrics (layout: TextLayout, outputLayoutData: TextOutputLayoutData) {
+    private _setupBMFontOverflowMetrics (layout: TextLayout, outputLayoutData: TextOutputLayoutData): void {
         let newWidth = outputLayoutData.nodeContentSize.width;
         let newHeight = outputLayoutData.nodeContentSize.height;
 
@@ -597,11 +639,11 @@ export class TextProcessing {
         layout.maxLineWidth = newWidth;
     }
 
-    private _updateFontScale (style: TextStyle) {
-        style.bmfontScale = style.actualFontSize / style.originFontSize;
+    private _updateFontScale (style: TextStyle): void {
+        style.bmfontScale = style.actualFontSize / (style.originFontSize * this._fontScale);
     }
 
-    private _computeHorizontalKerningForText (style: TextStyle, layout: TextLayout, inputString: string) {
+    private _computeHorizontalKerningForText (style: TextStyle, layout: TextLayout, inputString: string): void {
         const string = inputString;
         const stringLen = string.length;
         if (!style.fntConfig) return; // for char
@@ -626,7 +668,7 @@ export class TextProcessing {
         }
     }
 
-    private _alignText (style: TextStyle, layout: TextLayout, outputLayoutData: TextOutputLayoutData, inputString: string) {
+    private _alignText (style: TextStyle, layout: TextLayout, outputLayoutData: TextOutputLayoutData, inputString: string): void {
         this._multilineTextWrap(style, layout, outputLayoutData, inputString, this._getFirstWordLen);
 
         // shrink
@@ -641,7 +683,7 @@ export class TextProcessing {
         this._parsedString(outputLayoutData, inputString);
     }
 
-    private _parsedString (outputLayoutData: TextOutputLayoutData, inputString: string) {
+    private _parsedString (outputLayoutData: TextOutputLayoutData, inputString: string): void {
         let _splitStrings: string[] = [];
         let textFragment = '';
 
@@ -661,7 +703,7 @@ export class TextProcessing {
     }
 
     private _multilineTextWrap (style: TextStyle, layout: TextLayout, outputLayoutData: TextOutputLayoutData,
-        inputString: string, nextTokenFunc: (arg0: TextStyle, arg1: TextLayout, arg2: string, arg3: number, arg4: number) => number) {
+        inputString: string, nextTokenFunc: (arg0: TextStyle, arg1: TextLayout, arg2: string, arg3: number, arg4: number) => number): boolean {
         layout.linesWidth.length = 0;
 
         const _string = inputString;
@@ -710,7 +752,7 @@ export class TextProcessing {
                 letterDef = shareLabelInfo.fontAtlas!.getLetterDefinitionForChar(character, shareLabelInfo);
                 if (!letterDef) {
                     this._recordPlaceholderInfo(letterIndex, character);
-                    console.log(`Can't find letter definition in texture atlas ${
+                    log(`Can't find letter definition in texture atlas ${
                         style.fntConfig!.atlasName} for letter:${character}`);
                     continue;
                 }
@@ -800,7 +842,7 @@ export class TextProcessing {
         return true;
     }
 
-    private _recordPlaceholderInfo (letterIndex: number, char: string) {
+    private _recordPlaceholderInfo (letterIndex: number, char: string): void {
         if (letterIndex >= this._lettersInfo.length) {
             const tmpInfo = new LetterInfo();
             this._lettersInfo.push(tmpInfo);
@@ -811,7 +853,7 @@ export class TextProcessing {
         this._lettersInfo[letterIndex].valid = false;
     }
 
-    private _recordLetterInfo (letterPosition: Vec2, character: string, letterIndex: number, lineIndex: number) {
+    private _recordLetterInfo (letterPosition: Vec2, character: string, letterIndex: number, lineIndex: number): void {
         if (letterIndex >= this._lettersInfo.length) {
             const tmpInfo = new LetterInfo();
             this._lettersInfo.push(tmpInfo);
@@ -828,7 +870,7 @@ export class TextProcessing {
         this._lettersInfo[letterIndex].y = letterPosition.y;
     }
 
-    private _getFirstWordLen (style: TextStyle, layout: TextLayout, text: string, startIndex: number, textLen: number) {
+    private _getFirstWordLen (style: TextStyle, layout: TextLayout, text: string, startIndex: number, textLen: number): number {
         let character = text.charAt(startIndex);
         if (isUnicodeCJK(character)
             || character === '\n'
@@ -869,7 +911,7 @@ export class TextProcessing {
         return len;
     }
 
-    private _computeAlignmentOffset (style: TextStyle, layout: TextLayout, outputLayoutData: TextOutputLayoutData) {
+    private _computeAlignmentOffset (style: TextStyle, layout: TextLayout, outputLayoutData: TextOutputLayoutData): void {
         layout.linesOffsetX.length = 0;
         layout.letterOffsetY = 0;
 
@@ -897,7 +939,7 @@ export class TextProcessing {
         layout.letterOffsetY = outputLayoutData.nodeContentSize.height;
         if (layout.verticalAlign !== VerticalTextAlignment.TOP) {
             const blank = outputLayoutData.nodeContentSize.height - layout.textDesiredHeight
-            + layout.lineHeight * this._getFontScale(style, layout) - style.originFontSize * style.bmfontScale;
+            + layout.lineHeight * this._getFontScale(style, layout) - style.originFontSize * this._fontScale * style.bmfontScale;
             if (layout.verticalAlign === VerticalTextAlignment.BOTTOM) {
                 // BOTTOM
                 layout.letterOffsetY -= blank;
@@ -908,12 +950,12 @@ export class TextProcessing {
         }
     }
 
-    private _getFontScale (style: TextStyle, layout: TextLayout) {
+    private _getFontScale (style: TextStyle, layout: TextLayout): number {
         return layout.overFlow === Overflow.SHRINK ? style.bmfontScale : 1;
     }
 
     private _isVerticalClamp (style: TextStyle, layout: TextLayout, outputLayoutData: TextOutputLayoutData,
-        inputString: string, process: TextProcessing) {
+        inputString: string, process: TextProcessing): boolean {
         if (layout.textDesiredHeight > outputLayoutData.nodeContentSize.height) {
             return true;
         } else {
@@ -922,7 +964,7 @@ export class TextProcessing {
     }
 
     private _isHorizontalClamp (style: TextStyle, layout: TextLayout, outputLayoutData: TextOutputLayoutData,
-        inputString: string, process: TextProcessing) {
+        inputString: string, process: TextProcessing): boolean {
         let letterClamp = false;
         const _string = inputString;
         for (let ctr = 0, l = _string.length; ctr < l; ++ctr) {
@@ -955,7 +997,7 @@ export class TextProcessing {
         return letterClamp;
     }
 
-    private _isHorizontalNeedShrink (layout: TextLayout, outputLayoutData: TextOutputLayoutData) {
+    private _isHorizontalNeedShrink (layout: TextLayout, outputLayoutData: TextOutputLayoutData): boolean {
         let wordWidth = 0;
         for (let ctr = 0, l = layout.linesWidth.length; ctr < l; ++ctr) {
             wordWidth = layout.linesWidth[ctr];
@@ -966,7 +1008,7 @@ export class TextProcessing {
 
     private _shrinkLabelToContentSize (style: TextStyle, layout: TextLayout, outputLayoutData: TextOutputLayoutData, inputString: string,
         lambda: (style: TextStyle, layout: TextLayout, outputLayoutData: TextOutputLayoutData,
-            inputString: string, process: TextProcessing) => boolean) {
+            inputString: string, process: TextProcessing) => boolean): void {
         const fontSize = style.actualFontSize;
 
         let left = 0;
@@ -980,7 +1022,7 @@ export class TextProcessing {
                 break;
             }
 
-            style.bmfontScale = newFontSize / style.originFontSize;
+            style.bmfontScale = newFontSize / (style.originFontSize * this._fontScale);
 
             this._multilineTextWrap(style, layout, outputLayoutData, inputString, this._getFirstWordLen);
 
@@ -998,7 +1040,7 @@ export class TextProcessing {
         }
     }
 
-    private _scaleFontSizeDown (style: TextStyle, layout: TextLayout, outputLayoutData: TextOutputLayoutData, inputString: string, fontSize: number) {
+    private _scaleFontSizeDown (style: TextStyle, layout: TextLayout, outputLayoutData: TextOutputLayoutData, inputString: string, fontSize: number): void {
         let shouldUpdateContent = true;
         if (!fontSize) {
             fontSize = 0.1;
@@ -1013,7 +1055,7 @@ export class TextProcessing {
     }
 
     private _updateQuads (style: TextStyle, layout: TextLayout, outputLayoutData: TextOutputLayoutData,
-        outputRenderData: TextOutputRenderData, inputString: string, callback) {
+        outputRenderData: TextOutputRenderData, inputString: string, callback): boolean {
         const texture =  style.spriteFrame ? style.spriteFrame.texture : shareLabelInfo.fontAtlas!.getTexture();
 
         const appX = outputRenderData.uiTransAnchorX * outputLayoutData.nodeContentSize.width;
@@ -1025,7 +1067,7 @@ export class TextProcessing {
             if (!letterInfo.valid) { continue; }
             const letterDef = shareLabelInfo.fontAtlas!.getLetter(letterInfo.hash);
             if (!letterDef) {
-                console.warn('Can\'t find letter in this bitmap-font');
+                warn('Can\'t find letter in this bitmap-font');
                 continue;
             }
 
@@ -1072,7 +1114,7 @@ export class TextProcessing {
         return ret;
     }
 
-    private _isHorizontalClamped (layout: TextLayout, outputLayoutData: TextOutputLayoutData, px: number, lineIndex: number) {
+    private _isHorizontalClamped (layout: TextLayout, outputLayoutData: TextOutputLayoutData, px: number, lineIndex: number): boolean {
         const wordWidth = layout.linesWidth[lineIndex];
         const letterOverClamp = (px > outputLayoutData.nodeContentSize.width || px < 0);
 
@@ -1083,7 +1125,7 @@ export class TextProcessing {
         }
     }
 
-    private _determineRect (style: TextStyle) {
+    private _determineRect (style: TextStyle): boolean {
         const _spriteFrame = style.spriteFrame;
         if (!_spriteFrame) return false; // for char mode
         const isRotated = _spriteFrame.isRotated();

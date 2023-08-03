@@ -154,7 +154,7 @@ DefaultResource::DefaultResource(Device *device) {
 
     if (device->getCapabilities().max3DTextureSize >= 2) {
         _texture3D = device->createTexture({TextureType::TEX3D, TextureUsageBit::STORAGE | TextureUsageBit::SAMPLED | TextureUsageBit::TRANSFER_DST,
-                                            Format::RGBA8, 2, 2, TextureFlagBit::NONE, 1, 1, SampleCount::ONE, 2});
+                                            Format::RGBA8, 2, 2, TextureFlagBit::NONE, 1, 1, SampleCount::X1, 2});
         BufferTextureCopy region = {0, 0, 0, {0, 0, 0}, {2, 2, 2}, {0, 0, 1}};
         device->copyBuffersToTexture(&bufferData, _texture3D, &region, 1);
     }
@@ -165,6 +165,14 @@ DefaultResource::DefaultResource(Device *device) {
         device->copyBuffersToTexture(&bufferData, _texture2DArray, &region, 1);
         region.texSubres.baseArrayLayer = 1;
         device->copyBuffersToTexture(&bufferData, _texture2DArray, &region, 1);
+    }
+    {
+        BufferInfo bufferInfo = {};
+        bufferInfo.usage = BufferUsageBit::STORAGE | BufferUsageBit::TRANSFER_DST | BufferUsageBit::TRANSFER_SRC | BufferUsageBit::VERTEX | BufferUsageBit::INDEX | BufferUsageBit::INDIRECT;
+        bufferInfo.memUsage = MemoryUsageBit::DEVICE | MemoryUsageBit::HOST;
+        bufferInfo.size = 5 * sizeof(uint32_t); // for indirect command buffer
+        bufferInfo.stride = bufferInfo.size;
+        _buffer = device->createBuffer(bufferInfo);
     }
 }
 
@@ -182,6 +190,10 @@ Texture *DefaultResource::getTexture(TextureType type) const {
             CC_ABORT();
             return nullptr;
     }
+}
+
+Buffer *DefaultResource::getBuffer() const {
+    return _buffer;
 }
 
 } // namespace gfx

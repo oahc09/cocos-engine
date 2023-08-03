@@ -35,7 +35,7 @@ import {
 import { IPhysicsWorld } from '../spec/i-physics-world';
 import { IRigidBody } from '../spec/i-rigid-body';
 import { IBoxCharacterController, ICapsuleCharacterController } from '../spec/i-character-controller';
-import { errorID, IVec3Like, warn, cclegacy } from '../../core';
+import { errorID, IVec3Like, warn, cclegacy, debug } from '../../core';
 import { EColliderType, EConstraintType, ECharacterControllerType } from './physics-enum';
 import { PhysicsMaterial } from '.';
 
@@ -64,7 +64,7 @@ interface IPhysicsWrapperObject {
 
 interface IPhysicsBackend { [key: string]: IPhysicsWrapperObject; }
 
-interface IPhysicsSelector {
+export interface IPhysicsSelector {
     /**
      * @en
      * The id of the physics engine being used by the physics system.
@@ -118,14 +118,14 @@ interface IPhysicsSelector {
     [x: string]: any,
 }
 
-function updateLegacyMacro (id: string) {
+function updateLegacyMacro (id: string): void {
     cclegacy._global.CC_PHYSICS_BUILTIN = id === 'builtin';
     cclegacy._global.CC_PHYSICS_CANNON = id === 'cannon.js';
     cclegacy._global.CC_PHYSICS_AMMO = id === 'bullet';
 }
 
 function register (id: IPhysicsEngineId, wrapper: IPhysicsWrapperObject): void {
-    if (!EDITOR && !TEST) console.info(`[PHYSICS]: register ${id}.`);
+    if (!EDITOR && !TEST) debug(`[PHYSICS]: register ${id}.`);
     selector.backend[id] = wrapper;
     if (!selector.physicsWorld || selector.id === id) {
         updateLegacyMacro(id);
@@ -142,18 +142,18 @@ export interface IWorldInitData {
 }
 let worldInitData: IWorldInitData | null;
 
-function switchTo (id: IPhysicsEngineId) {
+function switchTo (id: IPhysicsEngineId): void {
     if (!selector.runInEditor) return;
     const mutableSelector = selector as Mutable<IPhysicsSelector>;
     if (selector.physicsWorld && id !== selector.id && selector.backend[id] != null) {
         selector.physicsWorld.destroy();
-        if (!TEST) console.info(`[PHYSICS]: switch from ${selector.id} to ${id}.`);
+        if (!TEST) debug(`[PHYSICS]: switch from ${selector.id} to ${id}.`);
         updateLegacyMacro(id);
         mutableSelector.id = id;
         mutableSelector.wrapper = selector.backend[id];
         mutableSelector.physicsWorld = createPhysicsWorld();
     } else {
-        if (!EDITOR && !TEST) console.info(`[PHYSICS]: using ${id}.`);
+        if (!EDITOR && !TEST) debug(`[PHYSICS]: using ${id}.`);
         mutableSelector.physicsWorld = createPhysicsWorld();
     }
     if (worldInitData) {
@@ -181,11 +181,11 @@ export const selector: IPhysicsSelector = {
     runInEditor: !EDITOR,
 };
 
-export function constructDefaultWorld (data: IWorldInitData) {
+export function constructDefaultWorld (data: IWorldInitData): void {
     if (!worldInitData) worldInitData = data;
     if (!selector.runInEditor) return;
     if (!selector.physicsWorld) {
-        if (!TEST) console.info(`[PHYSICS]: using ${selector.id}.`);
+        if (!TEST) debug(`[PHYSICS]: using ${selector.id}.`);
         const mutableSelector = selector as Mutable<IPhysicsSelector>;
         const world = mutableSelector.physicsWorld = createPhysicsWorld();
         world.setGravity(worldInitData.gravity);
@@ -195,7 +195,7 @@ export function constructDefaultWorld (data: IWorldInitData) {
 
 /// Utility Function For Create Wrapper Entity ///
 
-const FUNC = (...v: any) => 0 as any;
+const FUNC = (...v: any): any => 0 as any;
 const ENTIRE_WORLD: IPhysicsWorld = {
     impl: null,
     setGravity: FUNC,
@@ -240,7 +240,7 @@ enum ECheckType {
     CapsuleCharacterController,
 }
 
-function check (obj: any, type: ECheckType) {
+function check (obj: any, type: ECheckType): boolean {
     if (obj == null) {
         if (selector.id) {
             warn(`${selector.id} physics does not support ${ECheckType[type]}`);
@@ -361,7 +361,7 @@ export function createShape (type: EColliderType): IBaseShape {
     return CREATE_COLLIDER_PROXY[type]();
 }
 
-function initColliderProxy () {
+function initColliderProxy (): void {
     if (CREATE_COLLIDER_PROXY.INITED) return;
     CREATE_COLLIDER_PROXY.INITED = true;
 
@@ -467,7 +467,7 @@ export function createConstraint (type: EConstraintType): IBaseConstraint {
     return CREATE_CONSTRAINT_PROXY[type]();
 }
 
-function initConstraintProxy () {
+function initConstraintProxy (): void {
     if (CREATE_CONSTRAINT_PROXY.INITED) return;
     CREATE_CONSTRAINT_PROXY.INITED = true;
 
@@ -539,7 +539,7 @@ export function createCharacterController (type: ECharacterControllerType): IEnt
     return CREATE_CHARACTER_CONTROLLER_PROXY[type]();
 }
 
-function initCharacterControllerProxy () {
+function initCharacterControllerProxy (): void {
     if (CREATE_CHARACTER_CONTROLLER_PROXY.INITED) return;
     CREATE_CHARACTER_CONTROLLER_PROXY.INITED = true;
 

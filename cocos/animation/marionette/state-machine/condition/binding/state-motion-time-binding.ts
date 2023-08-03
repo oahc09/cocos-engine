@@ -20,7 +20,7 @@ const { ccclass } = _decorator;
 @provide(TCBindingValueType.FLOAT)
 @support(TCBindingTransitionSourceFilter.POSE)
 export class TCStateMotionTimeBinding extends TCBinding<TCBindingValueType.FLOAT> {
-    public getValueType () {
+    public getValueType (): TCBindingValueType.FLOAT {
         return TCBindingValueType.FLOAT as const;
     }
 
@@ -31,6 +31,6 @@ export class TCStateMotionTimeBinding extends TCBinding<TCBindingValueType.FLOAT
 
 class TCStateMotionTimeBindingEvaluation implements TCBindingEvaluation<number> {
     public evaluate (context: ConditionEvaluationContext): number {
-        return context.sourceStateWeight;
+        return context.sourceStateMotionTimeNormalized;
     }
 }

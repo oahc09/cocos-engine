@@ -27,7 +27,7 @@ import { legacyCC } from '../core/global-exports';
 import { log2 } from '../core/math/bits';
 import { js } from '../core';
 import { assertIsTrue } from '../core/data/utils/asserts';
-import { getError } from '../core/platform/debug';
+import { getError, warn } from '../core/platform/debug';
 import { Settings, settings } from '../core/settings';
 
 // built-in layers, users can use 0~19 bits, 20~31 are system preserve bits.
@@ -73,7 +73,7 @@ export class Layers {
     /**
      * @internal
      */
-    public static init () {
+    public static init (): void {
         const userLayers = settings.querySettings<LayerItem[]>(Settings.Category.ENGINE, 'customLayers');
         if (!userLayers) return;
         for (let i = 0; i < userLayers.length; i++) {
@@ -116,13 +116,13 @@ export class Layers {
      * @param name Layer's name
      * @param bitNum Layer's bit position
      */
-    public static addLayer (name: string, bitNum: number) {
+    public static addLayer (name: string, bitNum: number): void {
         if (bitNum === undefined) {
-            console.warn('bitNum can\'t be undefined');
+            warn('bitNum can\'t be undefined');
             return;
         }
         if (bitNum > 19 || bitNum < 0) {
-            console.warn('maximum layers reached.');
+            warn('maximum layers reached.');
             return;
         }
         const val = 1 << bitNum;
@@ -141,9 +141,9 @@ export class Layers {
      * @zh 移除一个层，用户可编辑 0 - 19 位为用户自定义层
      * @param bitNum Layer's bit position
      */
-    public static deleteLayer (bitNum: number) {
+    public static deleteLayer (bitNum: number): void {
         if (bitNum > 19 || bitNum < 0) {
-            console.warn('do not change buildin layers.');
+            warn('do not change builtin layers.');
             return;
         }
         const val = 1 << bitNum;
@@ -163,7 +163,7 @@ export class Layers {
      */
     public static nameToLayer (name: string): number {
         if (name === undefined) {
-            console.warn('name can\'t be undefined');
+            warn('name can\'t be undefined');
             return -1;
         }
 
@@ -177,7 +177,7 @@ export class Layers {
      */
     public static layerToName (bitNum: number): string {
         if (bitNum > 31 || bitNum < 0) {
-            console.warn('Unable to access unknown layer.');
+            warn('Unable to access unknown layer.');
             return '';
         }
 

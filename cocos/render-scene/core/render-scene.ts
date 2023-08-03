@@ -33,6 +33,7 @@ import { RangedDirectionalLight } from '../scene/ranged-directional-light';
 import { TransformBit } from '../../scene-graph/node-enum';
 import { DrawBatch2D } from '../../2d/renderer/draw-batch';
 import { LODGroup } from '../scene/lod-group';
+import { Mesh } from '../../3d/assets/mesh';
 
 export interface IRenderSceneInfo {
     name: string;
@@ -138,10 +139,18 @@ export class RenderScene {
     }
 
     /**
+     * @en All active GPU Driven models of the render scene.
+     * @zh 渲染场景管理的所有 GPU Driven 模型。
+     */
+    get gpuModels (): Model[] {
+        return this._gpuModels;
+    }
+
+    /**
      * @en All active 2d draw batches of the render scene.
      * @zh 渲染场景管理的所有 2D 渲染批次对象。
      */
-    get batches () {
+    get batches (): DrawBatch2D[] {
         return this._batches;
     }
 
@@ -156,6 +165,7 @@ export class RenderScene {
     private _name = '';
     private _cameras: Camera[] = [];
     private _models: Model[] = [];
+    private _gpuModels: Model[] = [];
     private _lodGroups: LODGroup[] = []; // LOD Group gathered
     private _batches: DrawBatch2D[] = [];
     private _directionalLights: DirectionalLight[] = [];
@@ -171,7 +181,7 @@ export class RenderScene {
      * Register the creation function of the render scene to root.
      * @internal
      */
-    public static registerCreateFunc (root: Root) {
+    public static registerCreateFunc (root: Root): void {
         root._createSceneFun = (_root: Root): RenderScene => new RenderScene(_root);
     }
 
@@ -191,12 +201,25 @@ export class RenderScene {
     }
 
     /**
+     * @engineInternal
+     */
+    public activate () {
+    }
+
+    /**
+     * @engineInternal
+     */
+    public buildGPUScene (meshes: Mesh[]) {
+        // Only support in native.
+    }
+
+    /**
      * @en The update process of the render scene, it updates all rendering related data for the lights and the models.
      * @zh 渲染场景的更新流程，会更新所有光源和模型的渲染相关数据。
      * @param stamp The update time stamp
      * @returns void
      */
-    public update (stamp: number) {
+    public update (stamp: number): void {
         const mainLight = this._mainLight;
         if (mainLight) {
             mainLight.update();
@@ -242,17 +265,18 @@ export class RenderScene {
      * @en Destroy the render scene, dangerous, please do not invoke manually.
      * @zh 销毁渲染场景，请不要手动销毁，会造成未知行为。
      */
-    public destroy () {
+    public destroy (): void {
         this.removeCameras();
         this.removeSphereLights();
         this.removeSpotLights();
         this.removeRangedDirLights();
         this.removeModels();
+        this.removeGPUModels();
         this.removeLODGroups();
         this._lodStateCache.clearCache();
     }
 
-    public isCulledByLod (camera: Camera, model: Model) {
+    public isCulledByLod (camera: Camera, model: Model): boolean {
         return this._lodStateCache.isLodModelCulled(camera, model);
     }
 
@@ -260,7 +284,7 @@ export class RenderScene {
      * @en Attach a camera to the render scene
      * @zh 向渲染场景挂载一个相机
      */
-    public addCamera (cam: Camera) {
+    public addCamera (cam: Camera): void {
         cam.attachToScene(this);
         this._cameras.push(cam);
         this._lodStateCache.addCamera(cam);
@@ -270,7 +294,7 @@ export class RenderScene {
      * @en Detach a camera to the render scene
      * @zh 从渲染场景移除一个相机
      */
-    public removeCamera (camera: Camera) {
+    public removeCamera (camera: Camera): void {
         for (let i = 0; i < this._cameras.length; ++i) {
             if (this._cameras[i] === camera) {
                 this._cameras.splice(i, 1);
@@ -285,7 +309,7 @@ export class RenderScene {
      * @en Detach all cameras to the render scene
      * @zh 从渲染场景移除所有相机
      */
-    public removeCameras () {
+    public removeCameras (): void {
         for (const camera of this._cameras) {
             camera.detachFromScene();
             this._lodStateCache.removeCamera(camera);
@@ -298,7 +322,7 @@ export class RenderScene {
      * @zh 给渲染场景设置主光源
      * @param dl The main directional light source
      */
-    public setMainLight (dl: DirectionalLight | null) {
+    public setMainLight (dl: DirectionalLight | null): void {
         this._mainLight = dl;
         if (this._mainLight) this._mainLight.activate();
     }
@@ -308,7 +332,7 @@ export class RenderScene {
      * @zh 从渲染场景移除主光源
      * @param dl The main directional light source, if it's not the actual main light, nothing happens.
      */
-    public unsetMainLight (dl: DirectionalLight) {
+    public unsetMainLight (dl: DirectionalLight): void {
         if (this._mainLight === dl) {
             const dlList = this._directionalLights;
             if (dlList.length) {
@@ -327,7 +351,7 @@ export class RenderScene {
      * @zh 增加一个方向光源，场景中只会有一个方向光是起效的，并且会作为主光源。
      * @param dl The directional light.
      */
-    public addDirectionalLight (dl: DirectionalLight) {
+    public addDirectionalLight (dl: DirectionalLight): void {
         dl.attachToScene(this);
         this._directionalLights.push(dl);
     }
@@ -337,7 +361,7 @@ export class RenderScene {
      * @zh 删除一个方向光源。
      * @param dl The directional light.
      */
-    public removeDirectionalLight (dl: DirectionalLight) {
+    public removeDirectionalLight (dl: DirectionalLight): void {
         for (let i = 0; i < this._directionalLights.length; ++i) {
             if (this._directionalLights[i] === dl) {
                 dl.detachFromScene();
@@ -352,7 +376,7 @@ export class RenderScene {
      * @zh 增加一个球面光源。
      * @param pl The sphere light.
      */
-    public addSphereLight (pl: SphereLight) {
+    public addSphereLight (pl: SphereLight): void {
         pl.attachToScene(this);
         this._sphereLights.push(pl);
     }
@@ -362,7 +386,7 @@ export class RenderScene {
      * @zh 删除一个球面光源。
      * @param pl The sphere light.
      */
-    public removeSphereLight (pl: SphereLight) {
+    public removeSphereLight (pl: SphereLight): void {
         for (let i = 0; i < this._sphereLights.length; ++i) {
             if (this._sphereLights[i] === pl) {
                 pl.detachFromScene();
@@ -378,7 +402,7 @@ export class RenderScene {
      * @zh 增加一个聚光灯光源。
      * @param sl The spot light.
      */
-    public addSpotLight (sl: SpotLight) {
+    public addSpotLight (sl: SpotLight): void {
         sl.attachToScene(this);
         this._spotLights.push(sl);
     }
@@ -388,7 +412,7 @@ export class RenderScene {
      * @zh 删除一个聚光灯光源。
      * @param sl The spot light.
      */
-    public removeSpotLight (sl: SpotLight) {
+    public removeSpotLight (sl: SpotLight): void {
         for (let i = 0; i < this._spotLights.length; ++i) {
             if (this._spotLights[i] === sl) {
                 sl.detachFromScene();
@@ -403,7 +427,7 @@ export class RenderScene {
      * @en Remove all sphere light sources.
      * @zh 删除所有球面光源。
      */
-    public removeSphereLights () {
+    public removeSphereLights (): void {
         for (let i = 0; i < this._sphereLights.length; ++i) {
             this._sphereLights[i].detachFromScene();
         }
@@ -414,7 +438,7 @@ export class RenderScene {
      * @en Remove all spot light sources.
      * @zh 删除所有聚光灯光源。
      */
-    public removeSpotLights () {
+    public removeSpotLights (): void {
         for (let i = 0; i < this._spotLights.length; ++i) {
             this._spotLights[i].detachFromScene();
         }
@@ -426,7 +450,7 @@ export class RenderScene {
      * @zh 增加一个点光源。
      * @param pl @en The point light. @zh 点光源。
      */
-    public addPointLight (pl: PointLight) {
+    public addPointLight (pl: PointLight): void {
         pl.attachToScene(this);
         this._pointLights.push(pl);
     }
@@ -436,7 +460,7 @@ export class RenderScene {
      * @zh 删除一个点光源。
      * @param pl @en The point light. @zh 点光源。
      */
-    public removePointLight (pl: PointLight) {
+    public removePointLight (pl: PointLight): void {
         for (let i = 0; i < this._pointLights.length; ++i) {
             if (this._pointLights[i] === pl) {
                 pl.detachFromScene();
@@ -450,7 +474,7 @@ export class RenderScene {
      * @en Remove all point light sources.
      * @zh 删除所有点光源。
      */
-    public removePointLights () {
+    public removePointLights (): void {
         for (let i = 0; i < this._pointLights.length; ++i) {
             this._pointLights[i].detachFromScene();
         }
@@ -462,7 +486,7 @@ export class RenderScene {
      * @zh 增加一个范围平行光源。
      * @param l @en The ranged directional light. @zh 范围平行光。
      */
-    public addRangedDirLight (l: RangedDirectionalLight) {
+    public addRangedDirLight (l: RangedDirectionalLight): void {
         l.attachToScene(this);
         this._rangedDirLights.push(l);
     }
@@ -472,7 +496,7 @@ export class RenderScene {
      * @zh 删除一个范围平行光源。
      * @param l @en The ranged directional light. @zh 范围平行光。
      */
-    public removeRangedDirLight (l: RangedDirectionalLight) {
+    public removeRangedDirLight (l: RangedDirectionalLight): void {
         for (let i = 0; i < this._rangedDirLights.length; ++i) {
             if (this._rangedDirLights[i] === l) {
                 l.detachFromScene();
@@ -486,7 +510,7 @@ export class RenderScene {
      * @en Remove all ranged directional light sources.
      * @zh 删除所有范围平行光源。
      */
-    public removeRangedDirLights () {
+    public removeRangedDirLights (): void {
         for (let i = 0; i < this._rangedDirLights.length; ++i) {
             this._rangedDirLights[i].detachFromScene();
         }
@@ -498,7 +522,7 @@ export class RenderScene {
      * @zh 增加一个模型，渲染场景上挂载的所有模型都会被提交渲染。
      * @param m The model.
      */
-    public addModel (m: Model) {
+    public addModel (m: Model): void {
         m.attachToScene(this);
         this._models.push(m);
     }
@@ -508,7 +532,7 @@ export class RenderScene {
      * @zh 删除一个模型，移除的模型将不再被提交渲染。
      * @param m The model.
      */
-    public removeModel (model: Model) {
+    public removeModel (model: Model): void {
         for (let i = 0; i < this._models.length; ++i) {
             if (this._models[i] === model) {
                 this._lodStateCache.removeModel(model);
@@ -524,7 +548,7 @@ export class RenderScene {
      * @en Remove all models.
      * @zh 删除所有模型。
      */
-    public removeModels () {
+    public removeModels (): void {
         for (const m of this._models) {
             this._lodStateCache.removeModel(m);
             m.detachFromScene();
@@ -534,13 +558,51 @@ export class RenderScene {
     }
 
     /**
+     * @en Add a GPU Driven model, all models attached to the render scene will be submitted for rendering.
+     * @zh 增加一个 GPU Driven 模型，渲染场景上挂载的所有模型都会被提交渲染。
+     * @param m The model.
+     */
+    public addGPUModel (m: Model) {
+        m.attachToScene(this);
+        this._gpuModels.push(m);
+    }
+
+    /**
+     * @en Remove a GPU Driven model, model removed will no longer be submitted for rendering.
+     * @zh 删除一个 GPU Driven 模型，移除的模型将不再被提交渲染。
+     * @param m The model.
+     */
+    public removeGPUModel (model: Model) {
+        for (let i = 0; i < this._gpuModels.length; ++i) {
+            if (this._gpuModels[i] === model) {
+                model.detachFromScene();
+                this._gpuModels.splice(i, 1);
+
+                return;
+            }
+        }
+    }
+
+    /**
+     * @en Remove all GPU Driven models.
+     * @zh 删除所有 GPU Driven 模型。
+     */
+    public removeGPUModels () {
+        for (const m of this._gpuModels) {
+            m.detachFromScene();
+            m.destroy();
+        }
+        this._gpuModels.length = 0;
+    }
+
+    /**
      * @en Add a draw batch of 2d objects, all draw batches attached to the render scene will be submitted for rendering.
      * @zh 增加一个 2D 渲染批次，渲染场景上挂载的所有 2D 渲染批次都会被提交渲染。
      * @param batch The draw batch.
      * @internal
      * @deprecated since v3.6.0, this is an engine private interface that will be removed in the future.
      */
-    public addBatch (batch: DrawBatch2D) {
+    public addBatch (batch: DrawBatch2D): void {
         this._batches.push(batch);
     }
 
@@ -551,7 +613,7 @@ export class RenderScene {
      * @internal
      * @deprecated since v3.6.0, this is an engine private interface that will be removed in the future.
      */
-    public removeBatch (batch: DrawBatch2D) {
+    public removeBatch (batch: DrawBatch2D): void {
         for (let i = 0; i < this._batches.length; ++i) {
             if (this._batches[i] === batch) {
                 this._batches.splice(i, 1);
@@ -566,7 +628,7 @@ export class RenderScene {
      * @internal
      * @deprecated since v3.6.0, this is an engine private interface that will be removed in the future.
      */
-    public removeBatches () {
+    public removeBatches (): void {
         this._batches.length = 0;
     }
 
@@ -576,7 +638,7 @@ export class RenderScene {
      * @zh 增加一个LOD 组，渲染场景上挂载的所有LOD 组都会被提交渲染。
      * @param lodGroup the LOD group
      */
-    addLODGroup (lodGroup: LODGroup) {
+    addLODGroup (lodGroup: LODGroup): void {
         this._lodGroups.push(lodGroup);
         lodGroup.attachToScene(this);
         this._lodStateCache.addLodGroup(lodGroup);
@@ -588,7 +650,7 @@ export class RenderScene {
      * @zh 删除一个LOD 组，移除的LOD 组将不再被提交渲染。
      * @param lodGroup the LOD group
      */
-    removeLODGroup (lodGroup: LODGroup) {
+    removeLODGroup (lodGroup: LODGroup): void {
         const index = this._lodGroups.indexOf(lodGroup);
         if (index >= 0) {
             this._lodGroups.splice(index, 1);
@@ -602,7 +664,7 @@ export class RenderScene {
      * @en Remove all LOD groups.
      * @zh 删除所有LOD 组。
      */
-    removeLODGroups () {
+    removeLODGroups (): void {
         for (const group of this._lodGroups) {
             this._lodStateCache.removeLodGroup(group);
         }
@@ -613,8 +675,12 @@ export class RenderScene {
      * @en Notify all models that the global pipeline state have been updated so that they can update their render data and states.
      * @zh 通知所有模型全局管线状态已更新，需要更新自身状态。
      */
-    public onGlobalPipelineStateChanged () {
+    public onGlobalPipelineStateChanged (): void {
         for (const m of this._models) {
+            m.onGlobalPipelineStateChanged();
+        }
+
+        for (const m of this._gpuModels) {
             m.onGlobalPipelineStateChanged();
         }
     }
@@ -649,7 +715,7 @@ class LodStateCache {
         this._renderScene = scene;
     }
 
-    addCamera (camera: Camera) {
+    addCamera (camera: Camera): void {
         const needRegisterChanged = false;
         for (const lodGroup of this._renderScene.lodGroups) {
             const layer = lodGroup.node.layer;
@@ -662,13 +728,13 @@ class LodStateCache {
         }
     }
 
-    removeCamera (camera: Camera) {
+    removeCamera (camera: Camera): void {
         if (this._lodStateInCamera.has(camera)) {
             this._lodStateInCamera.delete(camera);
         }
     }
 
-    addLodGroup (lodGroup: LODGroup) {
+    addLodGroup (lodGroup: LODGroup): void {
         this._newAddedLodGroupVec.push(lodGroup);
 
         for (const camera of this._renderScene.cameras) {
@@ -682,7 +748,7 @@ class LodStateCache {
         }
     }
 
-    removeLodGroup (lodGroup: LODGroup) {
+    removeLodGroup (lodGroup: LODGroup): void {
         for (let index = 0; index < lodGroup.lodCount; index++) {
             const lod = lodGroup.lodDataArray[index];
             for (const model of lod.models) {
@@ -695,14 +761,14 @@ class LodStateCache {
         this._levelModels.delete(lodGroup);
     }
 
-    removeModel (model: Model) {
+    removeModel (model: Model): void {
         if (this._modelsInLODGroup.has(model)) {
             this._modelsInLODGroup.delete(model);
         }
     }
 
     // Update list of visible cameras on _modelsInLODGroup and update lod usage level under specified camera.
-    updateLodState () {
+    updateLodState (): void {
         // insert vecAddedLodGroup's model into modelsByAnyLODGroup
         for (const addedLodGroup of this._newAddedLodGroupVec) {
             let levelModels = this._levelModels.get(addedLodGroup);
@@ -756,8 +822,8 @@ class LodStateCache {
 
                         const lodModels = this._levelModels.get(lodGroup);
                         if (lodModels) {
-                            lodModels.forEach((vecArray, index) => {
-                                vecArray.forEach((model) => {
+                            lodModels.forEach((vecArray, index): void => {
+                                vecArray.forEach((model): void => {
                                     const modelInfo = this._modelsInLODGroup.get(model);
                                     if (modelInfo) {
                                         modelInfo.clear();
@@ -768,7 +834,7 @@ class LodStateCache {
                             for (const visibleIndex of lodLevels) {
                                 const vecModels = lodModels.get(visibleIndex);
                                 if (vecModels) {
-                                    vecModels.forEach((model) => {
+                                    vecModels.forEach((model): void => {
                                         const modelInfo = this._modelsInLODGroup.get(model);
                                         if (modelInfo && model.node && model.node.active) {
                                             for (const visibleCamera of this._lodStateInCamera) {
@@ -819,8 +885,8 @@ class LodStateCache {
                 if (lodGroup.isLockLevelChanged()) {
                     lodGroup.resetLockChangeFlag();
 
-                    lodModels.forEach((vecArray, index) => {
-                        vecArray.forEach((model) => {
+                    lodModels.forEach((vecArray, index): void => {
+                        vecArray.forEach((model): void => {
                             const modelInfo = this._modelsInLODGroup.get(model);
                             if (modelInfo) {
                                 modelInfo.clear();
@@ -829,12 +895,12 @@ class LodStateCache {
                     });
                     hasUpdated = true;
                 } else if (hasUpdated) {
-                    this._lodStateInCamera.forEach((lodState, camera) => {
+                    this._lodStateInCamera.forEach((lodState, camera): void => {
                         const lodInfo = lodState.get(lodGroup);
                         if (lodInfo && lodInfo.usedLevel !== lodInfo.lastUsedLevel) {
                             const vecModels = lodModels.get(lodInfo.lastUsedLevel);
                             if (vecModels) {
-                                vecModels.forEach((model) => {
+                                vecModels.forEach((model): void => {
                                     const modelInfo = this._modelsInLODGroup.get(model);
                                     if (modelInfo) {
                                         modelInfo.clear();
@@ -846,13 +912,13 @@ class LodStateCache {
                 }
 
                 if (hasUpdated) {
-                    this._lodStateInCamera.forEach((lodState, camera) => {
+                    this._lodStateInCamera.forEach((lodState, camera): void => {
                         const lodInfo = lodState.get(lodGroup);
                         if (lodInfo) {
                             const usedLevel = lodInfo.usedLevel;
                             const vecModels = lodModels.get(usedLevel);
                             if (vecModels) {
-                                vecModels.forEach((model) => {
+                                vecModels.forEach((model): void => {
                                     const modelInfo = this._modelsInLODGroup.get(model);
                                     if (modelInfo && model.node && model.node.active) {
                                         modelInfo.set(camera, true);
@@ -866,7 +932,7 @@ class LodStateCache {
         }
     }
 
-    isLodModelCulled (camera: Camera, model: Model) {
+    isLodModelCulled (camera: Camera, model: Model): boolean {
         const modelInfo = this._modelsInLODGroup.get(model);
         if (!modelInfo) {
             return false;
@@ -875,7 +941,7 @@ class LodStateCache {
         return !modelInfo.has(camera);
     }
 
-    clearCache () {
+    clearCache (): void {
         this._levelModels.clear();
         this._modelsInLODGroup.clear();
         this._lodStateInCamera.clear();

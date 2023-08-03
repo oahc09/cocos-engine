@@ -52,18 +52,18 @@ export class PhysXCharacterController implements IBaseCharacterController {
     }
     get characterController (): CharacterController { return this._comp; }
 
-    get filterData () {
+    get filterData (): any {
         /* eslint-disable @typescript-eslint/no-unsafe-return */
         return this._filterData;
     }
 
-    get queryFilterCB () {
+    get queryFilterCB (): any {
         /* eslint-disable @typescript-eslint/no-unsafe-return */
         return this._queryFilterCB;
     }
 
     constructor () {
-        this._filterData = { word0: 1, word1: 1, word2: 10000, word3: 0 };
+        this._filterData = { word0: 1, word1: 1, word2: 1, word3: 0 };
     }
 
     // virtual
@@ -189,11 +189,11 @@ export class PhysXCharacterController implements IBaseCharacterController {
         this._comp.node.setWorldPosition(v3_0);
     }
 
-    syncScale () {
+    syncScale (): void {
         this.updateScale();
     }
 
-    get scaledCenter () {
+    get scaledCenter (): Vec3 {
         Vec3.multiply(v3_1, this._comp.center, this._comp.node.worldScale);
         return v3_1;
     }
@@ -203,7 +203,12 @@ export class PhysXCharacterController implements IBaseCharacterController {
     // eBLOCK = 2   //!< a hit on the shape blocks the query (does not block overlap queries)
     static queryCallback = {
         preFilter (filterData: any, shape: any, _actor: any, _out: any): number {
-            const collider = getWrapShape<PhysXShape>(shape).collider;
+            const pxShape = getWrapShape<PhysXShape>(shape);
+            if (!pxShape) {
+                return PX.QueryHitType.eNONE;
+            }
+
+            const collider = pxShape.collider;
             if (!(filterData.word0 & collider.getMask()) || !(filterData.word1 & collider.getGroup())) {
                 return PX.QueryHitType.eNONE;
             }
@@ -220,7 +225,7 @@ export class PhysXCharacterController implements IBaseCharacterController {
         },
     };
 
-    move (movement: IVec3Like, minDist: number, elapsedTime: number) {
+    move (movement: IVec3Like, minDist: number, elapsedTime: number): void {
         if (!this._isEnabled) { return; }
         (PhysicsSystem.instance.physicsWorld as PhysXWorld).controllerManager.setOverlapRecoveryModule(this._overlapRecovery);
         this._pxCollisionFlags = this._impl.move(movement, minDist, elapsedTime, this.filterData, this.queryFilterCB);
@@ -270,11 +275,11 @@ export class PhysXCharacterController implements IBaseCharacterController {
         this.updateFilterData();
     }
 
-    updateEventListener () {
+    updateEventListener (): void {
         this.updateFilterData();
     }
 
-    updateFilterData () {
+    updateFilterData (): void {
         if (!this._impl) return;
         // this._impl.setQueryFilterData(filterData);//set inside move()
         this._impl.setSimulationFilterData(this.filterData);

@@ -22,25 +22,26 @@
  THE SOFTWARE.
 */
 
-import { Vec4, Vec3 } from '../../../core';
+import { Vec4, Vec3, cclegacy, warnID } from '../../../core';
 import { Camera } from '../../../render-scene/scene';
-import { BasicPipeline, LightInfo, QueueHint, SceneFlags } from '../../custom';
+import { LightInfo, QueueHint, SceneFlags } from '../../custom/types';
+import { BasicPipeline, PipelineRuntime } from '../../custom/pipeline';
 import { getCameraUniqueID } from '../../custom/define';
 import { passContext } from '../utils/pass-context';
 import { ClearFlagBit, Format } from '../../../gfx';
-import { MeshRenderer } from '../../../3d';
 import { ShadowPass } from './shadow-pass';
+import { Root } from '../../../root';
 
 import { SettingPass } from './setting-pass';
-import { forceEnableFloatOutput, getRTFormatBeforeToneMapping } from './base-pass';
+import { forceEnableFloatOutput, getRTFormatBeforeToneMapping, getShadowMapSampler } from './base-pass';
 
 export const COPY_INPUT_DS_PASS_INDEX = 0;
 export const SSSS_BLUR_X_PASS_INDEX = 1;
 export const SSSS_BLUR_Y_PASS_INDEX = 2;
 
-function hasSkinObject (ppl: BasicPipeline) {
+function hasSkinObject (ppl: PipelineRuntime): boolean {
     const sceneData = ppl.pipelineSceneData;
-    return sceneData.skin.enabled && sceneData.standardSkinModel !== null;
+    return sceneData.skin.enabled && sceneData.skinMaterialModel !== null;
 }
 
 const _varianceArray: number[] = [0.0484, 0.187, 0.567, 1.99, 7.41];
@@ -54,7 +55,7 @@ export const EXPONENT = 2.0;
 export const I_SAMPLES_COUNT = 25;
 
 export class SSSSBlurData {
-    get ssssStrength () {
+    get ssssStrength (): Vec3 {
         return this._v3SSSSStrength;
     }
     set ssssStrength (val: Vec3) {
@@ -62,7 +63,7 @@ export class SSSSBlurData {
         this._updateSampleCount();
     }
 
-    get ssssFallOff () {
+    get ssssFallOff (): Vec3 {
         return this._v3SSSSFallOff;
     }
     set ssssFallOff (val: Vec3) {
@@ -70,7 +71,7 @@ export class SSSSBlurData {
         this._updateSampleCount();
     }
 
-    get kernel () {
+    get kernel (): Vec4[] {
         return this._kernel;
     }
 
@@ -83,7 +84,7 @@ export class SSSSBlurData {
      * spreads the shape making it wider, while small falloffs make it
      * narrower.
      */
-    private _gaussian (out: Vec3, variance: number, r: number) {
+    private _gaussian (out: Vec3, variance: number, r: number): void {
         const xx = r / (0.001 + this._v3SSSSFallOff.x);
         out.x = Math.exp((-(xx * xx)) / (2.0 * variance)) / (2.0 * 3.14 * variance);
         const yy = r / (0.001 + this._v3SSSSFallOff.y);
@@ -100,7 +101,7 @@ export class SSSSBlurData {
      * the profile. For example, it allows to create blue SSS gradients, which
      * could be useful in case of rendering blue creatures.
      */
-    private _profile (out: Vec3, val: number) {
+    private _profile (out: Vec3, val: number): void {
         for (let i = 0; i < 5; i++) {
             this._gaussian(_vec3Temp2, _varianceArray[i], val);
             _vec3Temp2.multiplyScalar(_strengthParameterArray[i]);
@@ -108,7 +109,7 @@ export class SSSSBlurData {
         }
     }
 
-    private _updateSampleCount () {
+    private _updateSampleCount (): void {
         const strength = this._v3SSSSStrength;
         const nSamples = I_SAMPLES_COUNT;
         const range = nSamples > 20 ? 3.0 : 2.0;
@@ -171,7 +172,7 @@ export class SSSSBlurData {
         }
     }
 
-    private _init () {
+    private _init (): void {
         for (let i = 0; i < I_SAMPLES_COUNT; i++) {
             this._kernel[i] = new Vec4();
         }
@@ -189,35 +190,54 @@ export class SkinPass extends SettingPass {
     outputNames = ['SSSSBlur', 'SSSSBlurDS']
     ssssBlurData = new SSSSBlurData();
 
+    private _activate = false;
+
     enableInAllEditorCamera = true;
+    checkEnable (camera: Camera): boolean {
+        const ppl = (cclegacy.director.root as Root).pipeline;
+        let enable = hasSkinObject(ppl);
+        if (enable) {
+            if (!this._activate) {
+                if (!ppl.getMacroBool('CC_USE_FLOAT_OUTPUT')) {
+                    warnID(16303);
+                }
+                if (!ppl.pipelineSceneData.standardSkinModel) {
+                    warnID(16304);
+                }
+                this._activate = true;
+            }
+            enable = forceEnableFloatOutput(ppl);
+        }
+        return enable;
+    }
 
     public render (camera: Camera, ppl: BasicPipeline): void {
         passContext.material = this.material;
 
         const inputRT = this.lastPass?.slotName(camera, 0);
-        const inputDS = this.lastPass?.slotName(camera, 1);
-        if (hasSkinObject(ppl)) {
-            forceEnableFloatOutput(ppl);
-            const blurInfo = this._buildSSSSBlurPass(camera, ppl, inputRT!, inputDS!);
-            this._buildSpecularPass(camera, ppl, blurInfo.rtName, blurInfo.dsName);
-        } else {
-            this._buildSpecularPass(camera, ppl, inputRT!, inputDS!);
-        }
+        const inputDS = passContext.depthSlotName;
+        this._buildSSSSBlurPass(camera, ppl, inputRT!, inputDS);
+        this._buildSpecularPass(camera, ppl, inputRT!, inputDS);
     }
 
     private _buildSSSSBlurPass (camera: Camera,
         ppl: BasicPipeline,
         inputRT: string,
-        inputDS: string) {
+        inputDS: string): void {
         const cameraID = getCameraUniqueID(camera);
-        let boundingBox = 0.4;
-        const standardSkinModel = ppl.pipelineSceneData.standardSkinModel;
-        const model = (standardSkinModel as MeshRenderer).model;
-        if (model) {
-            const halfExtents = model.worldBounds.halfExtents;
-            boundingBox = Math.min(halfExtents.x, halfExtents.y, halfExtents.z) * 2.0;
+        const pipelineSceneData = ppl.pipelineSceneData;
+
+        let halfExtents = new Vec3(0.2, 0.2, 0.2);
+        const standardSkinModel = pipelineSceneData.standardSkinModel;
+        const skinMaterialModel = pipelineSceneData.skinMaterialModel;
+        if (standardSkinModel && standardSkinModel.worldBounds) {
+            halfExtents = standardSkinModel.worldBounds.halfExtents;
+        } else if (skinMaterialModel && skinMaterialModel.worldBounds) {
+            halfExtents = skinMaterialModel.worldBounds.halfExtents;
         }
-        const skin = ppl.pipelineSceneData.skin;
+        const boundingBox = Math.min(halfExtents.x, halfExtents.y, halfExtents.z) * 2.0;
+
+        const skin = pipelineSceneData.skin;
 
         const ssssBlurRTName = super.slotName(camera, 0);
         const ssssBlurDSName = super.slotName(camera, 1);
@@ -249,9 +269,6 @@ export class SkinPass extends SettingPass {
             .setClearFlag(ClearFlagBit.COLOR)
             .setClearColor(0, 0, 0, 1)
             .addRasterView(ssssBlurRTName, getRTFormatBeforeToneMapping(ppl))
-            .setClearFlag(ClearFlagBit.NONE)
-            .setClearDepthColor(camera.clearDepth, camera.clearStencil, 0, 0)
-            .addRasterView(inputDS, Format.DEPTH_STENCIL)
             .blitScreen(passIdx)
             .version();
 
@@ -269,19 +286,14 @@ export class SkinPass extends SettingPass {
             .setClearFlag(ClearFlagBit.NONE)
             .setClearColor(0, 0, 0, 1)
             .addRasterView(inputRT, getRTFormatBeforeToneMapping(ppl))
-            .setClearFlag(ClearFlagBit.NONE)
-            .setClearDepthColor(camera.clearDepth, camera.clearStencil, 0, 0)
-            .addRasterView(inputDS, Format.DEPTH_STENCIL)
             .blitScreen(passIdx)
             .version();
-
-        return { rtName: inputRT, dsName: inputDS };
     }
 
     private _buildSpecularPass (camera: Camera,
         ppl: BasicPipeline,
         inputRT: string,
-        inputDS: string) {
+        inputDS: string): void {
         const cameraID = getCameraUniqueID(camera);
         const layoutName = 'specular-pass';
         const passName = `specular-pass${cameraID}`;
@@ -300,27 +312,27 @@ export class SkinPass extends SettingPass {
         if (shadowPass) {
             for (const dirShadowName of shadowPass.mainLightShadows) {
                 if (ppl.containsResource(dirShadowName)) {
-                    pass.addTexture(dirShadowName, 'cc_shadowMap');
+                    pass.addTexture(dirShadowName, 'cc_shadowMap', getShadowMapSampler());
                 }
             }
             for (const spotShadowName of shadowPass.spotLightShadows) {
                 if (ppl.containsResource(spotShadowName)) {
-                    pass.addTexture(spotShadowName, 'cc_spotShadowMap');
+                    pass.addTexture(spotShadowName, 'cc_spotShadowMap', getShadowMapSampler());
                 }
             }
         }
 
-        pass.addQueue(QueueHint.RENDER_TRANSPARENT, 'default')
+        pass.addQueue(QueueHint.RENDER_OPAQUE, 'default')
             .addSceneOfCamera(camera, new LightInfo(),
-                SceneFlags.OPAQUE_OBJECT | SceneFlags.TRANSPARENT_OBJECT | SceneFlags.DEFAULT_LIGHTING | SceneFlags.PLANAR_SHADOW
+                SceneFlags.TRANSPARENT_OBJECT | SceneFlags.DEFAULT_LIGHTING | SceneFlags.PLANAR_SHADOW
             | SceneFlags.CUTOUT_OBJECT | SceneFlags.DRAW_INSTANCING);
         pass.addQueue(QueueHint.RENDER_TRANSPARENT, 'forward-add')
             .addSceneOfCamera(camera, new LightInfo(),
-                SceneFlags.OPAQUE_OBJECT | SceneFlags.TRANSPARENT_OBJECT | SceneFlags.DEFAULT_LIGHTING | SceneFlags.PLANAR_SHADOW
+                SceneFlags.TRANSPARENT_OBJECT | SceneFlags.DEFAULT_LIGHTING | SceneFlags.PLANAR_SHADOW
             | SceneFlags.CUTOUT_OBJECT | SceneFlags.DRAW_INSTANCING);
     }
 
-    slotName (camera: Camera, index = 0) {
+    slotName (camera: Camera, index = 0): string {
         return this.lastPass!.slotName(camera, index);
     }
 }

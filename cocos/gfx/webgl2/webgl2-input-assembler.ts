@@ -22,6 +22,7 @@
  THE SOFTWARE.
 */
 
+import { error } from '../../core';
 import { InputAssemblerInfo } from '../base/define';
 import { InputAssembler } from '../base/input-assembler';
 import { WebGL2Buffer } from './webgl2-buffer';
@@ -36,9 +37,9 @@ export class WebGL2InputAssembler extends InputAssembler {
 
     private _gpuInputAssembler: IWebGL2GPUInputAssembler | null = null;
 
-    public initialize (info: Readonly<InputAssemblerInfo>) {
+    public initialize (info: Readonly<InputAssemblerInfo>): void {
         if (info.vertexBuffers.length === 0) {
-            console.error('InputAssemblerInfo.vertexBuffers is null.');
+            error('InputAssemblerInfo.vertexBuffers is null.');
             return;
         }
 
@@ -77,7 +78,7 @@ export class WebGL2InputAssembler extends InputAssembler {
                 case 2: glIndexType = 0x1403; break; // WebGLRenderingContext.UNSIGNED_SHORT
                 case 4: glIndexType = 0x1405; break; // WebGLRenderingContext.UNSIGNED_INT
                 default: {
-                    console.error('Illegal index buffer stride.');
+                    error('Illegal index buffer stride.');
                 }
                 }
             }
@@ -96,7 +97,7 @@ export class WebGL2InputAssembler extends InputAssembler {
         WebGL2CmdFuncCreateInputAssember(WebGL2DeviceManager.instance, this._gpuInputAssembler);
     }
 
-    public destroy () {
+    public destroy (): void {
         const device = WebGL2DeviceManager.instance;
         if (this._gpuInputAssembler && device.extensions.useVAO) {
             WebGL2CmdFuncDestroyInputAssembler(device, this._gpuInputAssembler);

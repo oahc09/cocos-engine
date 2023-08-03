@@ -22,7 +22,7 @@
  THE SOFTWARE.
 */
 
-import { removeProperty, replaceProperty } from '../utils/x-deprecated';
+import { replaceProperty } from '../utils/x-deprecated';
 import { Color } from './color';
 import { Mat3 } from './mat3';
 import { Mat4 } from './mat4';
@@ -360,7 +360,7 @@ replaceProperty(Color, 'Color', [
     {
         name: 'fromHex',
         newName: 'fromHEX',
-        customFunction (...args: any) {
+        customFunction (...args: any): any {
             const arg1 = args[1].toString(16);
             return legacyCC.Color.fromHEX(args[0], arg1);
         },

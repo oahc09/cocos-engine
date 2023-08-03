@@ -847,17 +847,7 @@ MTLTextureType mu::toMTLTextureType(TextureType type) {
 }
 
 NSUInteger mu::toMTLSampleCount(SampleCount count) {
-    //TODO_Zeqiang: query from device.
-    switch (count) {
-        case SampleCount::ONE: return 1;
-        case SampleCount::MULTIPLE_PERFORMANCE: return 2;
-        case SampleCount::MULTIPLE_BALANCE: return 4;
-        case SampleCount::MULTIPLE_QUALITY:
-            return 8;
-            //        case SampleCount::X16: return 16;
-            //        case SampleCount::X32: return 32;
-            //        case SampleCount::X64: return 64;
-    }
+    return static_cast<NSUInteger>(count);
 }
 
 MTLSamplerAddressMode mu::toMTLSamplerAddressMode(Address mode) {
@@ -1090,6 +1080,14 @@ ccstd::string mu::spirv2MSL(const uint32_t *ir, size_t word_count,
             gpuShader->outputs[i].set = set;
             gpuShader->outputs[i].binding = loc;
         }
+    } else if (executionModel == spv::ExecutionModelGLCompute) {
+        spirv_cross::SpecializationConstant x, y, z;
+        auto workGroupID = msl.get_work_group_size_specialization_constants(x, y, z);
+        const auto& workGroupSizeSpv = msl.get_constant(workGroupID);
+        const auto& workGroupSize = workGroupSizeSpv.vector().r;
+        gpuShader->workGroupSize[0] = workGroupSize[0].u32;
+        gpuShader->workGroupSize[1] = workGroupSize[1].u32;
+        gpuShader->workGroupSize[2] = workGroupSize[2].u32;
     }
 
     // Compile to MSL, ready to give to metal driver.

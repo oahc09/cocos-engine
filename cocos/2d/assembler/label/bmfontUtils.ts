@@ -25,7 +25,7 @@
 import { JSB } from 'internal:constants';
 import { IConfig, FontAtlas } from '../../assets/bitmap-font';
 import { SpriteFrame } from '../../assets/sprite-frame';
-import { Rect } from '../../../core';
+import { Rect, error } from '../../../core';
 import { Label, Overflow, CacheMode } from '../../components/label';
 import { UITransform } from '../../framework/ui-transform';
 import { LetterAtlas, shareLabelInfo } from './font-utils';
@@ -34,6 +34,7 @@ import { TextProcessing } from './text-processing';
 import { TextOutputLayoutData, TextOutputRenderData } from './text-output-data';
 import { TextStyle } from './text-style';
 import { TextLayout } from './text-layout';
+import { view } from '../../../ui/view';
 
 const _defaultLetterAtlas = new LetterAtlas(64, 64);
 const _defaultFontAtlas = new FontAtlas(null);
@@ -48,7 +49,8 @@ let QUAD_INDICES;
 export const bmfontUtils = {
 
     updateProcessingData (style: TextStyle, layout: TextLayout,
-        outputLayoutData: TextOutputLayoutData, comp: Label, trans: UITransform) {
+        outputLayoutData: TextOutputLayoutData, outputRenderData: TextOutputRenderData,
+        comp: Label, trans: UITransform): void {
         style.fontSize = comp.fontSize;
         style.actualFontSize = comp.fontSize;
         style.originFontSize = _fntConfig ? _fntConfig.fontSize : comp.fontSize;
@@ -73,6 +75,8 @@ export const bmfontUtils = {
         } else {
             layout.wrapping = comp.enableWrapText;
         }
+        outputRenderData.uiTransAnchorX = trans.anchorX;
+        outputRenderData.uiTransAnchorY = trans.anchorY;
 
         shareLabelInfo.lineHeight = comp.lineHeight;
         shareLabelInfo.fontSize = comp.fontSize;
@@ -84,7 +88,7 @@ export const bmfontUtils = {
         style.color.set(comp.color);
     },
 
-    updateRenderData (comp: Label) {
+    updateRenderData (comp: Label): void {
         if (!comp.renderData) {
             return;
         }
@@ -101,9 +105,10 @@ export const bmfontUtils = {
             const layout = comp.textLayout;
             const outputLayoutData = comp.textLayoutData;
             const outputRenderData = comp.textRenderData;
+            style.fontScale = view.getScaleX();
             this._updateFontFamily(comp);
 
-            this.updateProcessingData(style, layout, outputLayoutData, comp, _uiTrans);
+            this.updateProcessingData(style, layout, outputLayoutData, outputRenderData, comp, _uiTrans);
 
             this._updateLabelInfo(comp);
 
@@ -145,7 +150,7 @@ export const bmfontUtils = {
         }
     },
 
-    updateUVs (label: Label) {
+    updateUVs (label: Label): void {
         const renderData = label.renderData!;
         const vData = renderData.chunk.vb;
         const vertexCount = renderData.vertexCount;
@@ -159,7 +164,7 @@ export const bmfontUtils = {
         }
     },
 
-    updateColor (label: Label) {
+    updateColor (label: Label): void {
         if (JSB) {
             const renderData = label.renderData!;
             const vertexCount = renderData.vertexCount;
@@ -182,7 +187,7 @@ export const bmfontUtils = {
         }
     },
 
-    resetRenderData (comp: Label) {
+    resetRenderData (comp: Label): void {
         const renderData = comp.renderData!;
         renderData.dataLength = 0;
         renderData.resize(0, 0);
@@ -190,7 +195,7 @@ export const bmfontUtils = {
 
     // callBack function
     generateVertexData (style: TextStyle, outputLayoutData: TextOutputLayoutData, outputRenderData: TextOutputRenderData, offset: number,
-        spriteFrame: SpriteFrame, rect: Rect, rotated: boolean, x: number, y: number) {
+        spriteFrame: SpriteFrame, rect: Rect, rotated: boolean, x: number, y: number): void {
         const dataOffset = offset;
         const scale = style.bmfontScale;
 
@@ -245,7 +250,7 @@ export const bmfontUtils = {
         dataList[dataOffset + 3].y = y;
     },
 
-    _updateFontFamily (comp) {
+    _updateFontFamily (comp): void {
         const fontAsset = comp.font;
         _spriteFrame = fontAsset.spriteFrame;
         _fntConfig = fontAsset.fntConfig;
@@ -262,22 +267,22 @@ export const bmfontUtils = {
         // TODO update material and uv
     },
 
-    _updateLabelInfo (comp) {
+    _updateLabelInfo (comp): void {
         // clear
         shareLabelInfo.hash = '';
         shareLabelInfo.margin = 0;
     },
 
-    _resetProperties () {
+    _resetProperties (): void {
         _fntConfig = null;
         _spriteFrame = null;
         shareLabelInfo.hash = '';
         shareLabelInfo.margin = 0;
     },
 
-    createQuadIndices (indexCount) {
+    createQuadIndices (indexCount): void {
         if (indexCount % 6 !== 0) {
-            console.error('illegal index count!');
+            error('illegal index count!');
             return;
         }
         const quadCount = indexCount / 6;

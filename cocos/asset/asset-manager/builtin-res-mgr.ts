@@ -22,7 +22,7 @@
  THE SOFTWARE.
 */
 
-import { EDITOR, TEST } from 'internal:constants';
+import { EDITOR, EDITOR_NOT_IN_PREVIEW, TEST } from 'internal:constants';
 import { Asset } from '../assets/asset';
 import { ImageAsset, ImageSource } from '../assets/image-asset';
 import { SpriteFrame } from '../../2d/assets/sprite-frame';
@@ -40,7 +40,7 @@ export class BuiltinResMgr {
     protected _materialsToBeCompiled: Material[] = [];
 
     // this should be called after renderer initialized
-    public init () {
+    public init (): void {
         const resources = this._resources;
         const len = 2;
         const numChannels = 4;
@@ -302,35 +302,35 @@ export class BuiltinResMgr {
         }
     }
 
-    public addAsset (key: string, asset: Asset) {
+    public addAsset (key: string, asset: Asset): void {
         this._resources[key] = asset;
     }
 
-    public get<T extends Asset> (uuid: string) {
+    public get<T extends Asset> (uuid: string): T {
         return this._resources[uuid] as T;
     }
 
     /**
      * @internal
      */
-    public loadBuiltinAssets () {
+    public loadBuiltinAssets (): Promise<void> {
         const builtinAssets = settings.querySettings<string[]>(Settings.Category.ENGINE, 'builtinAssets');
         if (TEST || !builtinAssets) return Promise.resolve();
         const resources = this._resources;
-        return new Promise<void>((resolve, reject) => {
-            assetManager.loadBundle(BuiltinBundleName.INTERNAL, (err, bundle) => {
+        return new Promise<void>((resolve, reject): void => {
+            assetManager.loadBundle(BuiltinBundleName.INTERNAL, (err, bundle): void => {
                 if (err) {
                     reject(err);
                     return;
                 }
-                assetManager.loadAny(builtinAssets, (err, assets) => {
+                assetManager.loadAny(builtinAssets, (err, assets): void => {
                     if (err) {
                         reject(err);
                     } else {
-                        assets.forEach((asset) => {
+                        assets.forEach((asset): void => {
                             resources[asset.name] = asset;
                             // In Editor, no need to ignore asset destroy, we use auto gc to handle destroy
-                            if (!EDITOR || cclegacy.GAME_VIEW) { releaseManager.addIgnoredAsset(asset); }
+                            if (!EDITOR_NOT_IN_PREVIEW) { releaseManager.addIgnoredAsset(asset); }
                             if (asset instanceof cclegacy.Material) {
                                 this._materialsToBeCompiled.push(asset as Material);
                             }
@@ -342,7 +342,7 @@ export class BuiltinResMgr {
         });
     }
 
-    public compileBuiltinMaterial () {
+    public compileBuiltinMaterial (): void {
         // NOTE: Builtin material should be compiled again after the render pipeline setup
         for (let i = 0; i < this._materialsToBeCompiled.length; ++i) {
             const mat = this._materialsToBeCompiled[i];

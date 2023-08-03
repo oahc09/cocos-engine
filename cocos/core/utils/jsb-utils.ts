@@ -60,16 +60,16 @@ import type { Node } from '../../scene-graph';
 //                 func.apply(target, arguments);
 //             };
 //         } else {
-//             console.error('dont go here....');
+//             error(`don't go here....`);
 //             result = target[property];
 //         }
-//         console.warn(`==> get [${property}], result: ${result}, for target: ${target}`);
+//         warn(`==> get [${property}], result: ${result}, for target: ${target}`);
 //         // property is index in this case
 //         return result;
 //     }
 //
 //     set (target: any, property: string, value: any, receiver: any) {
-//         console.warn(`==> set [${property}]=${value}, for target: ${target}`);
+//         warn(`==> set [${property}]=${value}, for target: ${target}`);
 //         const i = parseInt(property);
 //         if (!isNaN(i)) {
 //             if (typeof value === this._options.arrElementType) {
@@ -111,7 +111,7 @@ import type { Node } from '../../scene-graph';
 // TODO: we mark node as type of any, because the properties we access are only implemented on native. @dumganhar
 // issue: https://github.com/cocos/cocos-engine/issues/14644
 // export function syncNodeValues (node: Node) {
-export function syncNodeValues (node: any) {
+export function syncNodeValues (node: any): void {
     const lpos = node._lpos;
     node.setPositionForJS(lpos.x, lpos.y, lpos.z);
 
@@ -125,7 +125,7 @@ export function syncNodeValues (node: any) {
     node.setRotationFromEulerForJS(euler.x, euler.y, euler.z);
 }
 
-export function updateChildrenForDeserialize (node: Node) {
+export function updateChildrenForDeserialize (node: Node): void {
     if (!node) {
         return;
     }
@@ -177,12 +177,12 @@ export function updateChildrenForDeserialize (node: Node) {
 //     node._isChildrenRedefined = true;
 // }
 type EventType = string | number;
-export function ExtraEventMethods () {}
+export function ExtraEventMethods (): void {}
 
-ExtraEventMethods.prototype.once = function once <Callback extends (...any) => void> (type: EventType, callback: Callback, target?: any) {
+ExtraEventMethods.prototype.once = function once <Callback extends (...any) => void> (type: EventType, callback: Callback, target?: any): Callback {
     return this.on(type, callback, target, true) as Callback;
 };
 
-ExtraEventMethods.prototype.targetOff = function targetOff (typeOrTarget: any) {
+ExtraEventMethods.prototype.targetOff = function targetOff (typeOrTarget: any): void {
     this.removeAll(typeOrTarget);
 };

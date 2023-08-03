@@ -92,7 +92,7 @@ void SubModel::update() {
     }
 }
 
-void SubModel::setPasses(const std::shared_ptr<ccstd::vector<IntrusivePtr<Pass>>> &pPasses) {
+void SubModel::setPasses(const SharedPassArray &pPasses) {
     if (!pPasses || pPasses->size() > MAX_PASS_COUNT) {
         debug::errorID(12004, MAX_PASS_COUNT);
         return;
@@ -128,12 +128,14 @@ Pass *SubModel::getPass(uint32_t index) const {
     return passes[index];
 }
 
-void SubModel::initialize(RenderingSubMesh *subMesh, const std::shared_ptr<ccstd::vector<IntrusivePtr<Pass>>> &pPasses, const ccstd::vector<IMacroPatch> &patches) {
+void SubModel::initialize(RenderingSubMesh *subMesh, const SharedPassArray &pPasses, const ccstd::vector<IMacroPatch> &patches) {
     _device = Root::getInstance()->getDevice();
     CC_ASSERT(!pPasses->empty());
     gfx::DescriptorSetInfo dsInfo;
     dsInfo.layout = (*pPasses)[0]->getLocalSetLayout();
-    _inputAssembler = _device->createInputAssembler(subMesh->getIaInfo());
+    if (!subMesh->getIaInfo().vertexBuffers.empty()) {
+        _inputAssembler = _device->createInputAssembler(subMesh->getIaInfo());
+    }
     _descriptorSet = _device->createDescriptorSet(dsInfo);
 
     const auto *pipeline = Root::getInstance()->getPipeline();
@@ -145,7 +147,9 @@ void SubModel::initialize(RenderingSubMesh *subMesh, const std::shared_ptr<ccstd
     }
 
     _subMesh = subMesh;
-    _patches = patches;
+    ccstd::vector<IMacroPatch> tmp = patches;
+    std::sort(tmp.begin(), tmp.end(), IMacroPatch::compare);
+    _patches = tmp;
     _passes = pPasses;
 
     flushPassInfo();
@@ -218,7 +222,16 @@ void SubModel::onPipelineStateChanged() {
 }
 
 void SubModel::onMacroPatchesStateChanged(const ccstd::vector<IMacroPatch> &patches) {
-    _patches = patches;
+    if (patches.empty() && _patches.empty()) {
+        return;
+    }
+
+    ccstd::vector<IMacroPatch> tmp = patches;
+    std::sort(tmp.begin(), tmp.end(), IMacroPatch::compare);
+    if (std::equal(std::begin(tmp), std::end(tmp), std::begin(_patches), std::end(_patches))) {
+        return;
+    }
+    _patches = tmp;
     const auto &passes = *_passes;
     if (passes.empty()) return;
     for (Pass *pass : passes) {

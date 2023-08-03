@@ -22,7 +22,7 @@
  THE SOFTWARE.
 */
 
-import { SUPPORT_JIT, EDITOR, TEST, JSB } from 'internal:constants';
+import { SUPPORT_JIT, EDITOR, TEST, JSB, EDITOR_NOT_IN_PREVIEW } from 'internal:constants';
 import * as js from '../utils/js';
 import { CCClass } from './class';
 import { errorID, warnID } from '../platform/debug';
@@ -68,10 +68,10 @@ const PersistentMask = ~(ToDestroy | Dirty | Destroying | DontDestroy | Deactiva
 // all the hideFlags
 const AllHideMasks = DontSave | EditorOnly | LockedInEditor | HideInHierarchy;
 
-const objectsToDestroy: any = [];
+const objectsToDestroy: CCObject[] = [];
 let deferredDestroyTimer: number | null = null;
 
-function compileDestruct (obj, ctor) {
+function compileDestruct (obj, ctor): Function {
     const shouldSkipId = obj instanceof legacyCC.Node || obj instanceof legacyCC.Component;
     const idToSkip = shouldSkipId ? '_id' : null;
 
@@ -148,7 +148,7 @@ function compileDestruct (obj, ctor) {
         // eslint-disable-next-line @typescript-eslint/no-implied-eval,no-new-func
         return Function('o', func);
     } else {
-        return (o) => {
+        return (o): void => {
             for (const _key in propsToReset) {
                 o[_key] = propsToReset[_key];
             }
@@ -164,7 +164,7 @@ function compileDestruct (obj, ctor) {
  * @private
  */
 class CCObject implements EditorExtendableObject {
-    public static _deferredDestroy () {
+    public static _deferredDestroy (): void {
         const deleteCount = objectsToDestroy.length;
         for (let i = 0; i < deleteCount; ++i) {
             const obj = objectsToDestroy[i];
@@ -208,6 +208,11 @@ class CCObject implements EditorExtendableObject {
          * @private
          */
         this._objFlags = 0;
+
+        if (EDITOR) {
+            // See cocos/cocos-engine#15392
+            this[editorExtrasTag] = {};
+        }
     }
 
     // MEMBER
@@ -221,7 +226,7 @@ class CCObject implements EditorExtendableObject {
      * obj.name = "New Obj";
      * ```
      */
-    get name () {
+    get name (): string {
         return this._name;
     }
     set name (value) {
@@ -236,7 +241,7 @@ class CCObject implements EditorExtendableObject {
         const flags = hideFlags & CCObject.Flags.AllHideMasks;
         this._objFlags = (this._objFlags & ~CCObject.Flags.AllHideMasks) | flags;
     }
-    public get hideFlags () {
+    public get hideFlags (): CCObject.Flags {
         return this._objFlags & CCObject.Flags.AllHideMasks;
     }
 
@@ -340,7 +345,7 @@ class CCObject implements EditorExtendableObject {
      *       }
      * ```
      */
-    public _destruct () {
+    public _destruct (): void {
         const ctor: any = this.constructor;
         let destruct = ctor.__destruct__;
         if (!destruct) {
@@ -353,7 +358,7 @@ class CCObject implements EditorExtendableObject {
     /**
      * @deprecated since v3.5.0, this is an engine private interface that will be removed in the future.
      */
-    public _destroyImmediate () {
+    public _destroyImmediate (): void {
         if (this._objFlags & Destroyed) {
             errorID(5000);
             return;
@@ -362,7 +367,7 @@ class CCObject implements EditorExtendableObject {
         // issue: https://github.com/cocos/cocos-engine/issues/14643
         ((this as any)._onPreDestroy)?.();
 
-        if (!EDITOR || legacyCC.GAME_VIEW) {
+        if (!EDITOR_NOT_IN_PREVIEW) {
             /*Native properties cannot be reset by _destruct, because the native properties are hung on the prototype and
              *hasOwnProperty's detection cannot be passed.
              */
@@ -409,7 +414,7 @@ if (EDITOR || TEST) {
     * TODO: this is a dynamic inject method, should be define in class
     * issue: https://github.com/cocos/cocos-engine/issues/14643
     */
-    (prototype as any).realDestroyInEditor = function () {
+    (prototype as any).realDestroyInEditor = function (): void {
         if (!(this._objFlags & Destroyed)) {
             warnID(5001);
             return;
@@ -453,8 +458,13 @@ if (EDITOR) {
  */
 (prototype as any)._deserialize = null;
 
-CCClass.fastDefine('cc.Object', CCObject, { _name: '', _objFlags: 0, [editorExtrasTag]: {} });
-CCClass.Attr.setClassAttr(CCObject, editorExtrasTag, 'editorOnly', true);
+// See cocos/cocos-engine#15392
+if (EDITOR) {
+    CCClass.fastDefine('cc.Object', CCObject, { _name: '', _objFlags: 0, [editorExtrasTag]: {} });
+    CCClass.Attr.setClassAttr(CCObject, editorExtrasTag, 'editorOnly', true);
+} else {
+    CCClass.fastDefine('cc.Object', CCObject, { _name: '', _objFlags: 0 });
+}
 
 /**
  * Bit mask that controls object states.
@@ -610,7 +620,7 @@ declare namespace CCObject {
  * @return @en Whether it is a CCObject boolean value. @zh 是否为CCObject的布尔值。
  * @engineInternal
  */
-export function isCCObject (object: any) {
+export function isCCObject (object: any): object is CCObject {
     return object instanceof CCObject;
 }
 
@@ -643,7 +653,7 @@ export function isCCObject (object: any) {
  * log(isValid(node));    // false, destroyed in the end of last frame
  * ```
  */
-export function isValid (value: any, strictMode?: boolean) {
+export function isValid (value: any, strictMode?: boolean): boolean {
     if (typeof value === 'object') {
         return !!value && !(value._objFlags & (strictMode ? (Destroyed | ToDestroy) : Destroyed));
     } else {

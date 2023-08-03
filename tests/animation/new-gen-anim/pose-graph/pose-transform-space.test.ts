@@ -106,7 +106,7 @@ describe(`Pose transform space`, () => {
                     hierarchy.getComponentToWorldTransform(), // Component -> World
                     hierarchy.computeComponentSpaceTransform( // Local -> Component
                         localSpacePoseRecord,
-                        nodeName,
+                        hierarchy.getParentNodeName(nodeName),
                     ),
                 );
             }],
@@ -116,7 +116,7 @@ describe(`Pose transform space`, () => {
             [PoseTransformSpace.LOCAL, TransformSpace.COMPONENT, (hierarchy, localSpacePoseRecord, nodeName) => {
                 return hierarchy.computeComponentSpaceTransform(
                     localSpacePoseRecord,
-                    nodeName,
+                    hierarchy.getParentNodeName(nodeName),
                 );
             }],
 
@@ -243,7 +243,7 @@ function createPoseNodeRunner(setup: (poseGraph: PoseGraph) => PoseNode) {
     const layer = animationGraph.addLayer();
     const proceduralPoseState = layer.stateMachine.addProceduralPoseState();
     const mainNode = setup(proceduralPoseState.graph);
-    poseGraphOp.connectOutputNode(proceduralPoseState.graph, proceduralPoseState.graph.outputNode, mainNode);
+    poseGraphOp.connectOutputNode(proceduralPoseState.graph, mainNode);
     layer.stateMachine.connect(layer.stateMachine.entryState, proceduralPoseState);
     return animationGraph;
 }

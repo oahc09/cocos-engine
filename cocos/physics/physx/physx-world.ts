@@ -41,7 +41,8 @@ import { EFilterDataWord3 } from './physx-enum';
 import { PhysXInstance } from './physx-instance';
 import { Node } from '../../scene-graph';
 import { PhysXCharacterController } from './character-controllers/physx-character-controller';
-import { CC_QUAT_0 } from '../bullet/bullet-cache';
+
+const CC_QUAT_0 = new Quat();
 
 export class PhysXWorld extends PhysXInstance implements IPhysicsWorld {
     setAllowSleep (_v: boolean): void { }
@@ -92,14 +93,14 @@ export class PhysXWorld extends PhysXInstance implements IPhysicsWorld {
         }
     }
 
-    private _simulate (dt: number) {
+    private _simulate (dt: number): void {
         if (!this._isNeedFetch) {
             simulateScene(this.scene, dt);
             this._isNeedFetch = true;
         }
     }
 
-    private _fetchResults () {
+    private _fetchResults (): void {
         if (this._isNeedFetch) {
             this.scene.fetchResults(true);
             this._isNeedFetch = false;
@@ -352,7 +353,7 @@ const PhysXCallback = {
         }
     },
 
-    emitTriggerEvent () {
+    emitTriggerEvent (): void {
         let len = triggerEventEndDic.getLength();
         while (len--) {
             const key = triggerEventEndDic.getKeyByIndex(len);
@@ -496,13 +497,13 @@ const PhysXCallback = {
             const cct = data.PhysXCharacterController.characterController;
             const collider = data.PhysXShape.collider;
             if (cct && cct.isValid && collider && collider.isValid) {
-                emitHit.selfCCT = cct;
-                emitHit.otherCollider = collider;
+                emitHit.controller = cct;
+                emitHit.collider = collider;
                 emitHit.worldPosition.set(data.worldPos);
                 emitHit.worldNormal.set(data.worldNormal);
                 emitHit.motionDirection.set(data.motionDir);
                 emitHit.motionLength = data.motionLength;
-                cct.emit('onColliderHit', cct, collider, emitHit);
+                cct.emit('onControllerColliderHit', emitHit);
             }
         }
         cctShapeEventDic.reset();

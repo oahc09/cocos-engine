@@ -22,16 +22,17 @@
  THE SOFTWARE.
 */
 
-import { EDITOR } from 'internal:constants';
-import { System, Vec2, IVec2Like, Rect, Eventify, Enum, Settings, settings, cclegacy, warnID } from '../../core';
+import { EDITOR_NOT_IN_PREVIEW } from 'internal:constants';
+import { System, Vec2, IVec2Like, Rect, Eventify, Enum, Settings, settings, cclegacy } from '../../core';
 import { createPhysicsWorld, selector, IPhysicsSelector } from './physics-selector';
 
 import { DelayEvent } from './physics-internal-types';
 import { ICollisionMatrix } from '../../physics/framework/physics-config';
 import { CollisionMatrix } from '../../physics/framework/collision-matrix';
-import { ERaycast2DType, RaycastResult2D, PHYSICS_2D_PTM_RATIO, PhysicsGroup, Contact2DType } from './physics-types';
+import { ERaycast2DType, RaycastResult2D, PHYSICS_2D_PTM_RATIO, PhysicsGroup } from './physics-types';
 import { Collider2D } from './components/colliders/collider-2d';
 import { director, Director } from '../../game';
+import type { IPhysicsWorld } from '../spec/i-physics-world';
 
 let instance: PhysicsSystem2D | null = null;
 cclegacy.internal.PhysicsGroup2D = PhysicsGroup;
@@ -61,7 +62,7 @@ export class PhysicsSystem2D extends Eventify(System) {
     }
     set allowSleep (v: boolean) {
         this._allowSleep = v;
-        if (!EDITOR || cclegacy.GAME_VIEW) {
+        if (!EDITOR_NOT_IN_PREVIEW) {
             this.physicsWorld.setAllowSleep(v);
         }
     }
@@ -77,7 +78,7 @@ export class PhysicsSystem2D extends Eventify(System) {
     }
     set gravity (gravity: Vec2) {
         this._gravity.set(gravity);
-        if (!EDITOR || cclegacy.GAME_VIEW) {
+        if (!EDITOR_NOT_IN_PREVIEW) {
             this.physicsWorld.setGravity(new Vec2(gravity.x / PHYSICS_2D_PTM_RATIO, gravity.y / PHYSICS_2D_PTM_RATIO));
         }
     }
@@ -88,7 +89,7 @@ export class PhysicsSystem2D extends Eventify(System) {
      * @zh
      * 获取或设置每帧模拟的最大子步数。
      */
-    get maxSubSteps () {
+    get maxSubSteps (): number {
         return this._maxSubSteps;
     }
 
@@ -102,7 +103,7 @@ export class PhysicsSystem2D extends Eventify(System) {
      * @zh
      * 获取或设置每步模拟消耗的固定时间。
      */
-    get fixedTimeStep () {
+    get fixedTimeStep (): number {
         return this._fixedTimeStep;
     }
 
@@ -116,7 +117,7 @@ export class PhysicsSystem2D extends Eventify(System) {
      * @zh
      * 获取或设置是否自动模拟。
      */
-    get autoSimulation () {
+    get autoSimulation (): boolean {
         return this._autoSimulation;
     }
 
@@ -124,7 +125,7 @@ export class PhysicsSystem2D extends Eventify(System) {
         this._autoSimulation = value;
     }
 
-    get debugDrawFlags () {
+    get debugDrawFlags (): number {
         return this.physicsWorld.debugDrawFlags;
     }
     set debugDrawFlags (v) {
@@ -152,7 +153,7 @@ export class PhysicsSystem2D extends Eventify(System) {
      * @zh
      * 获取物理世界的封装对象，通过它你可以访问到实际的底层对象。
      */
-    public get physicsWorld () {
+    public get physicsWorld (): IPhysicsWorld {
         return selector.physicsWorld!;
     }
 
@@ -164,15 +165,15 @@ export class PhysicsSystem2D extends Eventify(System) {
      */
     static readonly ID = 'PHYSICS_2D';
 
-    static get PHYSICS_NONE () {
+    static get PHYSICS_NONE (): boolean {
         return !selector.id;
     }
 
-    static get PHYSICS_BUILTIN () {
+    static get PHYSICS_BUILTIN (): boolean {
         return selector.id === 'builtin';
     }
 
-    static get PHYSICS_BOX2D () {
+    static get PHYSICS_BOX2D (): boolean {
         return selector.id === 'box2d';
     }
 
@@ -182,7 +183,7 @@ export class PhysicsSystem2D extends Eventify(System) {
      * @zh
      * 获取预定义的物理分组。
      */
-    public static get PhysicsGroup () {
+    public static get PhysicsGroup (): typeof PhysicsGroup {
         return PhysicsGroup;
     }
 
@@ -218,7 +219,7 @@ export class PhysicsSystem2D extends Eventify(System) {
 
     private _delayEvents: DelayEvent[] = [];
 
-    get stepping () {
+    get stepping (): boolean {
         return this._steping;
     }
 
@@ -247,7 +248,7 @@ export class PhysicsSystem2D extends Eventify(System) {
         if (collisionGroups) {
             const cg = collisionGroups;
             if (cg instanceof Array) {
-                cg.forEach((v) => { PhysicsGroup[v.name] = 1 << v.index; });
+                cg.forEach((v): void => { PhysicsGroup[v.name] = 1 << v.index; });
                 Enum.update(PhysicsGroup);
             }
         }
@@ -266,7 +267,7 @@ export class PhysicsSystem2D extends Eventify(System) {
     * 执行一次物理系统的模拟，目前将在每帧自动执行一次。
     * @param deltaTime @en time step. @zh 与上一次执行相差的时间，目前为每帧消耗时间。
     */
-    postUpdate (deltaTime: number) {
+    postUpdate (deltaTime: number): void {
         if (!this._enable) {
             return;
         }
@@ -300,8 +301,6 @@ export class PhysicsSystem2D extends Eventify(System) {
 
         this.physicsWorld.syncPhysicsToScene();
 
-        this.physicsWorld.finalizeContactEvent();
-
         if (this.debugDrawFlags) {
             this.physicsWorld.drawDebug();
         }
@@ -311,7 +310,7 @@ export class PhysicsSystem2D extends Eventify(System) {
     }
 
     // eslint-disable-next-line @typescript-eslint/ban-types
-    _callAfterStep (target: object, func: Function) {
+    _callAfterStep (target: object, func: Function): void {
         if (this._steping) {
             this._delayEvents.push({
                 target,
@@ -328,7 +327,7 @@ export class PhysicsSystem2D extends Eventify(System) {
      * @zh
      * 重置时间累积总量为给定值。
      */
-    resetAccumulator (time = 0) {
+    resetAccumulator (time = 0): void {
         this._accumulator = time;
     }
 
@@ -339,7 +338,7 @@ export class PhysicsSystem2D extends Eventify(System) {
      * 执行物理世界的模拟步进。
      * @param fixedTimeStep
      */
-    step (fixedTimeStep: number) {
+    step (fixedTimeStep: number): void {
         this.physicsWorld.step(fixedTimeStep, this.velocityIterations, this.positionIterations);
     }
 
@@ -375,17 +374,10 @@ export class PhysicsSystem2D extends Eventify(System) {
     testAABB (rect: Rect): readonly Collider2D[] {
         return this.physicsWorld.testAABB(rect);
     }
-
-    public on<TFunction extends (...any) => void>(type: string, callback: TFunction, thisArg?: any, once?: boolean): typeof callback {
-        if (type === Contact2DType.PRE_SOLVE || type === Contact2DType.POST_SOLVE) {
-            warnID(16002, type, '3.7.1');
-        }
-        return super.on(type, callback, thisArg, once);
-    }
 }
 
-function initPhysicsSystem () {
+function initPhysicsSystem (): void {
     director.registerSystem(PhysicsSystem2D.ID, PhysicsSystem2D.instance, System.Priority.LOW);
 }
 
-director.once(Director.EVENT_INIT, () => { initPhysicsSystem(); });
+director.once(Director.EVENT_INIT, (): void => { initPhysicsSystem(); });

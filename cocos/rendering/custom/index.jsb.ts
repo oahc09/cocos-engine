@@ -25,13 +25,16 @@
 declare const render: any;
 
 import { Pipeline, PipelineBuilder, RenderingModule } from './pipeline';
-import { DeferredPipelineBuilder, ForwardPipelineBuilder } from './builtin-pipelines';
+import { DeferredPipelineBuilder } from './builtin-pipelines';
 import { CustomPipelineBuilder, TestPipelineBuilder } from './custom-pipeline';
 import { Device } from '../../gfx';
+import { PostProcessBuilder } from '../post-process/post-process-builder';
 
 export * from './types';
 export * from './pipeline';
 export * from './archive';
+
+let _pipeline: Pipeline | null = null;
 
 export const INVALID_ID = 0xFFFFFFFF;
 export const enableEffectImport = true;
@@ -39,7 +42,8 @@ export const enableEffectImport = true;
 let _renderModule: RenderingModule;
 
 export function createCustomPipeline (): Pipeline {
-    return render.Factory.createPipeline();
+    _pipeline = render.Factory.createPipeline(false) as Pipeline;
+    return _pipeline;
 }
 
 export const customPipelineBuilderMap = new Map<string, PipelineBuilder>();
@@ -49,18 +53,22 @@ export function setCustomPipeline (name: string, builder: PipelineBuilder) {
 }
 
 export function getCustomPipeline (name: string): PipelineBuilder {
-    let builder = customPipelineBuilderMap.get(name) || null;
-    if (builder === null) {
-        builder = customPipelineBuilderMap.get('Forward')!;
+    let builder = customPipelineBuilderMap.get(name);
+    if (!builder) {
+        if (name === 'Test') {
+            builder = new TestPipelineBuilder(_pipeline!.pipelineSceneData);
+            customPipelineBuilderMap.set('Test', builder);
+        } else {
+            builder = customPipelineBuilderMap.get('Forward')!;
+        }
     }
     return builder;
 }
 
 function addCustomBuiltinPipelines (map: Map<string, PipelineBuilder>) {
-    map.set('Forward', new ForwardPipelineBuilder());
+    map.set('Forward', new PostProcessBuilder());
     map.set('Deferred', new DeferredPipelineBuilder());
     map.set('Deprecated', new CustomPipelineBuilder());
-    map.set('Test', new TestPipelineBuilder());
 }
 
 addCustomBuiltinPipelines(customPipelineBuilderMap);
@@ -84,11 +92,15 @@ export function getPassID (name: string | undefined): number {
     return _renderModule.getPassID(name);
 }
 
+export function getSubpassID (passID: number, name: string): number {
+    return _renderModule.getSubpassID(passID, name);
+}
+
 export function getPhaseID (passID: number, name: string | number | undefined): number {
     if (name === undefined) {
         return _renderModule.getPhaseID(passID, 'default');
     }
-    if (typeof(name) === 'number') {
+    if (typeof (name) === 'number') {
         return _renderModule.getPhaseID(passID, name.toString());
     }
     return _renderModule.getPhaseID(passID, name);

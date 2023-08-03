@@ -15,6 +15,10 @@ import { getEnterInfo, getTileBase, makeCreateNodeFactory } from './play-or-samp
 import { AnimationGraphBindingContext, AnimationGraphEvaluationContext,
     AnimationGraphSettleContext, AnimationGraphUpdateContext,
 } from '../../animation-graph-context';
+import { clamp01 } from '../../../../core';
+import type { Pose } from '../../../core/pose';
+
+const ZERO_DURATION_THRESHOLD = 1e-5;
 
 @ccclass(`${CLASS_NAME_PREFIX_ANIM}PoseNodePlayMotion`)
 @poseGraphNodeCategory(POSE_GRAPH_NODE_MENU_PREFIX_POSE)
@@ -39,23 +43,27 @@ export class PoseNodePlayMotion extends PoseNode {
 
     @serializable
     @input({ type: PoseGraphType.FLOAT })
+    public startTime = 0.0;
+
+    @serializable
+    @input({ type: PoseGraphType.FLOAT })
     public speedMultiplier = 1.0;
 
     /**
      * The weight of this node indicated in last update.
      */
-    get lastIndicativeWeight () {
+    get lastIndicativeWeight (): number {
         return this._workspace?.lastIndicativeWeight ?? 0.0;
     }
 
     /**
      * Normalized time elapsed on specified motion.
      */
-    get elapsedMotionTime () {
+    get elapsedMotionTime (): number {
         return this._workspace?.normalizedTime ?? 0.0;
     }
 
-    public bind (context: AnimationGraphBindingContext) {
+    public bind (context: AnimationGraphBindingContext): void {
         const { motion } = this;
         if (!motion) {
             return;
@@ -74,13 +82,23 @@ export class PoseNodePlayMotion extends PoseNode {
 
     }
 
-    public reenter () {
+    public reenter (): void {
         if (this._workspace) {
-            const { _runtimeSyncRecord: runtimeSyncRecord } = this;
+            const {
+                _runtimeSyncRecord: runtimeSyncRecord,
+                _workspace: { motionEval: { duration } },
+            } = this;
+
+            // TODO: cocos/cocos-engine#15305
+            this._forceEvaluateEvaluation();
+
+            const startTimeNormalized = duration < ZERO_DURATION_THRESHOLD
+                ? 0.0
+                : clamp01(this.startTime / duration);
             if (runtimeSyncRecord) {
-                runtimeSyncRecord.notifyRenter();
+                runtimeSyncRecord.notifyRenter(startTimeNormalized);
             } else {
-                this._workspace.normalizedTime = 0.0;
+                this._workspace.normalizedTime = startTimeNormalized;
             }
             this._workspace.lastIndicativeWeight = 0.0;
         }
@@ -92,7 +110,7 @@ export class PoseNodePlayMotion extends PoseNode {
             const { _runtimeSyncRecord: runtimeSyncRecord } = this;
             const duration = this._workspace.motionEval.duration;
             let normalizedDeltaTime = 0.0;
-            if (duration !== 0.0) {
+            if (duration > ZERO_DURATION_THRESHOLD) {
                 normalizedDeltaTime = (deltaTime * this.speedMultiplier) / duration;
             }
             if (runtimeSyncRecord) {
@@ -100,10 +118,11 @@ export class PoseNodePlayMotion extends PoseNode {
             } else {
                 this._workspace.normalizedTime += normalizedDeltaTime;
             }
+            this._workspace.lastIndicativeWeight = context.indicativeWeight;
         }
     }
 
-    public doEvaluate (context: AnimationGraphEvaluationContext) {
+    public doEvaluate (context: AnimationGraphEvaluationContext): Pose {
         if (!this._workspace) {
             return context.pushDefaultedPose();
         } else {
@@ -131,7 +150,7 @@ class Workspace {
 }
 
 if (EDITOR) {
-    PoseNodePlayMotion.prototype.getTitle = function getTitle (this: PoseNodePlayMotion) {
+    PoseNodePlayMotion.prototype.getTitle = function getTitle (this: PoseNodePlayMotion): string | [string, Record<string, string>] | undefined {
         return getTileBase(`ENGINE.classes.${CLASS_NAME_PREFIX_ANIM}PoseNodePlayMotion.title`, this.motion);
     };
 

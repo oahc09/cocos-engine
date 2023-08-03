@@ -7,7 +7,8 @@ import { AnimationGraphBindingContext, AnimationGraphEvaluationContext, Animatio
     AnimationGraphUpdateContext, AnimationGraphUpdateContextGenerator,
 } from '../../../animation-graph-context';
 import { poseGraphNodeHide } from '../../decorator/node';
-import { approx, assertIsTrue, lerp } from '../../../../../core';
+import { assertIsTrue, lerp } from '../../../../../core';
+import { isIgnorableWeight } from '../../utils';
 
 const ZERO_ALTERING_DURATION_THRESHOLD = 1e-5;
 
@@ -22,7 +23,7 @@ export abstract class PoseNodeChoosePoseBase extends PoseNode {
         this._fadeInDurations.fill(0.0);
     }
 
-    public bind (context: AnimationGraphBindingContext) {
+    public bind (context: AnimationGraphBindingContext): void {
         for (const pose of this._poses) {
             pose?.bind(context);
         }
@@ -36,7 +37,7 @@ export abstract class PoseNodeChoosePoseBase extends PoseNode {
         }
     }
 
-    public reenter () {
+    public reenter (): void {
         for (const pose of this._poses) {
             pose?.reenter();
         }
@@ -68,7 +69,7 @@ export abstract class PoseNodeChoosePoseBase extends PoseNode {
         // Dispatch update requests to non-zero weighted items.
         for (let iPose = 0; iPose < nPoses; ++iPose) {
             const weight = items[iPose].weight;
-            if (approx(weight, 0.0, 1e-5)) {
+            if (isIgnorableWeight(weight)) {
                 continue;
             }
             const pose = poses[iPose];
@@ -80,7 +81,7 @@ export abstract class PoseNodeChoosePoseBase extends PoseNode {
         }
     }
 
-    public doEvaluate (context: AnimationGraphEvaluationContext) {
+    public doEvaluate (context: AnimationGraphEvaluationContext): Pose {
         const {
             _poses: poses,
             _evaluationRecord: evaluationRecord,
@@ -96,7 +97,7 @@ export abstract class PoseNodeChoosePoseBase extends PoseNode {
             let sumWeight = 0.0;
             for (let iInputPose = 0; iInputPose < nPoses; ++iInputPose) {
                 const inputPoseWeight = evaluationRecord.items[iInputPose].weight;
-                if (!inputPoseWeight) {
+                if (isIgnorableWeight(inputPoseWeight)) {
                     continue;
                 }
                 const inputPose = poses[iInputPose]?.evaluate(context, PoseTransformSpaceRequirement.LOCAL);
@@ -129,7 +130,7 @@ export abstract class PoseNodeChoosePoseBase extends PoseNode {
     @serializable
     protected _fadeInDurations: number[] = [];
 
-    protected getChosenIndex () {
+    protected getChosenIndex (): number {
         return 0;
     }
 
@@ -143,7 +144,7 @@ class EvaluationRecord {
         itemCount: number,
         initialChosenIndex: number,
     ) {
-        const items =  Array.from({ length: itemCount }, () => new ItemEvaluationRecord());
+        const items =  Array.from({ length: itemCount }, (): ItemEvaluationRecord => new ItemEvaluationRecord());
         if (initialChosenIndex >= 0 && initialChosenIndex < itemCount) {
             items[initialChosenIndex].selfSourceWeight = 1.0;
             items[initialChosenIndex].selfTargetWeight = 1.0;
@@ -156,11 +157,11 @@ class EvaluationRecord {
         return this._items;
     }
 
-    public allWeightsAreZero () {
+    public allWeightsAreZero (): boolean {
         return this._chosenPoseIndex < 0;
     }
 
-    public update (deltaTime: number, newChoseIndex: number, fadeInDurations: readonly number[]) {
+    public update (deltaTime: number, newChoseIndex: number, fadeInDurations: readonly number[]): void {
         assertIsTrue(deltaTime >= 0.0);
 
         this._checkAlternation(newChoseIndex, fadeInDurations);
@@ -199,7 +200,7 @@ class EvaluationRecord {
             sumWeight += selfWeight;
             item.weight = selfWeight;
         }
-        if (!approx(sumWeight, 0.0, 1e-5)) {
+        if (!isIgnorableWeight(sumWeight)) {
             for (let iPose = 0; iPose < nPoses; ++iPose) {
                 const item = items[iPose];
                 item.weight /= sumWeight;
@@ -217,7 +218,7 @@ class EvaluationRecord {
 
     private _blendingDuration = 0.0;
 
-    private _checkAlternation (newChoseIndex: number, fadeInDurations: readonly number[]) {
+    private _checkAlternation (newChoseIndex: number, fadeInDurations: readonly number[]): void {
         const {
             _items: items,
             _chosenPoseIndex: oldChoseIndex,

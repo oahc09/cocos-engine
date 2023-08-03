@@ -29,7 +29,7 @@ import { Texture, Type } from '../../gfx';
 import { TextureBase } from './texture-base';
 import { IPassInfoFull, Pass, PassOverrides } from '../../render-scene/core/pass';
 import { MacroRecord, MaterialProperty } from '../../render-scene/core/pass-utils';
-import { Color, warnID, Vec4, cclegacy } from '../../core';
+import { Color, warnID, Vec4, cclegacy, warn } from '../../core';
 import { SRGBToLinear } from '../../rendering/pipeline-funcs';
 import { Renderer } from '../../misc/renderer';
 
@@ -77,7 +77,7 @@ export interface IMaterialInfo {
     states?: PassOverrides | PassOverrides[];
 }
 
-type MaterialPropertyFull = MaterialProperty | TextureBase | Texture | null;
+export type MaterialPropertyFull = MaterialProperty | TextureBase | Texture | null;
 
 /**
  * @en The material asset, specifies in details how a model is drawn on screen.
@@ -90,7 +90,7 @@ export class Material extends Asset {
      * @zh 获取一个材质的哈希值
      * @param material
      */
-    public static getHash (material: Material) {
+    public static getHash (material: Material): number {
         let hash = 0;
         for (const pass of material.passes) {
             hash ^= pass.hash;
@@ -146,7 +146,7 @@ export class Material extends Asset {
      * @en The current [[EffectAsset]].
      * @zh 当前使用的 [[EffectAsset]] 资源。
      */
-    get effectAsset () {
+    get effectAsset (): EffectAsset | null {
         return this._effectAsset;
     }
 
@@ -154,7 +154,7 @@ export class Material extends Asset {
      * @en Name of the current [[EffectAsset]].
      * @zh 当前使用的 [[EffectAsset]] 资源名。
      */
-    get effectName () {
+    get effectName (): string {
         return this._effectAsset ? this._effectAsset.name : '';
     }
 
@@ -162,7 +162,7 @@ export class Material extends Asset {
      * @en The current technique index.
      * @zh 当前的 technique 索引。
      */
-    get technique () {
+    get technique (): number {
         return this._techIdx;
     }
 
@@ -170,7 +170,7 @@ export class Material extends Asset {
      * @en The passes defined in this material.
      * @zh 当前正在使用的 pass 数组。
      */
-    get passes () {
+    get passes (): Pass[] {
         return this._passes;
     }
 
@@ -178,7 +178,7 @@ export class Material extends Asset {
      * @en The hash value of this material.
      * @zh 材质的 hash。
      */
-    get hash () {
+    get hash (): number {
         return this._hash;
     }
 
@@ -203,7 +203,7 @@ export class Material extends Asset {
      * @zh 根据所给信息初始化这个材质，初始化正常结束后材质即可立即用于渲染。
      * @param info @en Material description info. @zh 材质描述信息
      */
-    public initialize (info: IMaterialInfo) {
+    public initialize (info: IMaterialInfo): void {
         if (this._passes.length) {
             warnID(12005);
             return;
@@ -222,7 +222,7 @@ export class Material extends Asset {
      *
      * @param info @en Material description info. @zh 材质描述信息。
      */
-    public reset (info: IMaterialInfo) { // to be consistent with other assets
+    public reset (info: IMaterialInfo): void { // to be consistent with other assets
         this.initialize(info);
     }
 
@@ -238,7 +238,7 @@ export class Material extends Asset {
      * 如需修改现有材质，请创建一个新材质，<br>
      * 调用 copy 函数传入需要的 overrides 并赋给目标组件。
      */
-    public destroy () {
+    public destroy (): boolean {
         this._doDestroy();
         return super.destroy();
     }
@@ -249,8 +249,8 @@ export class Material extends Asset {
      * @param overrides @en The shader macro override values. @zh 宏的覆盖值，用于编译不同 Shader 变体。
      * @param passIdx @en The pass to apply to. Will apply to all passes if not specified. @zh 要重编的 pass 索引，如果没有指定，则重编所有 pass。
      */
-    public recompileShaders (overrides: MacroRecord, passIdx?: number) {
-        console.warn(`Shaders in material asset '${this.name}' cannot be modified at runtime, please instantiate the material first.`);
+    public recompileShaders (overrides: MacroRecord, passIdx?: number): void {
+        warn(`Shaders in material asset '${this.name}' cannot be modified at runtime, please instantiate the material first.`);
     }
 
     /**
@@ -259,15 +259,15 @@ export class Material extends Asset {
      * @param overrides The pipeline state override values.
      * @param passIdx The pass to apply to. Will apply to all passes if not specified.
      */
-    public overridePipelineStates (overrides: PassOverrides, passIdx?: number) {
-        console.warn(`Pipeline states in material asset '${this.name}' cannot be modified at runtime, please instantiate the material first.`);
+    public overridePipelineStates (overrides: PassOverrides, passIdx?: number): void {
+        warn(`Pipeline states in material asset '${this.name}' cannot be modified at runtime, please instantiate the material first.`);
     }
 
     /**
      * @en Callback function after material is loaded in [[AssetManager]]. Initialize the resources automatically.
      * @zh 通过 [[AssetManager]] 加载完成时的回调，将自动初始化材质资源。
      */
-    public onLoaded () {
+    public onLoaded (): void {
         this._update();
     }
 
@@ -276,7 +276,7 @@ export class Material extends Asset {
      * @zh 重置材质的所有 uniform 参数数据为 [[EffectAsset]] 中的默认初始值。
      * @param clearPasses @en Whether to clear the rendering data too. @zh 是否同时清空渲染数据。
      */
-    public resetUniforms (clearPasses = true) {
+    public resetUniforms (clearPasses = true): void {
         this._props.length = this._passes.length;
         for (let i = 0; i < this._props.length; i++) { this._props[i] = {}; }
         if (!clearPasses) { return; }
@@ -299,7 +299,7 @@ export class Material extends Asset {
      * @en The pass to apply to. Will apply to all passes if not specified.
      * @zh 设置此属性的 pass 索引，如果没有指定，则会设置此属性到所有 pass 上。
      */
-    public setProperty (name: string, val: MaterialPropertyFull | MaterialPropertyFull[], passIdx?: number) {
+    public setProperty (name: string, val: MaterialPropertyFull | MaterialPropertyFull[], passIdx?: number): void {
         let success = false;
         if (passIdx === undefined) { // try set property for all applicable passes
             const passes = this._passes;
@@ -312,7 +312,7 @@ export class Material extends Asset {
                 }
             }
         } else {
-            if (passIdx >= this._passes.length) { console.warn(`illegal pass index: ${passIdx}.`); return; }
+            if (passIdx >= this._passes.length) { warn(`illegal pass index: ${passIdx}.`); return; }
             const pass = this._passes[passIdx];
             if (this._uploadProperty(pass, name, val)) {
                 this._props[pass.propertyIndex][name] = val;
@@ -320,7 +320,7 @@ export class Material extends Asset {
             }
         }
         if (!success) {
-            console.warn(`illegal property name: ${name}.`);
+            warn(`illegal property name: ${name}.`);
         }
     }
 
@@ -348,7 +348,7 @@ export class Material extends Asset {
                 if (name in props) { return props[name]; }
             }
         } else {
-            if (passIdx >= this._passes.length) { console.warn(`illegal pass index: ${passIdx}.`); return null; }
+            if (passIdx >= this._passes.length) { warn(`illegal pass index: ${passIdx}.`); return null; }
             const props = this._props[this._passes[passIdx].propertyIndex];
             if (name in props) { return props[name]; }
         }
@@ -361,7 +361,7 @@ export class Material extends Asset {
      * @param mat @en The material to be copied. @zh 需要拷贝的原始材质。
      * @param overrides @en The overriding states on top of the original material. @zh 需要在原始材质上覆盖的状态。
      */
-    public copy (mat: Material, overrides?: IMaterialInfo) {
+    public copy (mat: Material, overrides?: IMaterialInfo): void {
         this._techIdx = mat._techIdx;
         this._props.length = mat._props.length;
         for (let i = 0; i < mat._props.length; i++) {
@@ -383,7 +383,7 @@ export class Material extends Asset {
     /**
      * @engineInternal
      */
-    protected _fillInfo (info: IMaterialInfo) {
+    protected _fillInfo (info: IMaterialInfo): void {
         if (info.technique !== undefined) { this._techIdx = info.technique; }
         if (info.effectAsset) {
             this._effectAsset = info.effectAsset;
@@ -397,7 +397,7 @@ export class Material extends Asset {
     /**
      * @engineInternal
      */
-    protected _prepareInfo (patch: Record<string, unknown> | Record<string, unknown>[], cur: Record<string, unknown>[]) {
+    protected _prepareInfo (patch: Record<string, unknown> | Record<string, unknown>[], cur: Record<string, unknown>[]): void {
         let patchArray = patch;
         if (!Array.isArray(patchArray)) { // fill all the passes if not specified
             const len = this._effectAsset ? this._effectAsset.techniques[this._techIdx].passes.length : 1;
@@ -411,7 +411,7 @@ export class Material extends Asset {
     /**
      * @engineInternal
      */
-    protected _createPasses () {
+    protected _createPasses (): Pass[] {
         const tech = this._effectAsset!.techniques[this._techIdx || 0];
         if (!tech) { return []; }
         const passNum = tech.passes.length;
@@ -438,14 +438,14 @@ export class Material extends Asset {
     /**
      * @engineInternal
      */
-    protected _update (keepProps = true) {
+    protected _update (keepProps = true): void {
         if (this._effectAsset) {
             this._passes = this._createPasses();
             // handle property values
             const totalPasses = this._effectAsset.techniques[this._techIdx].passes.length;
             this._props.length = totalPasses;
             if (keepProps) {
-                this._passes.forEach((pass, i) => {
+                this._passes.forEach((pass, i): void => {
                     let props = this._props[i];
                     if (!props) { props = this._props[i] = {}; }
                     if (pass.propertyIndex !== undefined) {
@@ -465,7 +465,7 @@ export class Material extends Asset {
     /**
      * @engineInternal
      */
-    protected _uploadProperty (pass: Pass, name: string, val: MaterialPropertyFull | MaterialPropertyFull[]) {
+    protected _uploadProperty (pass: Pass, name: string, val: MaterialPropertyFull | MaterialPropertyFull[]): boolean {
         const handle = pass.getHandle(name);
         if (!handle) { return false; }
         const type = Pass.getTypeFromHandle(handle);
@@ -498,14 +498,14 @@ export class Material extends Asset {
     /**
      * @engineInternal
      */
-    protected _bindTexture (pass: Pass, handle: number, val: MaterialPropertyFull, index?: number) {
+    protected _bindTexture (pass: Pass, handle: number, val: MaterialPropertyFull, index?: number): void {
         const binding = Pass.getBindingFromHandle(handle);
         if (val instanceof Texture) {
             pass.bindTexture(binding, val, index);
         } else if (val instanceof TextureBase) {
             const texture: Texture | null = val.getGFXTexture();
             if (!texture || !texture.width || !texture.height) {
-                // console.warn(`material '${this._uuid}' received incomplete texture asset '${val._uuid}'`);
+                // warn(`material '${this._uuid}' received incomplete texture asset '${val._uuid}'`);
                 return;
             }
             pass.bindTexture(binding, texture, index);
@@ -516,7 +516,7 @@ export class Material extends Asset {
     /**
      * @engineInternal
      */
-    protected _doDestroy () {
+    protected _doDestroy (): void {
         if (this._passes && this._passes.length) {
             for (const pass of this._passes) {
                 pass.destroy();
@@ -525,7 +525,7 @@ export class Material extends Asset {
         this._passes.length = 0;
     }
 
-    public initDefault (uuid?: string) {
+    public initDefault (uuid?: string): void {
         super.initDefault(uuid);
         this.initialize({
             effectName: 'builtin-unlit',
@@ -535,7 +535,7 @@ export class Material extends Asset {
         this.setProperty('mainColor', new Color('#ff00ff'));
     }
 
-    public validate () {
+    public validate (): boolean {
         return !!this._effectAsset && !this._effectAsset.isDefault && this.passes.length > 0;
     }
 }

@@ -39,7 +39,7 @@ namespace cc {
 uint32_t Node::clearFrame{0};
 uint32_t Node::clearRound{1000};
 const uint32_t Node::TRANSFORM_ON{1 << 0};
-uint32_t Node::globalFlagChangeVersion{1};
+uint32_t Node::globalFlagChangeVersion{0};
 
 namespace {
 const ccstd::string EMPTY_NODE_NAME;
@@ -345,28 +345,27 @@ void Node::removeAllChildren() {
 }
 
 void Node::setSiblingIndex(index_t index) {
-    if (!_parent) {
+    if (!_parent || (index < 0 && index != -1)) {
         return;
     }
     if (!!(_parent->_objFlags & Flags::DEACTIVATING)) {
         debug::errorID(3821);
         return;
     }
+
     ccstd::vector<IntrusivePtr<Node>> &siblings = _parent->_children;
-    index = index != -1 ? index : static_cast<index_t>(siblings.size()) - 1;
-    index_t oldIdx = getIdxOfChild(siblings, this);
-    if (index != oldIdx) {
-        if (oldIdx != CC_INVALID_INDEX) {
-            siblings.erase(siblings.begin() + oldIdx);
-        }
-        if (index < siblings.size()) {
-            siblings.insert(siblings.begin() + index, this);
-        } else {
-            siblings.emplace_back(this);
-        }
-        _parent->updateSiblingIndex();
-        emit<SiblingIndexChanged>(index);
+    if (index == -1 || index >= siblings.size()) {
+        index = static_cast<index_t>(siblings.size()) - 1;
     }
+
+    if (index < 0 || index == _siblingIndex) {
+        return;
+    }
+
+    siblings.erase(siblings.begin() + _siblingIndex);
+    siblings.insert(siblings.begin() + index, this);
+    _parent->updateSiblingIndex();
+    emit<SiblingIndexChanged>(index);
 }
 
 Node *Node::getChildByPath(const ccstd::string &path) const {
@@ -489,8 +488,8 @@ void Node::updateWorldTransformRecursive(uint32_t &dirtyBits) { // NOLINT(misc-n
             }
             if (dirtyBits & static_cast<uint32_t>(TransformBit::SCALE)) {
                 _worldScale.set(_localScale);
-                Mat4::fromRTS(_worldRotation, _worldPosition, _worldScale, &_worldMatrix);
             }
+            Mat4::fromRTS(_worldRotation, _worldPosition, _worldScale, &_worldMatrix);
         }
     }
     _transformFlags = (static_cast<uint32_t>(TransformBit::NONE));
@@ -773,6 +772,10 @@ void Node::setRTSInternal(Quaternion *rot, Vec3 *pos, Vec3 *scale, bool calledFr
             emit<TransformChanged>(static_cast<TransformBit>(dirtyBit));
         }
     }
+}
+
+void Node::resetChangedFlags() {
+    globalFlagChangeVersion++;
 }
 
 void Node::clearNodeArray() {

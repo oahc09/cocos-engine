@@ -27,6 +27,7 @@
 #include "cocos/bindings/jswrapper/HandleObject.h"
 #include "cocos/bindings/jswrapper/SeApi.h"
 #include "cocos/bindings/manual/jsb_global_init.h"
+#include "cocos/engine/Engine.h"
 #include "cocos/platform/interfaces/modules/ISystemWindow.h"
 #include "cocos/platform/interfaces/modules/ISystemWindowManager.h"
 
@@ -40,6 +41,7 @@ se::Object *jsKeyboardEventObj = nullptr;
 se::Object *jsControllerEventArray = nullptr;
 se::Object *jsControllerChangeEventArray = nullptr;
 se::Object *jsResizeEventObj = nullptr;
+se::Object *jsBlockingDetectedObj = nullptr;
 bool inited = false;
 bool busListenerInited = false;
 
@@ -70,6 +72,7 @@ events::Orientation::Listener EventDispatcher::listenerOrientation;
 events::RestartVM::Listener EventDispatcher::listenerRestartVM;
 events::Close::Listener EventDispatcher::listenerClose;
 events::PointerLock::Listener EventDispatcher::listenerPointerLock;
+events::ScriptExecutionTimeout::Listener EventDispatcher::listenerScriptExecutionTimeout;
 
 uint32_t EventDispatcher::hashListenerId = 1;
 
@@ -98,6 +101,7 @@ void EventDispatcher::init() {
         listenerClose.bind(&dispatchCloseEvent);
         listenerRestartVM.bind(&dispatchRestartVM);
         listenerPointerLock.bind(&dispatchPointerlockChangeEvent);
+        listenerScriptExecutionTimeout.bind(&dispatchScriptExecutionTimeout);
         busListenerInited = true;
     }
 }
@@ -143,6 +147,11 @@ void EventDispatcher::destroy() {
         jsResizeEventObj->unroot();
         jsResizeEventObj->decRef();
         jsResizeEventObj = nullptr;
+    }
+
+    if (jsBlockingDetectedObj != nullptr) {
+        jsBlockingDetectedObj->decRef();
+        jsBlockingDetectedObj = nullptr;
     }
 
     inited = false;
@@ -286,6 +295,7 @@ void EventDispatcher::dispatchKeyboardEvent(const KeyboardEvent &keyboardEvent) 
     jsKeyboardEventObj->setProperty("repeat", se::Value(keyboardEvent.action == KeyboardEvent::Action::REPEAT));
     jsKeyboardEventObj->setProperty("keyCode", se::Value(keyboardEvent.key));
     jsKeyboardEventObj->setProperty("windowId", se::Value(keyboardEvent.windowId));
+    jsKeyboardEventObj->setProperty("code", se::Value(keyboardEvent.code));
 
     se::ValueArray args;
     args.emplace_back(se::Value(jsKeyboardEventObj));
@@ -361,7 +371,6 @@ void EventDispatcher::dispatchControllerChangeEvent(const ControllerChangeEvent 
     EventDispatcher::doDispatchJsEvent(eventName, args);
 }
 
-
 void EventDispatcher::dispatchTickEvent(float /*dt*/) {
     if (!se::ScriptEngine::getInstance()->isValid()) {
         return;
@@ -400,7 +409,7 @@ void EventDispatcher::dispatchResizeEvent(int width, int height, uint32_t window
 }
 
 void EventDispatcher::dispatchOrientationChangeEvent(int orientation) {
-    //Ts's logic is same as the 'onResize', so remove code here temporary.
+    // Ts's logic is same as the 'onResize', so remove code here temporary.
 }
 
 void EventDispatcher::dispatchEnterBackgroundEvent() {
@@ -442,6 +451,33 @@ void EventDispatcher::doDispatchJsEvent(const char *jsFunctionName, const std::v
     if (func.isObject() && func.toObject()->isFunction()) {
         func.toObject()->call(args, nullptr);
     }
+}
+
+void EventDispatcher::dispatchScriptExecutionTimeout() {
+    se::ScriptEngine::getInstance()->requestInterrupt(
+        +[](void * /*data*/) {
+            auto *gameEngine = static_cast<cc::Engine *>(CC_CURRENT_ENGINE().get());
+            se::AutoHandleScope scope;
+            se::Value callback;
+            auto *scriptEngine = se::ScriptEngine::getInstance();
+            auto stackString = scriptEngine->getCurrentStackTrace();
+            CC_LOG_ERROR("Execution Timeout Detected (timeout: %d ms):\nCall stack:\n%s", gameEngine->getBlockingTimeout(), stackString.c_str());
+            if (!jsBlockingDetectedObj) {
+                se::Value jsbObj;
+                se::Value monitorObj;
+                se::Value blockingObject;
+                scriptEngine->getGlobalObject()->getProperty("jsb", &jsbObj);
+                jsbObj.toObject()->getProperty("monitor", &monitorObj);
+                monitorObj.toObject()->getProperty("blocking", &blockingObject);
+                jsBlockingDetectedObj = blockingObject.toObject();
+                jsBlockingDetectedObj->incRef();
+            }
+            jsBlockingDetectedObj->getProperty("callback", &callback);
+            if (callback.isObject() && callback.toObject()->isFunction()) {
+                callback.toObject()->call({se::Value(stackString)}, nullptr);
+            }
+        },
+        nullptr);
 }
 
 } // end of namespace cc

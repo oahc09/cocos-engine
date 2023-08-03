@@ -38,10 +38,10 @@
 #include "renderer/pipeline/custom/RenderInterfaceTypes.h"
 #include "scene/Model.h"
 #include "scene/Pass.h"
+#include "scene/ReflectionProbe.h"
+#include "scene/ReflectionProbeManager.h"
 #include "scene/RenderScene.h"
 #include "scene/SubModel.h"
-#include "scene/ReflectionProbeManager.h"
-#include "scene/ReflectionProbe.h"
 
 namespace {
 const cc::gfx::SamplerInfo LIGHTMAP_SAMPLER_HASH{
@@ -66,6 +66,7 @@ const ccstd::vector<cc::scene::IMacroPatch> SHADOW_MAP_PATCHES{{"CC_RECEIVE_SHAD
 const ccstd::vector<cc::scene::IMacroPatch> LIGHT_PROBE_PATCHES{{"CC_USE_LIGHT_PROBE", true}};
 const ccstd::string CC_USE_REFLECTION_PROBE = "CC_USE_REFLECTION_PROBE";
 const ccstd::string CC_DISABLE_DIRECTIONAL_LIGHT = "CC_DISABLE_DIRECTIONAL_LIGHT";
+const ccstd::string CC_USE_GPU_DRIVEN = "CC_USE_GPU_DRIVEN";
 const ccstd::vector<cc::scene::IMacroPatch> STATIC_LIGHTMAP_PATHES{{"CC_USE_LIGHTMAP", 1}};
 const ccstd::vector<cc::scene::IMacroPatch> STATIONARY_LIGHTMAP_PATHES{{"CC_USE_LIGHTMAP", 2}};
 const ccstd::vector<cc::scene::IMacroPatch> HIGHP_LIGHTMAP_PATHES{{"CC_LIGHT_MAP_VERSION", 2}};
@@ -207,8 +208,8 @@ void Model::updateUBOs(uint32_t stamp) {
         _localBuffer->write(_lightmapUVParam, sizeof(float) * pipeline::UBOLocal::LIGHTINGMAP_UVPARAM);
         _localBuffer->write(_shadowBias, sizeof(float) * (pipeline::UBOLocal::LOCAL_SHADOW_BIAS));
 
-        auto * probe = scene::ReflectionProbeManager::getInstance()->getReflectionProbeById(_reflectionProbeId);
-        auto * blendProbe = scene::ReflectionProbeManager::getInstance()->getReflectionProbeById(_reflectionProbeBlendId);
+        auto *probe = scene::ReflectionProbeManager::getInstance()->getReflectionProbeById(_reflectionProbeId);
+        auto *blendProbe = scene::ReflectionProbeManager::getInstance()->getReflectionProbeById(_reflectionProbeBlendId);
         if (probe) {
             if (probe->getProbeType() == scene::ReflectionProbe::ProbeType::PLANAR) {
                 const Vec4 plane = {probe->getNode()->getUp().x, probe->getNode()->getUp().y, probe->getNode()->getUp().z, 1.F};
@@ -233,8 +234,8 @@ void Model::updateUBOs(uint32_t stamp) {
                     const Vec4 boxSize = {boudingBox.x, boudingBox.y, boudingBox.z, static_cast<float>(blendProbe->getCubeMap() ? blendProbe->getCubeMap()->mipmapLevel() + mipAndUseRGBE : 1 + mipAndUseRGBE)};
                     _localBuffer->write(boxSize, sizeof(float) * (pipeline::UBOLocal::REFLECTION_PROBE_BLEND_DATA2));
                 } else if (_reflectionProbeType == scene::UseReflectionProbeType::BLEND_PROBES_AND_SKYBOX) {
-                    //blend with skybox
-                    const Vec4 pos = { 0.F, 0.F, 0.F, _reflectionProbeBlendWeight };
+                    // blend with skybox
+                    const Vec4 pos = {0.F, 0.F, 0.F, _reflectionProbeBlendWeight};
                     _localBuffer->write(pos, sizeof(float) * (pipeline::UBOLocal::REFLECTION_PROBE_BLEND_DATA1));
                 }
             }
@@ -468,7 +469,7 @@ ccstd::vector<IMacroPatch> Model::getMacroPatches(index_t subModelIndex) {
         }
     }
 
-    patches.push_back({CC_USE_REFLECTION_PROBE, static_cast<int32_t>(_reflectionProbeType) });
+    patches.push_back({CC_USE_REFLECTION_PROBE, static_cast<int32_t>(_reflectionProbeType)});
 
     if (_lightmap != nullptr) {
         bool stationary = false;
@@ -497,6 +498,18 @@ ccstd::vector<IMacroPatch> Model::getMacroPatches(index_t subModelIndex) {
     }
     patches.push_back({CC_DISABLE_DIRECTIONAL_LIGHT, !_receiveDirLight});
 
+    const auto *pipeline = Root::getInstance()->getPipeline();
+    const auto *sceneData = pipeline->getPipelineSceneData();
+    const auto &subModel = _subModels[subModelIndex];
+    bool useGPUDriven = sceneData &&
+                        sceneData->isGPUDrivenEnabled() &&
+                        subModel &&
+                        subModel->getSubMesh() &&
+                        subModel->getSubMesh()->canUseGPUScene() &&
+                        !_useLightProbe &&
+                        _reflectionProbeType == UseReflectionProbeType::NONE;
+    patches.push_back({CC_USE_GPU_DRIVEN, useGPUDriven});
+
     return patches;
 }
 
@@ -516,7 +529,7 @@ void Model::updateAttributesAndBinding(index_t subModelIndex) {
 
     ccstd::vector<gfx::Attribute> attributes;
     ccstd::unordered_map<ccstd::string, gfx::Attribute> attributeMap;
-    for (const auto &pass : subModel->getPasses()) {
+    for (const auto &pass : *(subModel->getPasses())) {
         gfx::Shader *shader = pass->getShaderVariant(subModel->getPatches());
         for (const auto &attr : shader->getAttributes()) {
             if (attributeMap.find(attr.name) == attributeMap.end()) {

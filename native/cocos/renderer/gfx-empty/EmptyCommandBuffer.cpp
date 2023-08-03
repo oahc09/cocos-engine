@@ -105,6 +105,12 @@ void EmptyCommandBuffer::blitTexture(Texture *srcTexture, Texture *dstTexture, c
 void EmptyCommandBuffer::copyTexture(Texture *srcTexture, Texture *dstTexture, const TextureCopy *regions, uint32_t count) {
 }
 
+void EmptyCommandBuffer::resolveTexture(Texture *srcTexture, Texture *dstTexture, const TextureCopy *regions, uint32_t count) {
+}
+
+void EmptyCommandBuffer::copyBuffer(Buffer *srcBuffer, Buffer *dstBuffer, const BufferCopy *regions, uint32_t count) {
+}
+
 void EmptyCommandBuffer::dispatch(const DispatchInfo &info) {
 }
 
@@ -121,3 +127,4 @@ void EmptyCommandBuffer::resetQueryPool(QueryPool *queryPool) {
 
 } // namespace gfx
 } // namespace cc
+

@@ -32,8 +32,9 @@ import { LayoutGraphData, loadLayoutGraphData } from './layout-graph';
 import { BinaryInputArchive } from './binary-archive';
 import { WebProgramLibrary } from './web-program-library';
 import { Device } from '../../gfx';
-import { initializeLayoutGraphData, terminateLayoutGraphData, getCustomPassID, getCustomPhaseID } from './layout-graph-utils';
+import { initializeLayoutGraphData, terminateLayoutGraphData, getCustomPassID, getCustomPhaseID, getCustomSubpassID } from './layout-graph-utils';
 import { ProgramLibrary } from './private';
+import { PostProcessBuilder } from '../post-process/post-process-builder';
 
 let _pipeline: WebPipeline | null = null;
 
@@ -60,27 +61,31 @@ export function createCustomPipeline (): BasicPipeline {
 
 export const customPipelineBuilderMap = new Map<string, PipelineBuilder>();
 
-export function setCustomPipeline (name: string, builder: PipelineBuilder) {
+export function setCustomPipeline (name: string, builder: PipelineBuilder): void {
     customPipelineBuilderMap.set(name, builder);
 }
 export function getCustomPipeline (name: string): PipelineBuilder {
-    let builder = customPipelineBuilderMap.get(name) || null;
-    if (builder === null) {
-        builder = customPipelineBuilderMap.get('Forward')!;
+    let builder = customPipelineBuilderMap.get(name);
+    if (!builder) {
+        if (name === 'Test') {
+            builder = new TestPipelineBuilder(_pipeline!.pipelineSceneData);
+            customPipelineBuilderMap.set('Test', builder);
+        } else {
+            builder = customPipelineBuilderMap.get('Forward')!;
+        }
     }
     return builder;
 }
 
-function addCustomBuiltinPipelines (map: Map<string, PipelineBuilder>) {
-    map.set('Forward', new ForwardPipelineBuilder());
+function addCustomBuiltinPipelines (map: Map<string, PipelineBuilder>): void {
+    map.set('Forward', new PostProcessBuilder());
     map.set('Deferred', new DeferredPipelineBuilder());
     map.set('Deprecated', new CustomPipelineBuilder());
-    map.set('Test', new TestPipelineBuilder());
 }
 
 addCustomBuiltinPipelines(customPipelineBuilderMap);
 
-export function init (device: Device, arrayBuffer: ArrayBuffer | null) {
+export function init (device: Device, arrayBuffer: ArrayBuffer | null): void {
     if (arrayBuffer) {
         const readBinaryData = new BinaryInputArchive(arrayBuffer);
         loadLayoutGraphData(readBinaryData, defaultLayoutGraph);
@@ -88,12 +93,16 @@ export function init (device: Device, arrayBuffer: ArrayBuffer | null) {
     initializeLayoutGraphData(device, defaultLayoutGraph);
 }
 
-export function destroy () {
+export function destroy (): void {
     terminateLayoutGraphData(defaultLayoutGraph);
 }
 
 export function getPassID (name: string | undefined): number {
     return getCustomPassID(defaultLayoutGraph, name);
+}
+
+export function getSubpassID (passID: number, name: string): number {
+    return getCustomSubpassID(defaultLayoutGraph, passID, name);
 }
 
 export function getPhaseID (passID: number, name: string | number | undefined): number {

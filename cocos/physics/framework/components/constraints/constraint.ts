@@ -24,10 +24,10 @@
 */
 
 import { ccclass, requireComponent, displayOrder, type, readOnly, serializable, tooltip } from 'cc.decorator';
-import { EDITOR } from 'internal:constants';
+import { EDITOR_NOT_IN_PREVIEW } from 'internal:constants';
 import { Component } from '../../../../scene-graph';
 import { RigidBody } from '../rigid-body';
-import { Eventify, cclegacy } from '../../../../core';
+import { Eventify } from '../../../../core';
 import { IBaseConstraint } from '../../../spec/i-physics-constraint';
 import { selector, createConstraint } from '../../physics-selector';
 import { EConstraintType } from '../../physics-enum';
@@ -78,7 +78,7 @@ export class Constraint extends Eventify(Component) {
 
     set connectedBody (v: RigidBody | null) {
         this._connectedBody = v;
-        if (!EDITOR || cclegacy.GAME_VIEW) {
+        if (!EDITOR_NOT_IN_PREVIEW) {
             if (this._constraint) this._constraint.setConnectedBody(v);
         }
     }
@@ -91,13 +91,13 @@ export class Constraint extends Eventify(Component) {
      */
     @displayOrder(0)
     @tooltip('i18n:physics3d.constraint.enableCollision')
-    get enableCollision () {
+    get enableCollision (): boolean {
         return this._enableCollision;
     }
 
     set enableCollision (v) {
         this._enableCollision = v;
-        if (!EDITOR || cclegacy.GAME_VIEW) {
+        if (!EDITOR_NOT_IN_PREVIEW) {
             if (this._constraint) this._constraint.setEnableCollision(v);
         }
     }
@@ -127,25 +127,25 @@ export class Constraint extends Eventify(Component) {
 
     /// COMPONENT LIFECYCLE ///
 
-    protected onLoad () {
+    protected onLoad (): void {
         if (!selector.runInEditor) return;
         this._constraint = createConstraint(this.TYPE);
         this._constraint.initialize(this);
     }
 
-    protected onEnable () {
+    protected onEnable (): void {
         if (this._constraint) {
             this._constraint.onEnable!();
         }
     }
 
-    protected onDisable () {
+    protected onDisable (): void {
         if (this._constraint) {
             this._constraint.onDisable!();
         }
     }
 
-    protected onDestroy () {
+    protected onDestroy (): void {
         if (this._constraint) {
             this._constraint.onDestroy!();
         }

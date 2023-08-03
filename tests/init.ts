@@ -1,6 +1,18 @@
 jest.mock(
     'internal:constants',
-    () => jest.requireActual('./constants-for-test'),
+    () => {
+        const actual = jest.requireActual('./constants-for-test');
+        const { getCurrentTestSuiteConfig } = jest.requireActual('./utils/test-suite-config') as
+            typeof import('./utils/test-suite-config');
+        const config = getCurrentTestSuiteConfig();
+        if (!config.constantOverrides) {
+            return actual;
+        }
+        return {
+            ...actual,
+            ...config.constantOverrides,
+        };
+    },
     { virtual: true, },
 );
 
@@ -67,6 +79,7 @@ jest.mock(
     'external:emscripten/webgpu/webgpu_wasm.wasm',
     'external:emscripten/webgpu/glslang.wasm',
     'external:emscripten/physx/physx.release.wasm.wasm',
+    'external:emscripten/spine/spine.wasm',
 ].forEach(moduleId => {
     jest.mock(moduleId, 
         () => ({
@@ -83,6 +96,7 @@ jest.mock(
     'external:emscripten/webgpu/webgpu_wasm.js',
     'external:emscripten/webgpu/glslang.js',
     'external:emscripten/physx/physx.release.wasm.js',
+    'external:emscripten/spine/spine.js',
 ].forEach(moduleId => {
     jest.mock(moduleId, 
         () => ({
@@ -103,6 +117,12 @@ jest.mock(
 jest.mock(
     'external:emscripten/bullet/bullet.asm.js', 
     () => jest.requireActual('../native/external/emscripten/bullet/bullet.asm.js'),
+    { virtual: true },
+);
+
+jest.mock(
+    'external:emscripten/spine/spine.asm.js', 
+    () => jest.requireActual('../native/external/emscripten/spine/spine.asm.js'),
     { virtual: true },
 );
 
@@ -163,7 +183,8 @@ const config: IGameConfig = {
         }
     }
 }
-globalThis.waitThis((async () => {
+
+async function bootstrap() {
     game.on(Game.EVENT_POST_SUBSYSTEM_INIT, () => {
         effects.forEach((e, effectIndex) => {
             const effect = Object.assign(new EffectAsset(), e);
@@ -182,4 +203,6 @@ globalThis.waitThis((async () => {
     initBuiltinPhysicsMaterial();
     await game.init(config);
     await game.run();
-})());
+}
+
+module.exports = bootstrap;
