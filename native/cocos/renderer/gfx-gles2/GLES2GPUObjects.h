@@ -42,6 +42,7 @@ struct GLES2GPUConstantRegistry {
     bool useDrawInstanced = false;
     bool useInstancedArrays = false;
     bool useDiscardFramebuffer = false;
+    bool debugMarker = false;
 };
 
 class GLES2GPUStateCache;
@@ -133,6 +134,7 @@ struct GLES2GPUTexture {
     GLenum glWrapT{0};
     GLenum glMinFilter{0};
     GLenum glMagFilter{0};
+    GLenum glReduction{0};
     GLES2GPUSwapchain *swapchain{nullptr};
 };
 
@@ -155,11 +157,13 @@ struct GLES2GPUSampler {
     Address addressU = Address::CLAMP;
     Address addressV = Address::CLAMP;
     Address addressW = Address::CLAMP;
+    Reduction reduction = Reduction::WEIGHTED_AVERAGE;
     GLenum glMinFilter = 0;
     GLenum glMagFilter = 0;
     GLenum glWrapS = 0;
     GLenum glWrapT = 0;
     GLenum glWrapR = 0;
+    GLenum glReduction = 0;
 };
 
 struct GLES2GPUInput {

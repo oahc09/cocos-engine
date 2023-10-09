@@ -24,11 +24,12 @@
 */
 
 import { EDITOR } from 'internal:constants';
+import { cclegacy } from '@base/global';
 import { MeshRenderer } from '../framework/mesh-renderer';
 import { ReflectionProbeType } from './reflection-probe-enum';
 import { ImageAsset, Texture2D } from '../../asset/assets';
 import { PixelFormat } from '../../asset/assets/asset-enum';
-import { Vec3, geometry, cclegacy } from '../../core';
+import { Vec3, geometry } from '../../core';
 import { AABB } from '../../core/geometry';
 import { Texture } from '../../gfx';
 import { Camera, Model } from '../../render-scene/scene';
@@ -65,57 +66,68 @@ export class ReflectionProbeManager {
     set updateForRuntime (val: boolean) {
         this._updateForRuntime = val;
     }
+
     get updateForRuntime (): boolean {
         return this._updateForRuntime;
     }
 
+    /**
+     * @engineInternal
+     */
     public registerEvent (): void {
         if (!this._registeredEvent) {
             cclegacy.director.on(cclegacy.Director.EVENT_BEFORE_UPDATE, this.onUpdateProbes, this);
             this._registeredEvent = true;
         }
     }
+
     /**
-     * @en refresh all reflection probe
-     * @zh 刷新所有反射探针
+     * @en Refresh all reflection probe.
+     * @zh 刷新所有反射探针。
      */
-    public onUpdateProbes (forceUpdate = false): void {
-        if (!EDITOR && !this._updateForRuntime) return;
+    public onUpdateProbes (): void {
         if (this._probes.length === 0) return;
         const scene = cclegacy.director.getScene();
         if (!scene || !scene.renderScene) {
             return;
         }
-        const models = scene.renderScene.models;
+        const models = scene.renderScene.models as Model[];
         for (let i = 0; i < models.length; i++) {
             const model = models[i];
             if (!model.node) continue;
-            if ((model.node.layer & REFLECTION_PROBE_DEFAULT_MASK) && (model.node.hasChangedFlags || forceUpdate)) {
+            if (model.node.layer & REFLECTION_PROBE_DEFAULT_MASK) {
                 if (model.reflectionProbeType === ReflectionProbeType.BAKED_CUBEMAP || this._isUsedBlending(model)) {
-                    this.updateUseCubeModels(model);
+                    this.selectReflectionProbe(model);
                 } else if (model.reflectionProbeType === ReflectionProbeType.PLANAR_REFLECTION) {
-                    this.updateUsePlanarModels(model);
+                    this.selectPlanarReflectionProbe(model);
                 }
             }
         }
     }
 
+    /**
+     * @en filter models that use planar reflection.
+     * @zh 筛选使用平面反射的模型
+     */
     public filterModelsForPlanarReflection (): void {
         if (this._probes.length === 0) return;
         const scene = cclegacy.director.getScene();
         if (!scene || !scene.renderScene) {
             return;
         }
-        const models = scene.renderScene.models;
+        const models = scene.renderScene.models as Model[];
         for (let i = 0; i < models.length; i++) {
             const model = models[i];
             if (!model.node) continue;
             if ((model.node.layer & REFLECTION_PROBE_DEFAULT_MASK) && model.reflectionProbeType === ReflectionProbeType.PLANAR_REFLECTION) {
-                this.updateUsePlanarModels(model);
+                this.selectPlanarReflectionProbe(model);
             }
         }
     }
 
+    /**
+     * @engineInternal
+     */
     public clearPlanarReflectionMap (probe: ReflectionProbe): void {
         for (const entry of this._usePlanarModels.entries()) {
             if (entry[1] === probe) {
@@ -124,6 +136,9 @@ export class ReflectionProbeManager {
         }
     }
 
+    /**
+     * @engineInternal
+     */
     public register (probe: ReflectionProbe): void {
         const index = this._probes.indexOf(probe);
         if (index === -1) {
@@ -132,6 +147,9 @@ export class ReflectionProbeManager {
         }
     }
 
+    /**
+     * @engineInternal
+     */
     public unregister (probe: ReflectionProbe): void {
         for (let i = 0; i < this._probes.length; i++) {
             if (this._probes[i] === probe) {
@@ -145,6 +163,9 @@ export class ReflectionProbeManager {
         this.updateProbeData();
     }
 
+    /**
+     * @engineInternal
+     */
     public exists (probeId: number): boolean {
         if (this._probes.length === 0) return false;
         for (let i = 0; i < this._probes.length; i++) {
@@ -155,6 +176,9 @@ export class ReflectionProbeManager {
         return false;
     }
 
+    /**
+     * @engineInternal
+     */
     public getNewReflectionProbeId (): number {
         let probeId = 0;
         // eslint-disable-next-line no-constant-condition
@@ -167,10 +191,18 @@ export class ReflectionProbeManager {
         }
     }
 
+    /**
+     * @en Get all reflection probes in the scene.
+     * @zh 获取场景中所有的反射探针
+     */
     public getProbes (): ReflectionProbe[] {
         return this._probes;
     }
 
+    /**
+     * @en Get reflection probe by id.
+     * @zh 根据id获取反射探针
+     */
     public getProbeById (probeId: number): ReflectionProbe | null {
         for (let i = 0; i < this._probes.length; i++) {
             if (this._probes[i].getProbeId() === probeId) {
@@ -180,10 +212,16 @@ export class ReflectionProbeManager {
         return null;
     }
 
+    /**
+     * @engineInternal
+     */
     public clearAll (): void {
         this._probes = [];
     }
 
+    /**
+     * @engineInternal
+     */
     public getProbeByCamera (camera: Camera): ReflectionProbe | null {
         for (let i = 0; i < this._probes.length; i++) {
             if (this._probes[i].camera === camera) {
@@ -241,7 +279,7 @@ export class ReflectionProbeManager {
      * @param probe update the model for reflection probe
      * @engineInternal
      */
-    public updateUsePlanarModels (model: Model): void {
+    public selectPlanarReflectionProbe (model: Model): void {
         if (!model.node || !model.worldBounds || model.reflectionProbeType !== ReflectionProbeType.PLANAR_REFLECTION) return;
         for (let i = 0; i < this._probes.length; i++) {
             const probe = this._probes[i];
@@ -272,12 +310,11 @@ export class ReflectionProbeManager {
     }
 
     /**
-     * @en Update objects using reflection probe for bake cubemap.
-     * @zh 更新使用反射探针烘焙cubemap的物体。
-     * @param model update the model for reflection probe
-     * @engineInternal
+     * @en Selecting the appropriate reflection probe for the model, it will use the closest one based on distance.
+     * @zh 为模型选择适用的反射探针，会使用距离最近的。
+     * @param model select for this model
      */
-    public updateUseCubeModels (model: Model): void {
+    public selectReflectionProbe (model: Model): void {
         if (model.node && model.worldBounds && ((model.node.layer & REFLECTION_PROBE_DEFAULT_MASK))) {
             model.updateWorldBound();
             const nearest = this._getNearestProbe(model);
@@ -442,6 +479,45 @@ export class ReflectionProbeManager {
     }
 
     /**
+     * @en Set reflection probe used by the model.
+     * @zh 手动设置模型使用的反射探针。
+     * @param model set the probe for this model
+     * @param probe reflection probe to be set
+     * @param blendProbe reflection probe for blend
+     */
+    public setReflectionProbe (model: Model, probe: ReflectionProbe, blendProbe: ReflectionProbe | null = null): void {
+        if (!probe) return;
+        this._useCubeModels.set(model, probe);
+        this._updateCubemapOfModel(model, probe);
+        if (blendProbe) {
+            this._updateBlendProbeInfo(model, probe, blendProbe);
+        }
+    }
+
+    /**
+     * @engineInternal
+     */
+    public updateProbeOfModels (): void {
+        if (this._probes.length === 0) return;
+        const scene = cclegacy.director.getScene();
+        if (!scene || !scene.renderScene) {
+            return;
+        }
+        const models = scene.renderScene.models as Model[];
+        for (let i = 0; i < models.length; i++) {
+            const model = models[i];
+            if (!model.node) continue;
+            if (model.node.layer & REFLECTION_PROBE_DEFAULT_MASK) {
+                if (model.reflectionProbeType === ReflectionProbeType.BAKED_CUBEMAP
+                    || model.reflectionProbeType === ReflectionProbeType.PLANAR_REFLECTION
+                    || this._isUsedBlending(model)) {
+                    model.updateReflectionProbeId();
+                }
+            }
+        }
+    }
+
+    /**
      * @en
      * select the probe with the nearest distance.
      * @zh
@@ -507,14 +583,14 @@ export class ReflectionProbeManager {
             const p = this._useCubeModels.get(key);
             if (p !== undefined && p === probe) {
                 this._useCubeModels.delete(key);
-                this.updateUseCubeModels(key);
+                this.selectReflectionProbe(key);
             }
         }
         for (const key of this._usePlanarModels.keys()) {
             const p = this._usePlanarModels.get(key);
             if (p !== undefined && p === probe) {
                 this._usePlanarModels.delete(key);
-                this.updateUsePlanarModels(key);
+                this.selectPlanarReflectionProbe(key);
             }
         }
     }
@@ -535,7 +611,8 @@ export class ReflectionProbeManager {
         if (probe) {
             meshRender.updateReflectionProbeDataMap(this._dataTexture);
             if (this._isUsedBlending(model)) {
-                this._updateBlendProbeInfo(model, probe);
+                const blendProbe = this._getBlendProbe(model);
+                this._updateBlendProbeInfo(model, probe, blendProbe);
             }
         }
     }
@@ -559,7 +636,7 @@ export class ReflectionProbeManager {
         return false;
     }
 
-    private _updateBlendProbeInfo (model: Model, probe: ReflectionProbe): void {
+    private _updateBlendProbeInfo (model: Model, probe: ReflectionProbe, blendProbe: ReflectionProbe | null): void {
         const node = model.node;
         if (!node) {
             return;
@@ -568,7 +645,6 @@ export class ReflectionProbeManager {
         if (!meshRender) {
             return;
         }
-        const blendProbe = this._getBlendProbe(model);
         if (blendProbe) {
             meshRender.updateReflectionProbeBlendId(blendProbe.getProbeId());
             meshRender.updateProbeBlendCubemap(blendProbe.cubemap);

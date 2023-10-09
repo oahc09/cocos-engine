@@ -22,7 +22,8 @@
  THE SOFTWARE.
 */
 import { EDITOR, NATIVE, PREVIEW, TEST } from 'internal:constants';
-import { assert, error, Settings, settings } from '../../core';
+import { assert, error } from '@base/debug';
+import { Settings, settings } from '../../core';
 import { fetchPipeline, pipeline } from './shared';
 import Task from './task';
 
@@ -81,7 +82,7 @@ if ((EDITOR || PREVIEW) && !TEST) {
             let text = '';
             if (EDITOR) {
                 const info = await Editor.Message.request('asset-db', 'query-asset-info', uuid);
-                if (info && info.library['.cconb']) {
+                if (info && info.library['.bin'] && Object.keys(info.library).length === 1) {
                     text = '.cconb';
                 }
             } else {

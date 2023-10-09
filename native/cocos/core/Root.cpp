@@ -48,6 +48,7 @@
 #include "scene/Camera.h"
 #include "scene/DirectionalLight.h"
 #include "scene/SpotLight.h"
+#include "scene/Skybox.h"
 
 namespace cc {
 
@@ -63,7 +64,7 @@ Root::Root(gfx::Device *device)
 : _device(device) {
     instance = this;
     // TODO(minggo):
-    //    this._dataPoolMgr = legacyCC.internal.DataPoolManager && new legacyCC.internal.DataPoolManager(device) as DataPoolManager;
+    //    this._dataPoolMgr = cclegacy.internal.DataPoolManager && new cclegacy.internal.DataPoolManager(device) as DataPoolManager;
 
     _cameraList.reserve(6);
     _swapchains.reserve(2);
@@ -356,6 +357,11 @@ bool Root::setRenderPipeline(pipeline::RenderPipeline *rppl /* = nullptr*/) {
 void Root::onGlobalPipelineStateChanged() {
     for (const auto &scene : _scenes) {
         scene->onGlobalPipelineStateChanged();
+    }
+
+    if (_pipelineRuntime->getPipelineSceneData()->getSkybox()->isEnabled())
+    {
+        _pipelineRuntime->getPipelineSceneData()->getSkybox()->getModel()->onGlobalPipelineStateChanged();
     }
 
     _pipelineRuntime->onGlobalPipelineStateChanged();

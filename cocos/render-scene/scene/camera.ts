@@ -22,8 +22,10 @@
  THE SOFTWARE.
 */
 import { EDITOR } from 'internal:constants';
+import { warnID } from '@base/debug';
+import { cclegacy } from '@base/global';
 import { SurfaceTransform, ClearFlagBit, Device, Color, ClearFlags } from '../../gfx';
-import { lerp, Mat4, Rect, toRadian, Vec3, IVec4Like, preTransforms, warnID, geometry, cclegacy, Vec4 } from '../../core';
+import { lerp, Mat4, Rect, toRadian, Vec3, IVec4Like, preTransforms, geometry, Vec4 } from '../../core';
 import { CAMERA_DEFAULT_MASK } from '../../rendering/define';
 import { Node } from '../../scene-graph';
 import { RenderScene } from '../core/render-scene';
@@ -1032,14 +1034,33 @@ export class Camera {
                     const wndXREye = xr.webXRWindowMap.get(this._window);
                     this._matProj.set(xr.webXRMatProjs[wndXREye]);
                 } else {
-                    Mat4.perspective(this._matProj, this._fov, this._aspect, this._nearClip, this._farClip,
-                        this._fovAxis === CameraFOVAxis.VERTICAL, this._device.capabilities.clipSpaceMinZ, projectionSignY, orientation);
+                    Mat4.perspective(
+                        this._matProj,
+                        this._fov,
+                        this._aspect,
+                        this._nearClip,
+                        this._farClip,
+                        this._fovAxis === CameraFOVAxis.VERTICAL,
+                        this._device.capabilities.clipSpaceMinZ,
+                        projectionSignY,
+                        orientation,
+                    );
                 }
             } else {
                 const x = this._orthoHeight * this._aspect;
                 const y = this._orthoHeight;
-                Mat4.ortho(this._matProj, -x, x, -y, y, this._nearClip, this._farClip,
-                    this._device.capabilities.clipSpaceMinZ, projectionSignY, orientation);
+                Mat4.ortho(
+                    this._matProj,
+                    -x,
+                    x,
+                    -y,
+                    y,
+                    this._nearClip,
+                    this._farClip,
+                    this._device.capabilities.clipSpaceMinZ,
+                    projectionSignY,
+                    orientation,
+                );
             }
             Mat4.invert(this._matProjInv, this._matProj);
             viewProjDirty = true;
@@ -1240,10 +1261,12 @@ export class Camera {
 
         if (this._proj === CameraProjection.PERSPECTIVE) {
             // calculate screen pos in far clip plane
-            Vec3.set(out,
+            Vec3.set(
+                out,
                 (screenPos.x - cx) / cw * 2 - 1,
                 (screenPos.y - cy) / ch * 2 - 1,
-                1.0);
+                1.0,
+            );
 
             // transform to world
             const { x, y } = out;
@@ -1256,10 +1279,12 @@ export class Camera {
 
             Vec3.lerp(out, v_a, out, lerp(this._nearClip / this._farClip, 1, screenPos.z));
         } else {
-            Vec3.set(out,
+            Vec3.set(
+                out,
                 (screenPos.x - cx) / cw * 2 - 1,
                 (screenPos.y - cy) / ch * 2 - 1,
-                screenPos.z * 2 - 1);
+                screenPos.z * 2 - 1,
+            );
 
             // transform to world
             const { x, y } = out;

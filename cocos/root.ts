@@ -22,8 +22,13 @@
  THE SOFTWARE.
 */
 
-import { Pool, cclegacy, warnID, settings, Settings, macro } from './core';
-import { RenderPipeline, createDefaultPipeline, DeferredPipeline } from './rendering';
+import { cclegacy } from '@base/global';
+import { warnID } from '@base/debug';
+import { memop } from '@base/utils';
+import { settings, Settings, macro } from './core';
+import type { RenderPipeline } from './rendering/render-pipeline';
+import { DeferredPipeline } from './rendering/deferred/deferred-pipeline';
+import { createDefaultPipeline } from './rendering/forward/forward-pipeline';
 import { DebugView } from './rendering/debug-view';
 import { Camera, CameraType, Light, Model, TrackingType } from './render-scene/scene';
 import type { DataPoolManager } from './3d/skeletal-animation/data-pool-manager';
@@ -41,6 +46,7 @@ import { Batcher2D } from './2d/renderer/batcher-2d';
 import { IPipelineEvent } from './rendering/pipeline-event';
 import { localDescriptorSetLayout_ResizeMaxJoints, UBOCamera, UBOGlobal, UBOLocal, UBOShadow, UBOWorldBound } from './rendering/define';
 import { XREye, XRPoseType } from './xr/xr-enums';
+import { ICustomJointTextureLayout } from './3d/skeletal-animation/skeletal-animation-utils';
 
 /**
  * @en Initialization information for the Root
@@ -258,9 +264,9 @@ export class Root {
     private _batcher: Batcher2D | null = null;
     private _dataPoolMgr: DataPoolManager;
     private _scenes: RenderScene[] = [];
-    private _modelPools = new Map<Constructor<Model>, Pool<Model>>();
-    private _cameraPool: Pool<Camera> | null = null;
-    private _lightPools = new Map<Constructor<Light>, Pool<Light>>();
+    private _modelPools = new Map<Constructor<Model>, memop.Pool<Model>>();
+    private _cameraPool: memop.Pool<Camera> | null = null;
+    private _lightPools = new Map<Constructor<Light>, memop.Pool<Light>>();
     private _debugView = new DebugView();
     private _fpsTime = 0;
     private _frameCount = 0;
@@ -285,7 +291,7 @@ export class Root {
         RenderScene.registerCreateFunc(this);
         RenderWindow.registerCreateFunc(this);
 
-        this._cameraPool = new Pool((): Camera => new Camera(this._device), 4, (cam): void => cam.destroy());
+        this._cameraPool = new memop.Pool((): Camera => new Camera(this._device), 4, (cam): void => cam.destroy());
     }
 
     /**
@@ -311,7 +317,10 @@ export class Root {
             swapchain,
         });
         this._curWindow = this._mainWindow;
-        const customJointTextureLayouts = settings.querySettings(Settings.Category.ANIMATION, 'customJointTextureLayouts') || [];
+        const customJointTextureLayouts = settings.querySettings(
+            Settings.Category.ANIMATION,
+            'customJointTextureLayouts',
+        ) as ICustomJointTextureLayout[] || [];
         this._dataPoolMgr?.jointTexturePool.registerCustomTextureLayouts(customJointTextureLayouts);
         this._resizeMaxJointForDS();
     }
@@ -443,6 +452,10 @@ export class Root {
     public onGlobalPipelineStateChanged (): void {
         for (let i = 0; i < this._scenes.length; i++) {
             this._scenes[i].onGlobalPipelineStateChanged();
+        }
+
+        if (this._pipeline!.pipelineSceneData.skybox.enabled) {
+            this._pipeline!.pipelineSceneData.skybox.model!.onGlobalPipelineStateChanged();
         }
 
         this._pipeline!.onGlobalPipelineStateChanged();
@@ -587,7 +600,7 @@ export class Root {
     public createModel<T extends Model> (ModelCtor: typeof Model): T {
         let p = this._modelPools.get(ModelCtor);
         if (!p) {
-            this._modelPools.set(ModelCtor, new Pool((): Model => new ModelCtor(), 10, (obj): void => obj.destroy()));
+            this._modelPools.set(ModelCtor, new memop.Pool((): Model => new ModelCtor(), 10, (obj): void => obj.destroy()));
             p = this._modelPools.get(ModelCtor)!;
         }
         const model = p.alloc() as T;
@@ -631,7 +644,7 @@ export class Root {
     public createLight<T extends Light> (LightCtor: new () => T): T {
         let l = this._lightPools.get(LightCtor);
         if (!l) {
-            this._lightPools.set(LightCtor, new Pool<Light>((): T => new LightCtor(), 4, (obj): void => obj.destroy()));
+            this._lightPools.set(LightCtor, new memop.Pool<Light>((): T => new LightCtor(), 4, (obj): void => obj.destroy()));
             l = this._lightPools.get(LightCtor)!;
         }
         const light = l.alloc() as T;
@@ -717,7 +730,7 @@ export class Root {
 
         let allcameras: Camera[] = [];
         const webxrHmdPoseInfos = xr.webxrHmdPoseInfos;
-        for (let xrEye = 0; xrEye < viewCount; xrEye++) {
+        for (let xrEye: XREye = 0; xrEye < viewCount; xrEye++) {
             for (const window of windows) {
                 allcameras = allcameras.concat(window.cameras);
                 if (window.swapchain) {
@@ -789,7 +802,7 @@ export class Root {
         if (this._pipeline && cameraList.length > 0) {
             this._device.acquire([deviceManager.swapchain]);
             const scenes = this._scenes;
-            const stamp = director.getTotalFrames();
+            const stamp = director.getTotalFrames() as number;
 
             if (this._batcher) {
                 this._batcher.update();

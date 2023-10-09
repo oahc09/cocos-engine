@@ -23,15 +23,18 @@
 */
 
 import { ccclass, serializable, type } from 'cc.decorator';
+import { warnID, warn } from '@base/debug';
+import { cclegacy } from '@base/global';
 import { Asset } from './asset';
 import { EffectAsset } from './effect-asset';
 import { Texture, Type } from '../../gfx';
 import { TextureBase } from './texture-base';
 import { IPassInfoFull, Pass, PassOverrides } from '../../render-scene/core/pass';
 import { MacroRecord, MaterialProperty } from '../../render-scene/core/pass-utils';
-import { Color, warnID, Vec4, cclegacy, warn } from '../../core';
+import { Color, Vec4 } from '../../core';
 import { SRGBToLinear } from '../../rendering/pipeline-funcs';
 import { Renderer } from '../../misc/renderer';
+import { getPhaseID } from '../../rendering/pass-phase';
 
 const v4_1 = new Vec4();
 

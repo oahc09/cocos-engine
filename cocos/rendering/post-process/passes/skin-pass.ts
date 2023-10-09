@@ -22,7 +22,9 @@
  THE SOFTWARE.
 */
 
-import { Vec4, Vec3, cclegacy, warnID } from '../../../core';
+import { warnID } from '@base/debug';
+import { cclegacy } from '@base/global';
+import { Vec4, Vec3 } from '../../../core';
 import { Camera } from '../../../render-scene/scene';
 import { LightInfo, QueueHint, SceneFlags } from '../../custom/types';
 import { BasicPipeline, PipelineRuntime } from '../../custom/pipeline';
@@ -120,7 +122,7 @@ export class SSSSBlurData {
             const o = -range + i * step;
             const sign = o < 0.0 ? -1.0 : 1.0;
             // eslint-disable-next-line no-restricted-properties
-            this._kernel[i].w = range * sign * Math.abs(Math.pow(o, EXPONENT)) / Math.pow(range, EXPONENT);
+            this._kernel[i].w = range * sign * Math.abs(o ** EXPONENT) / range ** EXPONENT;
         }
 
         // Calculate the weights:
@@ -185,9 +187,9 @@ export class SSSSBlurData {
 }
 
 export class SkinPass extends SettingPass {
-    name = 'SkinPass'
+    name = 'SkinPass';
     effectName = 'pipeline/ssss-blur';
-    outputNames = ['SSSSBlur', 'SSSSBlurDS']
+    outputNames = ['SSSSBlur', 'SSSSBlurDS'];
     ssssBlurData = new SSSSBlurData();
 
     private _activate = false;
@@ -220,10 +222,12 @@ export class SkinPass extends SettingPass {
         this._buildSpecularPass(camera, ppl, inputRT!, inputDS);
     }
 
-    private _buildSSSSBlurPass (camera: Camera,
+    private _buildSSSSBlurPass (
+        camera: Camera,
         ppl: BasicPipeline,
         inputRT: string,
-        inputDS: string): void {
+        inputDS: string,
+    ): void {
         const cameraID = getCameraUniqueID(camera);
         const pipelineSceneData = ppl.pipelineSceneData;
 
@@ -259,8 +263,12 @@ export class SkinPass extends SettingPass {
         passIdx = SSSS_BLUR_X_PASS_INDEX;
         const ssssblurXPassLayoutName = 'ssss-blurX';
         const ssssblurXPassPassName = `ssss-blurX${cameraID}`;
-        this.material.setProperty('blurInfo', new Vec4(camera.fov, skin.blurRadius,
-            boundingBox, skin.sssIntensity), passIdx);
+        this.material.setProperty('blurInfo', new Vec4(
+            camera.fov,
+            skin.blurRadius,
+            boundingBox,
+            skin.sssIntensity,
+        ), passIdx);
         this.material.setProperty('kernel',  this.ssssBlurData.kernel, passIdx);
         passContext.updatePassViewPort()
             .addRenderPass(ssssblurXPassLayoutName, ssssblurXPassPassName)
@@ -276,8 +284,12 @@ export class SkinPass extends SettingPass {
         passIdx = SSSS_BLUR_Y_PASS_INDEX;
         const ssssblurYPassLayoutName = 'ssss-blurY';
         const ssssblurYPassPassName = `ssss-blurY${cameraID}`;
-        this.material.setProperty('blurInfo', new Vec4(camera.fov, skin.blurRadius,
-            boundingBox, skin.sssIntensity), passIdx);
+        this.material.setProperty('blurInfo', new Vec4(
+            camera.fov,
+            skin.blurRadius,
+            boundingBox,
+            skin.sssIntensity,
+        ), passIdx);
         this.material.setProperty('kernel',  this.ssssBlurData.kernel, passIdx);
         passContext.updatePassViewPort()
             .addRenderPass(ssssblurYPassLayoutName, ssssblurYPassPassName)
@@ -290,10 +302,12 @@ export class SkinPass extends SettingPass {
             .version();
     }
 
-    private _buildSpecularPass (camera: Camera,
+    private _buildSpecularPass (
+        camera: Camera,
         ppl: BasicPipeline,
         inputRT: string,
-        inputDS: string): void {
+        inputDS: string,
+    ): void {
         const cameraID = getCameraUniqueID(camera);
         const layoutName = 'specular-pass';
         const passName = `specular-pass${cameraID}`;
@@ -323,13 +337,19 @@ export class SkinPass extends SettingPass {
         }
 
         pass.addQueue(QueueHint.RENDER_OPAQUE, 'default')
-            .addSceneOfCamera(camera, new LightInfo(),
-                SceneFlags.TRANSPARENT_OBJECT | SceneFlags.DEFAULT_LIGHTING | SceneFlags.PLANAR_SHADOW
-            | SceneFlags.CUTOUT_OBJECT | SceneFlags.DRAW_INSTANCING);
+            .addSceneOfCamera(
+                camera,
+                new LightInfo(),
+                SceneFlags.TRANSPARENT_OBJECT
+            | SceneFlags.CUTOUT_OBJECT,
+            );
         pass.addQueue(QueueHint.RENDER_TRANSPARENT, 'forward-add')
-            .addSceneOfCamera(camera, new LightInfo(),
-                SceneFlags.TRANSPARENT_OBJECT | SceneFlags.DEFAULT_LIGHTING | SceneFlags.PLANAR_SHADOW
-            | SceneFlags.CUTOUT_OBJECT | SceneFlags.DRAW_INSTANCING);
+            .addSceneOfCamera(
+                camera,
+                new LightInfo(),
+                SceneFlags.TRANSPARENT_OBJECT
+            | SceneFlags.CUTOUT_OBJECT,
+            );
     }
 
     slotName (camera: Camera, index = 0): string {

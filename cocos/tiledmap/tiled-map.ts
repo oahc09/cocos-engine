@@ -24,17 +24,17 @@
 
 import { ccclass, displayOrder, executeInEditMode, help, menu, requireComponent, type, serializable, editable } from 'cc.decorator';
 import { EDITOR, JSB } from 'internal:constants';
+import { logID, warn } from '@base/debug';
 import { Component } from '../scene-graph/component';
 import { UITransform } from '../2d/framework';
-import { GID, Orientation, PropertiesInfo, Property, RenderOrder, StaggerAxis, StaggerIndex, TiledAnimationType, TiledTextureGrids, TileFlag,
-    TMXImageLayerInfo, TMXLayerInfo, TMXObjectGroupInfo, TMXObjectType, TMXTilesetInfo } from './tiled-types';
+import { GID, Orientation, PropertiesInfo, Property, RenderOrder, StaggerAxis, StaggerIndex, TiledAnimationType, TiledTextureGrids, TileFlag, TMXImageLayerInfo, TMXLayerInfo, TMXObjectGroupInfo, TMXObjectType, TMXTilesetInfo } from './tiled-types';
 import { TMXMapInfo } from './tmx-xml-parser';
 import { TiledLayer } from './tiled-layer';
 import { TiledObjectGroup } from './tiled-object-group';
 import { TiledMapAsset } from './tiled-map-asset';
 import { Sprite } from '../2d/components/sprite';
 import { fillTextureGrids } from './tiled-utils';
-import { Size, Vec2, logID, Color, sys, warn } from '../core';
+import { Size, Vec2, Color, sys } from '../core';
 import { SpriteFrame } from '../2d/assets';
 import { NodeEventType } from '../scene-graph/node-event';
 import { Node } from '../scene-graph';
@@ -598,19 +598,15 @@ export class TiledMap extends Component {
         this._buildLayerAndGroup();
         if (this.cleanupImageCache) {
             this._textures.forEach((tex) => {
-                this.doCleanupImageCache(tex);
+                this.doCleanupImageCache(tex.texture);
             });
         }
     }
 
     doCleanupImageCache (texture): void {
-        if (texture._image instanceof HTMLImageElement) {
-            texture._image.src = '';
-            if (JSB) texture._image.destroy();
-        } else if (sys.hasFeature(sys.Feature.IMAGE_BITMAP) && texture._image instanceof ImageBitmap) {
-            if (texture._image.close) texture._image.close();
-        }
-        texture._image = null;
+        // TODO:There is a bug here, if we uncomment, it will cause the display result to be incorrect.
+        // texture.image.destroy();
+        // texture.image = null;
     }
 
     lateUpdate (dt: number): void {

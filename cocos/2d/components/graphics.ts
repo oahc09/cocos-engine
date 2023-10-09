@@ -25,16 +25,18 @@
 
 import { ccclass, help, executionOrder, menu, tooltip, type, visible, override, editable, serializable } from 'cc.decorator';
 import { JSB } from 'internal:constants';
+import { warnID } from '@base/debug';
+import { cclegacy } from '@base/global';
 import { builtinResMgr } from '../../asset/asset-manager';
 import { InstanceMaterialType, UIRenderer } from '../framework/ui-renderer';
 import { director } from '../../game/director';
-import { Color, warnID, cclegacy } from '../../core';
+import { Color } from '../../core';
 import { scene } from '../../render-scene';
 import { IAssembler } from '../renderer/base';
 import { IBatcher } from '../renderer/i-batcher';
 import { LineCap, LineJoin } from '../assembler/graphics/types';
 import { Impl } from '../assembler/graphics/webgl/impl';
-import { RenderingSubMesh } from '../../asset/assets';
+import { Material, RenderingSubMesh } from '../../asset/assets';
 import { Format, PrimitiveMode, Attribute, Device, BufferUsageBit, BufferInfo, MemoryUsageBit, deviceManager } from '../../gfx';
 import { vfmtPosColor, getAttributeStride, getComponentPerVertex } from '../renderer/vertex-format';
 import { NativeUIModelProxy } from '../renderer/native-2d';
@@ -133,7 +135,6 @@ export class Graphics extends UIRenderer {
      * 笔触的颜色。
      */
     @tooltip('i18n:graphics.strokeColor')
-    // @constget
     get strokeColor (): Readonly<Color> {
         return this._strokeColor;
     }
@@ -155,7 +156,6 @@ export class Graphics extends UIRenderer {
      * 填充绘画的颜色。
      */
     @tooltip('i18n:graphics.fillColor')
-    // @constget
     get fillColor (): Readonly<Color> {
         return this._fillColor;
     }
@@ -528,7 +528,7 @@ export class Graphics extends UIRenderer {
      * @param h @en The height of the rectangle.
      *          @zh 矩形高度。
      */
-    public fillRect (x, y, w, h): void {
+    public fillRect (x: number, y: number, w: number, h: number): void {
         this.rect(x, y, w, h);
         this.fill();
     }
@@ -615,7 +615,7 @@ export class Graphics extends UIRenderer {
             mat = this.getMaterialInstance(0);
         } else {
             mat = builtinResMgr.get('ui-graphics-material');
-            this.setMaterial(mat, 0);
+            this.setSharedMaterial(mat as Material, 0);
             mat = this.getMaterialInstance(0);
             mat.recompileShaders({ USE_LOCAL: true });
         }

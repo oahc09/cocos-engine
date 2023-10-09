@@ -22,11 +22,11 @@
  THE SOFTWARE.
 */
 
+import { cclegacy } from '@base/global';
 import { CallbacksInvoker } from '../core/event/callbacks-invoker';
 import { Event, EventMouse, EventTouch, Touch } from '../input/types';
 import { Vec2 } from '../core/math/vec2';
 import { Node } from './node';
-import { legacyCC } from '../core/global-exports';
 import { Component } from './component';
 import { NodeEventType } from './node-event';
 import { InputEventType, SystemEventTypeUnion } from '../input/types/event-enum';
@@ -672,4 +672,4 @@ export class NodeEventProcessor {
     // #endregion handle touch event
 }
 
-legacyCC.NodeEventProcessor = NodeEventProcessor;
+cclegacy.NodeEventProcessor = NodeEventProcessor;

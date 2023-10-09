@@ -43,7 +43,8 @@ struct GLES3GPUConstantRegistry {
 
     MSRTSupportLevel mMSRT{MSRTSupportLevel::NONE};
     FBFSupportLevel mFBF{FBFSupportLevel::NONE};
-    uint32_t multiDrawIndirect = false;
+    bool multiDrawIndirect = false;
+    bool debugMarker = false;
 };
 
 class GLES3GPUStateCache;
@@ -135,7 +136,6 @@ struct GLES3GPUTexture {
     bool isPowerOf2{false};
     bool useRenderBuffer{false};
     bool memoryAllocated{true}; // false if swapchain image or implicit ms render buffer.
-    GLenum glTarget{0};
     GLenum glInternalFmt{0};
     GLenum glFormat{0};
     GLenum glType{0};
@@ -156,6 +156,11 @@ struct GLES3GPUTextureView {
     Format format = Format::UNKNOWN;
     uint32_t baseLevel = 0U;
     uint32_t levelCount = 1U;
+    uint32_t baseLayer = 0U;
+    uint32_t layerCount = 1U;
+    uint32_t basePlane = 0U;
+    uint32_t planeCount = 0U;
+    GLenum glTarget{0};
 };
 
 using GLES3GPUTextureViewList = ccstd::vector<GLES3GPUTextureView *>;
@@ -168,6 +173,7 @@ struct GLES3GPUSwapchain {
     EGLint eglSwapInterval{0};
     GLuint glFramebuffer{0};
     GLES3GPUTexture *gpuColorTexture{nullptr};
+    bool isXR{false};
 };
 
 class GLES3GPUSampler final {
@@ -178,11 +184,13 @@ public:
     Address addressU = Address::CLAMP;
     Address addressV = Address::CLAMP;
     Address addressW = Address::CLAMP;
+    Reduction reduction = Reduction::WEIGHTED_AVERAGE;
     GLenum glMinFilter = 0;
     GLenum glMagFilter = 0;
     GLenum glWrapS = 0;
     GLenum glWrapT = 0;
     GLenum glWrapR = 0;
+    GLenum glReduction = 0;
 
     ~GLES3GPUSampler() {
         ccstd::vector<GLuint> glSampelrs;
@@ -350,10 +358,10 @@ struct GLES3GPUFramebufferObject {
     void processLoad(GLenum target);
     void processStore(GLenum target);
     void destroy(GLES3GPUStateCache *cache, GLES3GPUFramebufferCacheMap *framebufferCacheMap);
+    GLuint getHandle() const { return swapchain != nullptr ? swapchain->glFramebuffer : handle; }
 
-    using Reference = std::pair<const GLES3GPUTextureView*, GLint>;
+    using Reference = std::pair<const GLES3GPUTextureView *, GLint>;
 
-    GLuint handle{0};
     GLES3GPUSwapchain *swapchain{nullptr};
 
     ccstd::vector<Reference> colors;
@@ -362,6 +370,9 @@ struct GLES3GPUFramebufferObject {
 
     ccstd::vector<GLenum> loadInvalidates;
     ccstd::vector<GLenum> storeInvalidates;
+
+private:
+    GLuint handle{0};
 };
 
 class GLES3GPUFramebuffer final {
@@ -573,7 +584,8 @@ public:
         }
     }
 
-    GLuint getFramebufferFromTexture(const GLES3GPUTexture *gpuTexture, const TextureSubresLayers &subres) {
+    GLuint getFramebufferFromTexture(const GLES3GPUTextureView *gpuTextureView, const TextureSubresLayers &subres) {
+        const auto *gpuTexture = gpuTextureView->gpuTexture;
         bool isTexture = gpuTexture->glTexture;
         GLuint glResource = isTexture ? gpuTexture->glTexture : gpuTexture->glRenderbuffer;
         auto &cacheMap = isTexture ? _textureMap : _renderbufferMap;
@@ -600,9 +612,9 @@ public:
                 attachment = GL_DEPTH_ATTACHMENT;
             }
             if (isTexture) {
-                GL_CHECK(glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, attachment, gpuTexture->glTarget, glResource, mipLevel));
+                GL_CHECK(glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, attachment, gpuTextureView->glTarget, glResource, mipLevel));
             } else {
-                GL_CHECK(glFramebufferRenderbuffer(GL_DRAW_FRAMEBUFFER, attachment, gpuTexture->glTarget, glResource));
+                GL_CHECK(glFramebufferRenderbuffer(GL_DRAW_FRAMEBUFFER, attachment, GL_RENDERBUFFER, glResource));
             }
 
             GLenum status;

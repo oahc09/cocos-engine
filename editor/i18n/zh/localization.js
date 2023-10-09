@@ -50,6 +50,19 @@ module.exports = link(mixin({
                 },
             },
         },
+        CurveRange: {
+            properties: {
+                spline: {
+                    displayName: 'Spline',
+                },
+                splineMin: {
+                    displayName: 'Spline Min',
+                },
+                splineMax: {
+                    displayName: 'Spline Max',
+                },
+            },
+        },
     },
 
     help: {
@@ -71,6 +84,7 @@ module.exports = link(mixin({
             DirectionalLight: `${url}/${version}/manual/zh/concepts/scene/light/lightType/dir-light.html`,
             SphereLight: `${url}/${version}/manual/zh/concepts/scene/light/lightType/sphere-light.html`,
             SpotLight: `${url}/${version}/manual/zh/concepts/scene/light/lightType/spot-light.html`,
+            LightProbeGroup: `${url}/${version}/manual/zh/concepts/scene/light/probe/light-probe.html`,
             UICoordinateTracker: `${url}/${version}/manual/zh/ui-system/components/editor/ui-coordinate-tracker.html`,
             Animation: `${url}/${version}/manual/zh/animation/animation-component.html`,
             SkeletalAnimation: `${url}/${version}/manual/zh/animation/skeletal-animation.html`,
@@ -129,6 +143,7 @@ module.exports = link(mixin({
             SafeArea: `${url}/${version}/manual/zh/ui-system/components/editor/safearea.html`,
             Terrain: `${url}/${version}/manual/zh/editor/terrain/`,
             TiledMap: `${url}/${version}/manual/zh/editor/components/tiledmap.html`,
+            TiledTile: `${url}/${version}/manual/zh/editor/components/tiledtile.html`,
             Spine: `${url}/${version}/manual/zh/editor/components/spine.html`,
             DragonBones: `${url}/${version}/manual/zh/editor/components/dragonbones.html`,
             OctreeCulling: `${url}/${version}/manual/zh/advanced-topics/native-scene-culling.html`,
@@ -137,12 +152,14 @@ module.exports = link(mixin({
             BlitScreen: `${url}/${version}/manual/zh/render-pipeline/post-process/blit-screen.html`,
             TAA: `${url}/${version}/manual/zh/render-pipeline/post-process/index.html`,
             FSR: `${url}/${version}/manual/zh/render-pipeline/post-process/index.html`,
-            Fxaa: `${url}/${version}/manual/zh/render-pipeline/post-process/index.html`,
+            FXAA: `${url}/${version}/manual/zh/render-pipeline/post-process/index.html`,
             Bloom: `${url}/${version}/manual/zh/render-pipeline/post-process/index.html`,
             HBAO: `${url}/${version}/manual/zh/render-pipeline/post-process/index.html`,
             ColorGrading: `${url}/${version}/manual/zh/render-pipeline/post-process/index.html`,
             Skin: `${url}/${version}/manual/zh/shader/advanced-shader/skin.html`,
             RenderRoot2D: `${url}/${version}/manual/zh/ui-system/components/editor/renderroot2d.html`,
+            ReflectionProbe: `${url}/${version}/manual/zh/concepts/scene/light/probe/reflection-art-workflow.html`,
+            Sorting: `${url}/${version}/manual/zh/engine/rendering/sorting.html`,
         },
         assets: {
             javascript: `${url}/${version}/manual/zh/concepts/scene/node-component.html`,
@@ -225,13 +242,6 @@ module.exports = link(mixin({
         shadowMapSize: '阴影贴图分辨率，目前支持 Low_256x256、Medium_512x512、High_1024x1024、Ultra_2048x2048 四种精度的纹理',
         maxReceived: '产生阴影的有效光源数量',
     },
-    animation: {
-        default_clip: '在勾选自动播放或调用 play() 时默认播放的动画 clip。',
-        clips: '通过脚本可以访问并播放的 AnimationClip 列表',
-        play_on_load: '是否在运行游戏后自动播放默认动画 clip。',
-        use_baked_animation: '是否使用预烘焙动画，默认启用，可以大幅提高运行效时率，<br>但所有动画效果会被彻底固定，不支持任何形式的编辑',
-        sockets: '当前动画组件维护的挂点数组。要挂载自定义节点到受动画驱动的骨骼上，必须先在此注册挂点',
-    },
     audio: {
         clip: '通过该组件播放的默认 AudioClip 引用',
         volume: '音频的音量',
@@ -290,15 +300,6 @@ module.exports = link(mixin({
         shadowAdvancedOptions: '阴影高级选项',
         csmLayersTransition: '是否开启级联阴影层级过渡（提升质量，降低性能）',
         csmTransitionRange: '级联阴影层级过渡范围(NDC空间: 取值范围为 0 ~ 1)',
-    },
-    model: {
-        shadow_receiving_model: '阴影接受方式',
-        shadow_casting_model: '阴影投射方式',
-        mesh: '模型的网格数据',
-        skinning_root: '骨骼根节点的引用，对应控制此模型的动画组件所在节点',
-        shadow_bias: '模型额外增加深度偏移值（世界空间单位）可以有效消除阴影摩尔纹，但是过大的值可能造成漏光现象',
-        shadow_normal_bias: '模型额外增加法线深度偏移值（世界空间单位），可以消除物体表面朝向平行于阳光方向的阴影摩尔纹，<br>防止曲面出现锯齿状；但是过大的值可能会造成阴影位置偏差',
-        standard_skin_model: '模型额外设定全局唯一的标准皮肤模型',
     },
     sprite: {
         gray_scale: '是否开启灰度渲染模式',
@@ -396,6 +397,13 @@ module.exports = link(mixin({
         font_underline: '字体加下划线',
         spacing_x: '文本字符之间的间距。仅在使用 BMFont 位图字体时生效',
         underline_height: '下划线高度',
+        outline_enable: '是否启用描边',
+        outline_width: '描边宽度',
+        outline_color: '描边颜色',
+        shadow_enable: '是否启用阴影',
+        shadow_color: '阴影颜色',
+        shadow_offset: '阴影偏移量',
+        shadow_blur: '阴影模糊程度',
     },
     labelOutline: {
         color: '描边的颜色',
@@ -1007,6 +1015,10 @@ module.exports = link(mixin({
             label: "基于 Box2D 的 2D 物理系统",
             description: "基于 Box2D 的 2D 物理系统支持。",
         },
+        physics_2d_box2d_wasm: {
+            label: "基于 Box2D-wasm 的 2D 物理系统",
+            description: "基于 Box2D-wasm 的 2D 物理系统支持。",
+        },
         intersection_2d: {
             label: "2D 相交检测算法",
             description: "包含用于二维相交检测的算法。",
@@ -1278,6 +1290,8 @@ module.exports = link(mixin({
         needBlur: '开启可以获得更柔和的效果，噪点更少，但会耗费一些性能',
     },
     bloom: {
+        enableAlphaMask: '透明通道标志位，如果开启此功能，请同时降低物体材质的固有色a通道输出，a 值小于 1 的物体将不会有泛光',
+        useHdrIlluminance: '使用场景 HDR 亮度来筛选泛光区域，必须同时开启 HDR 模式和 CC_USE_FLOAT_OUTPUT 宏',
         threshold: '光晕的亮度阈值，大于此亮度的区域才会产生泛光，该值单位是人眼所见的 LDR 亮度，和曝光无关',
         iterations: '模糊迭代次数，该值越大则光晕范围越大、越柔和，但性能也会有所降低',
         intensity: '泛光强度，该值越大则光晕越亮，请适度调节',
@@ -1298,8 +1312,12 @@ module.exports = link(mixin({
         shadingScale: '渲染分辨率',
         enableShadingScaleInEditor: '是否在编辑器中缩放渲染分辨率',
     },
+    tone_mapping: {
+        toneMappingType: '色调映射方式，只在启用HDR时生效。',
+    },
 },
 
+require('./modules/rendering'),
 require('./animation'),
 
 ));

@@ -21,7 +21,8 @@
  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  THE SOFTWARE.
 */
-import { Vec3, Enum, cclegacy } from '../../core';
+import { Vec3, Enum } from '../../core';
+import { cclegacy } from '@base/global';
 import type { LODData as JsbLODData, LODGroup as JsbLODGroup } from './lod-group';
 
 export const LODData: typeof JsbLODData = jsb.LODData;
@@ -29,24 +30,10 @@ export type LODData = JsbLODData;
 export const LODGroup: typeof JsbLODGroup = jsb.LODGroup;
 export type LODGroup = JsbLODGroup;
 
-import type {
-    Ambient as JsbAmbient,
-    Light as JsbLight,
-    DirectionalLight as JsbDirectionalLight,
-    SpotLight as JsbSpotLight,
-    SphereLight as JsbSphereLight,
-    PointLight as JsbPointLight,
-    RangedDirectionalLight as JsbRangedDirectionalLight,
-    Fog as JsbFog,
-    Shadows as JsbShadows,
-    Skybox as JsbSkybox,
-} from './index';
+import type { Ambient as JsbAmbient, Light as JsbLight, DirectionalLight as JsbDirectionalLight, SpotLight as JsbSpotLight, SphereLight as JsbSphereLight, PointLight as JsbPointLight, RangedDirectionalLight as JsbRangedDirectionalLight, Fog as JsbFog, Shadows as JsbShadows, Skybox as JsbSkybox, PostSettings as JsbPostSettings } from './index';
 
 // NOTE: why don't we export FogInfo and ShadowInfo from 'index.ts' 
-import type {
-    FogInfo as JsbFogInfo,
-    ShadowsInfo as JsbShadowsInfo,
-} from '../../scene-graph/scene-globals';
+import type { FogInfo as JsbFogInfo, ShadowsInfo as JsbShadowsInfo } from '../../scene-graph/scene-globals';
 
 declare const jsb: any;
 
@@ -170,6 +157,7 @@ export const FogType = Enum({
      */
     LAYERED: 3,
 });
+export const FOG_TYPE_NONE = FogType.LAYERED + 1;
 
 export const FogInfo: typeof JsbFogInfo = jsb.FogInfo;
 export type FogInfo = JsbFogInfo;
@@ -339,6 +327,11 @@ export const EnvironmentLightingType = Enum({
     DIFFUSEMAP_WITH_REFLECTION: 2,
 });
 
+export const ToneMappingType = Enum({
+    DEFAULT: 0,
+    LINEAR: 1,
+});
+
 export const ShadowsInfo: typeof JsbShadowsInfo = jsb.ShadowsInfo;
 export type ShadowsInfo = JsbShadowsInfo;
 export const Shadows: typeof JsbShadows = jsb.Shadows;
@@ -376,6 +369,10 @@ Object.defineProperty(Shadows, 'COEFFICIENT_OF_EXPANSION', {
 export const Skybox: typeof JsbSkybox = jsb.Skybox;
 export type Skybox = JsbSkybox;
 cclegacy.Skybox = Skybox;
+
+export const PostSettings: typeof JsbPostSettings = jsb.PostSettings;
+export type PostSettings = JsbPostSettings;
+cclegacy.PostSettings = PostSettings;
 
 export * from './model';
 export * from './submodel';

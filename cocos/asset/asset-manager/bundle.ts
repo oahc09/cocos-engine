@@ -23,10 +23,12 @@
  THE SOFTWARE.
 */
 
+import { error, errorID } from '@base/debug';
+import { cclegacy } from '@base/global';
 import { Asset } from '../assets/asset';
 import { SceneAsset } from '../assets/scene-asset';
-import { error, errorID, cclegacy } from '../../core';
-import Config, { IAddressableInfo, IAssetInfo, IConfigOption, ISceneInfo } from './config';
+import Config from './config';
+import { IAddressableInfo, IAssetInfo, IConfigOption, ISceneInfo } from './config';
 import { releaseManager } from './release-manager';
 import RequestItem from './request-item';
 import { assets, bundles, RequestType } from './shared';

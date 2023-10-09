@@ -22,6 +22,7 @@
  THE SOFTWARE.
 */
 
+import { cclegacy } from '@base/global';
 import { builtinResMgr } from '../../asset/asset-manager/builtin-res-mgr';
 import { Material } from '../../asset/assets/material';
 import { Mesh } from '../../3d/assets/mesh';
@@ -33,7 +34,7 @@ import type { SkyboxInfo } from '../../scene-graph/scene-globals';
 import { Root } from '../../root';
 import { GlobalDSManager } from '../../rendering/global-descriptor-set-manager';
 import { deviceManager } from '../../gfx';
-import { Enum, cclegacy } from '../../core';
+import { Enum } from '../../core';
 
 let skybox_mesh: Mesh | null = null;
 let skybox_material: Material | null = null;
@@ -365,7 +366,8 @@ export class Skybox {
         const pipeline = root.pipeline;
 
         const useIBLValue = this.useIBL ? (this.isRGBE ? 2 : 1) : 0;
-        const useDiffuseMapValue = (this.useIBL && this.useDiffuseMap && this.diffuseMap) ? (this.isRGBE ? 2 : 1) : 0;
+        const useDiffuseMapValue = (this.useIBL && this.useDiffuseMap && this.diffuseMap && this.diffuseMap !== this._default)
+            ? (this.isRGBE ? 2 : 1) : 0;
         const useHDRValue = this.useHDR;
         const useConvMapValue = this.useConvolutionMap;
 

@@ -23,16 +23,15 @@
  THE SOFTWARE.
 */
 
-import {
-    ccclass, executeInEditMode, executionOrder, help, menu, tooltip, type,
-} from 'cc.decorator';
+import { ccclass, executeInEditMode, executionOrder, help, menu, type } from 'cc.decorator';
+import { cclegacy } from '@base/global';
+import { assertIsTrue } from '@base/debug/internal';
 import type { AnimationClip } from '../../animation/animation-clip';
 import { Material } from '../../asset/assets';
 import { Skeleton } from '../assets/skeleton';
 import { Node } from '../../scene-graph/node';
 import { MeshRenderer } from '../framework/mesh-renderer';
 import type { SkeletalAnimation } from '../skeletal-animation';
-import { cclegacy, assertIsTrue } from '../../core';
 import { SkinningModel } from '../models/skinning-model';
 import { BakedSkinningModel } from '../models/baked-skinning-model';
 
@@ -74,7 +73,6 @@ export class SkinnedMeshRenderer extends MeshRenderer {
      * @zh 骨骼根节点的引用，对应控制此模型的动画组件所在节点。
      */
     @type(Node)
-    @tooltip('i18n:model.skinning_root')
     get skinningRoot (): Node | null {
         return this._skinningRoot;
     }
@@ -144,8 +142,8 @@ export class SkinnedMeshRenderer extends MeshRenderer {
         }
     }
 
-    public setMaterial (material: Material | null, index: number): void {
-        super.setMaterial(material, index);
+    public setSharedMaterial (material: Material | null, index: number): void {
+        super.setSharedMaterial(material, index);
         if (this._modelType === SkinningModel) {
             this.getMaterialInstance(index);
         }
@@ -174,7 +172,7 @@ export class SkinnedMeshRenderer extends MeshRenderer {
         }
 
         const animation = skinningRoot.getComponent('cc.SkeletalAnimation') as SkeletalAnimation;
-        if (animation) {
+        if (animation && animation.enabledInHierarchy) {
             animation.notifySkinnedMeshAdded(this);
         } else {
             this.setUseBakedAnimation(false);

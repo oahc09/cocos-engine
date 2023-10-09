@@ -19,13 +19,26 @@ import { PostProcess } from './components/post-process';
 import { director } from '../../game';
 
 import { Camera as CameraComponent } from '../../misc';
-import { BloomPass, ColorGradingPass, ForwardTransparencyPass, ForwardTransparencySimplePass, FxaaPass, SkinPass, ToneMappingPass } from './passes';
+import { BloomPass, ColorGradingPass, FloatOutputProcessPass, ForwardTransparencyPass,
+    ForwardTransparencySimplePass, FxaaPass, PostFinalPass, SkinPass } from './passes';
 import { PipelineEventType } from '../pipeline-event';
 
 export class PostProcessBuilder implements PipelineBuilder  {
     pipelines: Map<string, BasePass[]> = new Map();
     constructor () {
         this.init();
+    }
+
+    onGlobalPipelineStateChanged (): void {
+        const passes = this.pipelines.get('forward');
+        if (passes !== undefined) {
+            for (let i = 0; i < passes.length; i++) {
+                const pass = passes[i];
+                if (typeof pass.onGlobalPipelineStateChanged === 'function') {
+                    pass.onGlobalPipelineStateChanged();
+                }
+            }
+        }
     }
 
     init (): void {
@@ -43,15 +56,19 @@ export class PostProcessBuilder implements PipelineBuilder  {
         // rendering dependent data generation
         this.addPass(shadowPass);
 
-        // forward pipeline
+        // opaque objects forward lighting
         this.addPass(forward);
-
         this.addPass(new SkinPass());
-        this.addPass(new ForwardTransparencyPass());
 
-        // pipeline related
+        // depth-based shading
         this.addPass(new HBAOPass());
-        this.addPass(new ToneMappingPass());
+
+        // float output related deferred processing: hdr + fog
+        this.addPass(new FloatOutputProcessPass());
+
+        // transparency should after hdr and depth-based shading
+        // temporary ignore CC_USE_FLOAT_OUTPUT
+        this.addPass(new ForwardTransparencyPass());
 
         // user post-processing
         this.addPass(new TAAPass());
@@ -62,7 +79,7 @@ export class PostProcessBuilder implements PipelineBuilder  {
 
         // final output
         this.addPass(new FSRPass()); // fsr should be final
-        this.addPass(forwardFinal);
+        this.addPass(new PostFinalPass());
     }
 
     getPass (passClass: typeof BasePass, pipelineName = 'forward'): BasePass | undefined {
@@ -206,6 +223,8 @@ export class PostProcessBuilder implements PipelineBuilder  {
             taaPass.updateSample();
         }
 
+        const floatOutputPass = passes.find((p): boolean => p instanceof FloatOutputProcessPass) as FloatOutputProcessPass;
+
         let lastPass: BasePass | undefined;
         for (let i = 0; i < passes.length; i++) {
             const pass = passes[i];
@@ -215,6 +234,12 @@ export class PostProcessBuilder implements PipelineBuilder  {
 
             if (i === (passes.length - 1)) {
                 passContext.isFinalPass = true;
+            }
+
+            if (pass.name === 'BloomPass') {
+                // for override post-process builder
+                (pass as BloomPass).hdrInputName = (floatOutputPass === undefined || floatOutputPass === null)
+                    ? '' :  floatOutputPass.getHDRInputName();
             }
 
             pass.lastPass = lastPass;

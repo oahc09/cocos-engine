@@ -23,23 +23,18 @@
 */
 
 import { DEBUG, EDITOR } from 'internal:constants';
+import { errorID, assertID, warnID } from '@base/debug';
+import { cclegacy } from '@base/global';
 import { Root } from '../../root';
 import { TextureBase } from '../../asset/assets/texture-base';
 import { builtinResMgr } from '../../asset/asset-manager/builtin-res-mgr';
 import { getPhaseID } from '../../rendering/pass-phase';
-import { murmurhash2_32_gc, errorID, assertID, cclegacy, warnID } from '../../core';
-import {
-    BufferUsageBit, DynamicStateFlagBit, DynamicStateFlags, Feature, GetTypeSize, MemoryUsageBit, PrimitiveMode, Type, Color,
-    BlendState, BlendTarget, Buffer, BufferInfo, BufferViewInfo, DepthStencilState, DescriptorSet,
-    DescriptorSetInfo, DescriptorSetLayout, Device, RasterizerState, Sampler, Texture, Shader, PipelineLayout, deviceManager, UniformBlock,
-} from '../../gfx';
+import { murmurhash2_32_gc } from '../../core';
+import { BufferUsageBit, DynamicStateFlagBit, DynamicStateFlags, Feature, GetTypeSize, MemoryUsageBit, PrimitiveMode, Type, Color, BlendState, BlendTarget, Buffer, BufferInfo, BufferViewInfo, DepthStencilState, DescriptorSet, DescriptorSetInfo, DescriptorSetLayout, Device, RasterizerState, Sampler, Texture, Shader, PipelineLayout, deviceManager, UniformBlock } from '../../gfx';
 import { EffectAsset } from '../../asset/assets/effect-asset';
 import { IProgramInfo, programLib } from './program-lib';
-import {
-    MacroRecord, MaterialProperty, customizeType, getBindingFromHandle, getDefaultFromType, getStringFromType,
-    getOffsetFromHandle, getTypeFromHandle, type2reader, type2writer, getCountFromHandle, type2validator,
-} from './pass-utils';
-import { RenderPassStage, RenderPriority } from '../../rendering/define';
+import { MacroRecord, MaterialProperty, customizeType, getBindingFromHandle, getDefaultFromType, getStringFromType, getOffsetFromHandle, getTypeFromHandle, type2reader, type2writer, getCountFromHandle, type2validator } from './pass-utils';
+import { RenderPassStage, RenderPriority, SetIndex } from '../../rendering/define';
 import { InstancedBuffer } from '../../rendering/instanced-buffer';
 import { ProgramLibrary } from '../../rendering/custom/private';
 
@@ -469,10 +464,19 @@ export class Pass {
      * @zh 重置所有 texture 和 sampler 为初始默认值。
      */
     public resetTextures (): void {
-        for (let i = 0; i < this._shaderInfo.samplerTextures.length; i++) {
-            const u = this._shaderInfo.samplerTextures[i];
-            for (let j = 0; j < u.count; j++) {
-                this.resetTexture(u.name, j);
+        if (cclegacy.rendering) {
+            const set = this._shaderInfo.descriptors[SetIndex.MATERIAL];
+            for (const combined of set.samplerTextures) {
+                for (let j = 0; j < combined.count; ++j) {
+                    this.resetTexture(combined.name, j);
+                }
+            }
+        } else {
+            for (let i = 0; i < this._shaderInfo.samplerTextures.length; i++) {
+                const u = this._shaderInfo.samplerTextures[i];
+                for (let j = 0; j < u.count; j++) {
+                    this.resetTexture(u.name, j);
+                }
             }
         }
     }
@@ -546,6 +550,10 @@ export class Pass {
             this._defines[patch.name] = patch.value;
         }
 
+        if (this._isBlend) {
+            this._defines.CC_IS_TRANSPARENCY_PASS = 1;
+        }
+
         let shader: Shader | null = null;
         if (cclegacy.rendering && cclegacy.rendering.enableEffectImport) {
             const program = (cclegacy.rendering.programLib as ProgramLibrary)
@@ -564,15 +572,27 @@ export class Pass {
         return shader;
     }
 
+    protected get _isBlend (): boolean {
+        let bBlend = false;
+        for (const target of this.blendState.targets) {
+            if (target.blend) {
+                bBlend = true;
+            }
+        }
+        return bBlend;
+    }
+
     // internal use
     /**
      * @private
      */
+    // eslint-disable-next-line @typescript-eslint/no-empty-function
     public beginChangeStatesSilently (): void {}
 
     /**
      * @private
      */
+    // eslint-disable-next-line @typescript-eslint/no-empty-function
     public endChangeStatesSilently (): void {}
 
     protected _doInit (info: IPassInfoFull, copyDefines = false): void {

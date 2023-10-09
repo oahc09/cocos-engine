@@ -23,11 +23,10 @@
 */
 
 import { DEBUG, EDITOR, JSB } from 'internal:constants';
-import {
-    ccclass, executeInEditMode, requireComponent, tooltip,
-    type, displayOrder, serializable, override, visible, displayName, disallowAnimation,
-} from 'cc.decorator';
-import { Color, assert, ccenum, cclegacy } from '../../core';
+import { ccclass, executeInEditMode, requireComponent, tooltip, type, displayOrder, serializable, override, visible, displayName, disallowAnimation } from 'cc.decorator';
+import { assert } from '@base/debug';
+import { cclegacy } from '@base/global';
+import { Color, ccenum } from '../../core';
 import { builtinResMgr } from '../../asset/asset-manager';
 import { Material } from '../../asset/assets';
 import { BlendFactor, BlendOp, ColorMask } from '../../gfx';
@@ -151,12 +150,12 @@ export class UIRenderer extends Renderer {
     set sharedMaterials (val) {
         for (let i = 0; i < val.length; i++) {
             if (val[i] !== this._materials[i]) {
-                this.setMaterial(val[i], i);
+                this.setSharedMaterial(val[i], i);
             }
         }
         if (val.length < this._materials.length) {
             for (let i = val.length; i < this._materials.length; i++) {
-                this.setMaterial(null, i);
+                this.setSharedMaterial(null, i);
             }
             this._materials.splice(val.length);
         }
@@ -278,6 +277,10 @@ export class UIRenderer extends Renderer {
      * @deprecated Since v3.7.0, this is an engine private interface that will be removed in the future.
      */
     public _internalId = -1;
+    /**
+     * @engineInternal
+     */
+    public _flagChangedVersion = -1;
 
     /**
      * @deprecated Since v3.7.0, this is an engine private interface that will be removed in the future.
@@ -429,9 +432,13 @@ export class UIRenderer extends Renderer {
         }
     }
 
-    protected _render (render: IBatcher): void { }
+    protected _render (render: IBatcher): void {
+        // Implemented by subclasses
+    }
 
-    protected _postRender (render: IBatcher): void { }
+    protected _postRender (render: IBatcher): void {
+        // Implemented by subclasses
+    }
 
     protected _canRender (): boolean {
         if (DEBUG) {
@@ -442,7 +449,9 @@ export class UIRenderer extends Renderer {
             && this._color.a > 0;
     }
 
-    protected _postCanRender (): void { }
+    protected _postCanRender (): void {
+        // Implemented by subclasses
+    }
 
     /**
      * @engineInternal
@@ -450,12 +459,12 @@ export class UIRenderer extends Renderer {
     public updateMaterial (): void {
         if (this._customMaterial) {
             if (this.getSharedMaterial(0) !== this._customMaterial) {
-                this.setMaterial(this._customMaterial, 0);
+                this.setSharedMaterial(this._customMaterial, 0);
             }
             return;
         }
         const mat = this._updateBuiltinMaterial();
-        this.setMaterial(mat, 0);
+        this.setSharedMaterial(mat, 0);
         if (this.stencilStage === Stage.ENTER_LEVEL || this.stencilStage === Stage.ENTER_LEVEL_INVERTED) {
             this.getMaterialInstance(0)!.recompileShaders({ USE_ALPHA_TEST: true });
         }

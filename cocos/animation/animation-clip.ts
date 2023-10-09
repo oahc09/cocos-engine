@@ -24,9 +24,13 @@
 
 import { ccclass, serializable } from 'cc.decorator';
 import { DEBUG } from 'internal:constants';
+import { errorID, warnID } from '@base/debug';
+import { assertIsTrue } from '@base/debug/internal';
+import { cclegacy } from '@base/global';
+import { js } from '@base/utils';
 import { Asset } from '../asset/assets/asset';
 import { SpriteFrame } from '../2d/assets/sprite-frame';
-import { errorID, warnID, cclegacy, js, geometry, approx, clamp, Mat4, Quat, Vec3, murmurhash2_32_gc, binarySearchEpsilon, assertIsTrue, RealCurve } from '../core';
+import { geometry, approx, clamp, Mat4, Quat, Vec3, murmurhash2_32_gc, binarySearchEpsilon, RealCurve } from '../core';
 import { SkelAnimDataHub } from '../3d/skeletal-animation/skeletal-animation-data-hub';
 import { WrapMode as AnimationWrapMode, WrapMode } from './types';
 import { Node } from '../scene-graph/node';
@@ -44,8 +48,9 @@ import type { AnimationMask } from './marionette/animation-mask';
 import { getGlobalAnimationManager } from './global-animation-manager';
 import { EmbeddedPlayableState, EmbeddedPlayer } from './embedded-player/embedded-player';
 import { AuxiliaryCurveEntry } from './auxiliary-curve-entry';
-import { removeIf } from '../core/utils/array';
 import { invokeComponentMethodsEngagedInAnimationEvent } from './event/event-emitter';
+
+const { removeIf } = js.array;
 
 export declare namespace AnimationClip {
     export interface IEvent {
@@ -790,9 +795,9 @@ export class AnimationClip extends Asset {
         ratios: number[];
         eventGroups: IAnimationEventGroup[];
     } = {
-        ratios: [],
-        eventGroups: [],
-    };
+            ratios: [],
+            eventGroups: [],
+        };
 
     private _createEvalWithBinder (target: unknown, binder: Binder, rootMotionOptions: RootMotionOptions | undefined): AnimationClipEvaluation {
         if (this._legacyDataDirty) {
@@ -1039,12 +1044,14 @@ class TrackEvalStatus<TValue> {
     constructor (binding: RuntimeBinding<TValue>, trackEval: TrackEval<TValue>) {
         this._binding = binding;
         this._trackEval = trackEval;
+        this._shouldEvaluateDefault = !!binding.getValue && trackEval.requiresDefault;
     }
 
     public evaluate (time: number): void {
         const { _binding: binding, _trackEval: trackEval } = this;
-        const defaultValue = binding.getValue && trackEval.requiresDefault
-            ? binding.getValue() as TValue extends unknown ? unknown : Readonly<TValue>
+        const defaultValue = this._shouldEvaluateDefault
+            // See `this._shouldEvaluateDefault` for the assertion.
+            ? (binding.getValue!)() as TValue extends unknown ? unknown : Readonly<TValue>
             : undefined;
         const value = trackEval.evaluate(time, defaultValue);
         binding.setValue(value);
@@ -1052,6 +1059,7 @@ class TrackEvalStatus<TValue> {
 
     private _binding: RuntimeBinding<TValue>;
     private _trackEval: TrackEval<TValue>;
+    private _shouldEvaluateDefault = true;
 }
 
 interface AnimationClipEvalContext {

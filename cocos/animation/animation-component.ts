@@ -22,10 +22,13 @@
  THE SOFTWARE.
 */
 
-import { ccclass, executeInEditMode, executionOrder, help, menu, tooltip, type, serializable } from 'cc.decorator';
+import { ccclass, executeInEditMode, executionOrder, help, menu, type, serializable, editable } from 'cc.decorator';
 import { EDITOR_NOT_IN_PREVIEW, TEST } from 'internal:constants';
+import { warnID } from '@base/debug';
+import { cclegacy } from '@base/global';
+import { js } from '@base/utils';
 import { Component } from '../scene-graph/component';
-import { Eventify, warnID, js, cclegacy } from '../core';
+import { Eventify } from '../core';
 import { AnimationClip } from './animation-clip';
 import { AnimationState, EventType } from './animation-state';
 import { CrossFade } from './cross-fade';
@@ -60,7 +63,6 @@ export class Animation extends Eventify(Component) {
      * 设置时，已有剪辑关联的动画状态将被停止；若默认剪辑不在新的动画剪辑中，将被重置为空。
      */
     @type([AnimationClip])
-    @tooltip('i18n:animation.clips')
     get clips (): (AnimationClip | null)[] {
         return this._clips;
     }
@@ -103,7 +105,6 @@ export class Animation extends Eventify(Component) {
      * @see [[playOnLoad]]
      */
     @type(AnimationClip)
-    @tooltip('i18n:animation.default_clip')
     get defaultClip (): AnimationClip | null {
         return this._defaultClip;
     }
@@ -131,7 +132,7 @@ export class Animation extends Eventify(Component) {
      * 注意，若在组件开始运行前调用了 `crossFade` 或 `play()`，此字段将不会生效。
      */
     @serializable
-    @tooltip('i18n:animation.play_on_load')
+    @editable
     public playOnLoad = false;
 
     /**

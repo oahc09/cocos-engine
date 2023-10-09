@@ -23,15 +23,17 @@
 */
 
 import { EDITOR, EDITOR_NOT_IN_PREVIEW, TEST } from 'internal:constants';
+import { cclegacy } from '@base/global';
+import { IMemoryImageSource } from '../../../pal/image/types';
 import { Asset } from '../assets/asset';
-import { ImageAsset, ImageSource } from '../assets/image-asset';
+import { ImageAsset } from '../assets/image-asset';
 import { SpriteFrame } from '../../2d/assets/sprite-frame';
 import { Texture2D } from '../assets/texture-2d';
 import { TextureCube } from '../assets/texture-cube';
 import assetManager from './asset-manager';
 import { BuiltinBundleName } from './shared';
 import Bundle from './bundle';
-import { Settings, settings, cclegacy } from '../../core';
+import { Settings, settings } from '../../core';
 import { releaseManager } from './release-manager';
 import { Material } from '../assets';
 
@@ -119,7 +121,7 @@ export class BuiltinResMgr {
             offset += halfDefaultSize * numChannels;
         }
 
-        const blackMemImageSource: ImageSource = {
+        const blackMemImageSource: IMemoryImageSource = {
             width: len,
             height: len,
             _data: blackValueView,
@@ -127,7 +129,7 @@ export class BuiltinResMgr {
             format: Texture2D.PixelFormat.RGBA8888,
         };
 
-        const emptyMemImageSource: ImageSource = {
+        const emptyMemImageSource: IMemoryImageSource = {
             width: len,
             height: len,
             _data: emptyValueView,
@@ -135,7 +137,7 @@ export class BuiltinResMgr {
             format: Texture2D.PixelFormat.RGBA8888,
         };
 
-        const greyMemImageSource: ImageSource = {
+        const greyMemImageSource: IMemoryImageSource = {
             width: len,
             height: len,
             _data: greyValueView,
@@ -143,7 +145,7 @@ export class BuiltinResMgr {
             format: Texture2D.PixelFormat.RGBA8888,
         };
 
-        const whiteMemImageSource: ImageSource = {
+        const whiteMemImageSource: IMemoryImageSource = {
             width: len,
             height: len,
             _data: whiteValueView,
@@ -151,7 +153,7 @@ export class BuiltinResMgr {
             format: Texture2D.PixelFormat.RGBA8888,
         };
 
-        const normalMemImageSource: ImageSource = {
+        const normalMemImageSource: IMemoryImageSource = {
             width: len,
             height: len,
             _data: normalValueView,
@@ -159,7 +161,7 @@ export class BuiltinResMgr {
             format: Texture2D.PixelFormat.RGBA8888,
         };
 
-        const defaultMemImageSource: ImageSource = {
+        const defaultMemImageSource: IMemoryImageSource = {
             width: defaultSize,
             height: defaultSize,
             _data: defaultValueView,

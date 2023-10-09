@@ -28,14 +28,17 @@
 /* spell-checker:words COORD, Quesada, INITED, Renerer */
 
 import { DEBUG, EDITOR, BUILD, TEST, EDITOR_NOT_IN_PREVIEW } from 'internal:constants';
+import { errorID, error, assertID, warnID } from '@base/debug';
+import { cclegacy } from '@base/global';
+import { js } from '@base/utils';
+import { scalableContainerManager } from '@base/utils/internal';
 import { SceneAsset } from '../asset/assets/scene-asset';
-import { System, EventTarget, Scheduler, js, errorID, error, assertID, warnID, macro, CCObject, cclegacy, isValid } from '../core';
+import { System, EventTarget, Scheduler, macro, CCObject, isValid } from '../core';
 import { input } from '../input';
 import { Root } from '../root';
 import { Node, Scene } from '../scene-graph';
 import { ComponentScheduler } from '../scene-graph/component-scheduler';
 import NodeActivator from '../scene-graph/node-activator';
-import { scalableContainerManager } from '../core/memop/scalable-container';
 import { uiRendererManager } from '../2d/framework/ui-renderer-manager';
 import { assetManager } from '../asset/asset-manager';
 import { deviceManager } from '../gfx';
@@ -532,7 +535,7 @@ export class Director extends EventTarget {
         for (let i = 0; i < renderers.length; i++) {
             const renderer = renderers[i];
             const mesh = renderer.mesh;
-            if (renderer.isUseGPUScene()) {
+            if (renderer.supportGPUScene()) {
                 meshes.push(mesh!);
             }
         }

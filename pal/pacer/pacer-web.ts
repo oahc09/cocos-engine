@@ -23,8 +23,8 @@
 */
 
 import { EDITOR } from 'internal:constants';
-import { assertIsTrue } from '../../cocos/core/data/utils/asserts';
-import { checkPalIntegrity, withImpl } from '../integrity-check';
+import { checkPalIntegrity, withImpl } from '@pal/utils';
+import { assertIsTrue } from '@base/debug/internal';
 
 const FRAME_RESET_TIME = 2000;
 
@@ -85,8 +85,9 @@ export class Pacer {
 
     start (): void {
         if (this._isPlaying) return;
-
+        const recordStartTime = EDITOR || this._rAF === undefined || globalThis.__globalXR?.isWebXR;
         const updateCallback = (): void => {
+            if (recordStartTime) this._startTime = performance.now();
             if (this._isPlaying) {
                 this._stHandle = this._stTime(updateCallback);
             }

@@ -26,6 +26,7 @@
 */
 
 import { screenAdapter } from 'pal/screen-adapter';
+import { ccwindow } from '@base/global';
 import { BitmapFont } from '../../2d/assets';
 import { director } from '../../game/director';
 import { game } from '../../game';
@@ -39,7 +40,6 @@ import { tabIndexUtil } from './tabIndexUtil';
 import { InputFlag, InputMode, KeyboardReturnType } from './types';
 import { EditBoxImplBase } from './edit-box-impl-base';
 import { BrowserType, OS } from '../../../pal/system-info/enum-type';
-import { ccwindow } from '../../core/global-exports';
 
 const ccdocument = ccwindow.document;
 
@@ -137,6 +137,7 @@ export class EditBoxImpl extends EditBoxImplBase {
     }
 
     public update (): void {
+        if (!this._dirtyFlag) return;
         this._updateMatrix();
     }
 
@@ -370,11 +371,12 @@ export class EditBoxImpl extends EditBoxImplBase {
         let type = elem.type;
         if (inputMode === InputMode.EMAIL_ADDR) {
             type = 'email';
-        } else if (inputMode === InputMode.NUMERIC || inputMode === InputMode.DECIMAL) {
+        } else if (inputMode === InputMode.NUMERIC) {
             type = 'number';
+        } else if (inputMode === InputMode.DECIMAL) {
+            type = 'digit';
         } else if (inputMode === InputMode.PHONE_NUMBER) {
-            type = 'number';
-            elem.pattern = '[0-9]*';
+            type = 'tel';
             elem.addEventListener('wheel', () => false);
         } else if (inputMode === InputMode.URL) {
             type = 'url';
@@ -624,12 +626,12 @@ export class EditBoxImpl extends EditBoxImplBase {
             this._delegate!._editBoxEditingDidEnded();
         };
 
-        elem.addEventListener('compositionstart', cbs.compositionStart);
-        elem.addEventListener('compositionend', cbs.compositionEnd);
-        elem.addEventListener('input', cbs.onInput);
-        elem.addEventListener('keydown', cbs.onKeydown);
-        elem.addEventListener('blur', cbs.onBlur);
-        elem.addEventListener('touchstart', cbs.onClick);
+        elem.addEventListener('compositionstart', cbs.compositionStart as EventListenerOrEventListenerObject);
+        elem.addEventListener('compositionend', cbs.compositionEnd as EventListenerOrEventListenerObject);
+        elem.addEventListener('input', cbs.onInput as EventListenerOrEventListenerObject);
+        elem.addEventListener('keydown', cbs.onKeydown as EventListenerOrEventListenerObject);
+        elem.addEventListener('blur', cbs.onBlur as EventListenerOrEventListenerObject);
+        elem.addEventListener('touchstart', cbs.onClick as EventListenerOrEventListenerObject);
     }
     private _removeEventListeners (): void {
         if (!this._edTxt) {
@@ -639,12 +641,12 @@ export class EditBoxImpl extends EditBoxImplBase {
         const elem = this._edTxt;
         const cbs = this.__eventListeners;
 
-        elem.removeEventListener('compositionstart', cbs.compositionStart);
-        elem.removeEventListener('compositionend', cbs.compositionEnd);
-        elem.removeEventListener('input', cbs.onInput);
-        elem.removeEventListener('keydown', cbs.onKeydown);
-        elem.removeEventListener('blur', cbs.onBlur);
-        elem.removeEventListener('touchstart', cbs.onClick);
+        elem.removeEventListener('compositionstart', cbs.compositionStart as EventListenerOrEventListenerObject);
+        elem.removeEventListener('compositionend', cbs.compositionEnd as EventListenerOrEventListenerObject);
+        elem.removeEventListener('input', cbs.onInput as EventListenerOrEventListenerObject);
+        elem.removeEventListener('keydown', cbs.onKeydown as EventListenerOrEventListenerObject);
+        elem.removeEventListener('blur', cbs.onBlur as EventListenerOrEventListenerObject);
+        elem.removeEventListener('touchstart', cbs.onClick as EventListenerOrEventListenerObject);
 
         cbs.compositionStart = null;
         cbs.compositionEnd = null;

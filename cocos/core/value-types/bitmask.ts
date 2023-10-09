@@ -23,9 +23,11 @@
 */
 
 import { EDITOR, TEST } from 'internal:constants';
-import { value } from '../utils/js';
-import { legacyCC } from '../global-exports';
-import { errorID } from '../platform/debug';
+import { cclegacy } from '@base/global';
+import { errorID } from '@base/debug';
+import { js } from '@base/utils';
+
+const { value } = js;
 
 /**
  * @en
@@ -57,7 +59,7 @@ import { errorID } from '../platform/debug';
  * BitMask(obj);
  * ```
  */
-export function BitMask<T> (obj: T): T {
+export function BitMask<T extends object> (obj: T): T {
     if ('__bitmask__' in obj) {
         return obj;
     }
@@ -95,7 +97,7 @@ export function BitMask<T> (obj: T): T {
  * @returns @en True if it is a BitMask, false else.
  * @zh 如果是 BitMask，返回 true；否则返回 false。
  */
-BitMask.isBitMask = (BitMaskType): any => BitMaskType && BitMaskType.hasOwnProperty('__bitmask__');
+BitMask.isBitMask = (BitMaskType): any => BitMaskType && Object.hasOwnProperty.call(BitMaskType, '__bitmask__');
 
 /**
  *
@@ -144,11 +146,11 @@ BitMask.update = (BitMaskDef): any => {
  * @param bitmaskx @en An object to make BitMask type. @zh 要标记为 BitMask 类型的对象。
  * @returns @en The passed in object. @zh 传入的对象。
  */
-export function ccbitmask (bitmaskx): void {
+export function ccbitmask (bitmaskx: object): void {
     if ('__bitmask__' in bitmaskx) {
         return;
     }
     value(bitmaskx, '__bitmask__', null, true);
 }
 
-legacyCC.BitMask = BitMask;
+cclegacy.BitMask = BitMask;

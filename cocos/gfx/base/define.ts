@@ -409,6 +409,7 @@ export enum TextureFlagBit {
     EXTERNAL_NORMAL = 0x8, // External normal texture
     MUTABLE_STORAGE = 0x10, //  Texture is mutable or not, default is immutable(only for webgl2)
     LAZILY_ALLOCATED = 0x20, // Try lazily allocated mode.
+    MUTABLE_VIEW_FORMAT = 0x40, // texture view as different format
 }
 
 export enum FormatFeatureBit {
@@ -466,6 +467,12 @@ export enum Address {
     MIRROR,
     CLAMP,
     BORDER,
+}
+
+export enum Reduction {
+    WEIGHTED_AVERAGE,
+    MIN,
+    MAX,
 }
 
 export enum ComparisonFunc {
@@ -755,6 +762,7 @@ export class DeviceCaps {
         public maxComputeWorkGroupSize: Size = new Size(),
         public maxComputeWorkGroupCount: Size = new Size(),
         public supportQuery: boolean = false,
+        public supportGPUDriven: boolean = false,
         public clipSpaceMinZ: number = -1,
         public screenSpaceSignY: number = 1,
         public clipSpaceSignY: number = 1,
@@ -782,6 +790,7 @@ export class DeviceCaps {
         this.maxComputeWorkGroupSize.copy(info.maxComputeWorkGroupSize);
         this.maxComputeWorkGroupCount.copy(info.maxComputeWorkGroupCount);
         this.supportQuery = info.supportQuery;
+        this.supportGPUDriven = info.supportGPUDriven;
         this.clipSpaceMinZ = info.clipSpaceMinZ;
         this.screenSpaceSignY = info.screenSpaceSignY;
         this.clipSpaceSignY = info.clipSpaceSignY;
@@ -1236,6 +1245,7 @@ export class SamplerInfo {
         public addressW: Address = Address.WRAP,
         public maxAnisotropy: number = 0,
         public cmpFunc: ComparisonFunc = ComparisonFunc.ALWAYS,
+        public reduction: Reduction = Reduction.WEIGHTED_AVERAGE,
     ) {}
 
     public copy (info: Readonly<SamplerInfo>): SamplerInfo {
@@ -1247,6 +1257,7 @@ export class SamplerInfo {
         this.addressW = info.addressW;
         this.maxAnisotropy = info.maxAnisotropy;
         this.cmpFunc = info.cmpFunc;
+        this.reduction = info.reduction;
         return this;
     }
 }
@@ -2342,7 +2353,11 @@ export function getTypedArrayConstructor (info: FormatInfo): TypedArrayConstruct
         }
     }
     case FormatType.FLOAT: {
-        return Float32Array;
+        switch (stride) {
+        case 2: return Uint16Array;
+        case 4: return Float32Array;
+        default: return Float32Array;
+        }
     }
     default:
     }

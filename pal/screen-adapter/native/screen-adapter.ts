@@ -23,9 +23,10 @@
 */
 
 import { EDITOR } from 'internal:constants';
+import { checkPalIntegrity, withImpl } from '@pal/utils';
+import { warn } from '@base/debug';
 import { EventTarget } from '../../../cocos/core/event/event-target';
 import { Size } from '../../../cocos/core/math';
-import { checkPalIntegrity, withImpl } from '../../integrity-check';
 import { Orientation } from '../enum-type';
 
 export interface SafeAreaEdge {
@@ -79,17 +80,15 @@ class ScreenAdapter extends EventTarget {
     public get windowSize (): Size {
         const dpr = this.devicePixelRatio;
         // NOTE: fix precision issue on Metal render end.
-        // TODO: interface for OH only, we need a unified interface @qiuguohua
-        const width = globalThis.oh ? (jsb.device as any).getInnerWidth() : jsb.window.innerWidth;
-        // TODO: interface for OH only, we need a unified interface @qiuguohua
-        const height = globalThis.oh ? (jsb.device as any).getInnerHeight() : jsb.window.innerHeight;
+        const width: number = jsb.window.innerWidth;
+        const height: number = jsb.window.innerHeight;
         // NOTE: fix precision issue on Metal render end.
         const roundWidth = Math.round(width);
         const roundHeight = Math.round(height);
         return new Size(roundWidth * dpr, roundHeight * dpr);
     }
     public set windowSize (size: Size) {
-        console.warn('Setting window size is not supported yet.');
+        warn('Setting window size is not supported yet.');
     }
 
     public get resolution (): Size {
@@ -112,7 +111,7 @@ class ScreenAdapter extends EventTarget {
         return orientationMap[jsb.device.getDeviceOrientation()];
     }
     public set orientation (value: Orientation) {
-        console.warn('Setting orientation is not supported yet.');
+        warn('Setting orientation is not supported yet.');
     }
 
     public get safeAreaEdge (): SafeAreaEdge {
@@ -145,7 +144,7 @@ class ScreenAdapter extends EventTarget {
     public get isProportionalToFrame (): boolean {
         return this._isProportionalToFrame;
     }
-    public set isProportionalToFrame (v: boolean) { }
+    public set isProportionalToFrame (v: boolean) { /* not support setting */ }
 
     private _cbToUpdateFrameBuffer?: () => void;
     private _resolutionScale = 1;

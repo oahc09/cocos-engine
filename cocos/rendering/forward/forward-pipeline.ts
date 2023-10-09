@@ -24,6 +24,7 @@
 
 import { ccclass, displayOrder, type, serializable } from 'cc.decorator';
 import { EDITOR } from 'internal:constants';
+import { errorID, log } from '@base/debug';
 import { RenderPipeline, IRenderPipelineInfo } from '../render-pipeline';
 import { ForwardFlow } from './forward-flow';
 import { RenderTextureConfig } from '../pipeline-serialization';
@@ -33,11 +34,16 @@ import { Swapchain, RenderPass } from '../../gfx';
 import { builtinResMgr } from '../../asset/asset-manager/builtin-res-mgr';
 import { Texture2D } from '../../asset/assets/texture-2d';
 import { Camera } from '../../render-scene/scene';
-import { errorID, log } from '../../core/platform/debug';
 import { PipelineSceneData } from '../pipeline-scene-data';
 import { ReflectionProbeFlow } from '../reflection-probe/reflection-probe-flow';
 
 const PIPELINE_TYPE = 0;
+
+export function createDefaultPipeline (): ForwardPipeline {
+    const rppl = new ForwardPipeline();
+    rppl.initialize({ flows: [] });
+    return rppl;
+}
 
 /**
  * @en The forward render pipeline

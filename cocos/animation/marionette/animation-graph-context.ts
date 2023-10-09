@@ -1,6 +1,7 @@
 import { DEBUG } from 'internal:constants';
+import { error } from '@base/debug';
+import { assertIsTrue } from '@base/debug/internal';
 import { Node } from '../../scene-graph';
-import { assertIsTrue } from '../../core/data/utils/asserts';
 import { Pose, PoseTransformSpace, TransformFilter } from '../core/pose';
 import { PoseStackAllocator } from '../core/pose-allocator';
 import { TransformArray } from '../core/transform-array';
@@ -8,7 +9,6 @@ import { TransformHandle, AuxiliaryCurveHandle } from '../core/animation-handle'
 import { Transform, ZERO_DELTA_TRANSFORM } from '../core/transform';
 import { VarInstance } from './variable';
 import { AnimationMask } from './animation-mask';
-import { error } from '../../core';
 import { partition } from '../../core/algorithm/partition';
 import { AnimationController } from './animation-controller';
 import { TransformSpace } from './pose-graph/pose-nodes/transform-space';
@@ -289,10 +289,12 @@ const checkBindStatus = (bindStarted = false): MethodDecorator => (_, _propertyK
     if (vendor) {
         // eslint-disable-next-line func-names
         descriptor.value = function (this: { readonly _bindStarted: boolean }, ...args: unknown[]): any {
-            assertIsTrue(this._bindStarted === bindStarted,
+            assertIsTrue(
+                this._bindStarted === bindStarted,
                 bindStarted
                     ? `The operation is invalid since bind has not been started.`
-                    : `The operation is invalid since bind has already been started.`);
+                    : `The operation is invalid since bind has already been started.`,
+            );
             // eslint-disable-next-line @typescript-eslint/no-unsafe-return
             return vendor.call(this, ...args);
         };

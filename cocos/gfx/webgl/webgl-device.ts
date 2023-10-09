@@ -22,6 +22,8 @@
  THE SOFTWARE.
 */
 
+import { ImageData } from 'pal/image';
+import { debug, error } from '@base/debug';
 import { DescriptorSet } from '../base/descriptor-set';
 import { DescriptorSetLayout } from '../base/descriptor-set-layout';
 import { PipelineLayout } from '../base/pipeline-layout';
@@ -51,17 +53,11 @@ import { WebGLSampler } from './states/webgl-sampler';
 import { WebGLShader } from './webgl-shader';
 import { getContext, getExtensions, WebGLSwapchain } from './webgl-swapchain';
 import { WebGLTexture } from './webgl-texture';
-import {
-    CommandBufferType, ShaderInfo,
-    QueueInfo, CommandBufferInfo, DescriptorSetInfo, DescriptorSetLayoutInfo, FramebufferInfo, InputAssemblerInfo, PipelineLayoutInfo,
-    RenderPassInfo, SamplerInfo, TextureInfo, TextureViewInfo, BufferInfo, BufferViewInfo, DeviceInfo, TextureBarrierInfo, GeneralBarrierInfo,
-    BufferBarrierInfo, QueueType, API, Feature, BufferTextureCopy, SwapchainInfo, FormatFeature, FormatFeatureBit, Format,
-} from '../base/define';
+import { CommandBufferType, ShaderInfo, QueueInfo, CommandBufferInfo, DescriptorSetInfo, DescriptorSetLayoutInfo, FramebufferInfo, InputAssemblerInfo, PipelineLayoutInfo, RenderPassInfo, SamplerInfo, TextureInfo, TextureViewInfo, BufferInfo, BufferViewInfo, DeviceInfo, TextureBarrierInfo, GeneralBarrierInfo, BufferBarrierInfo, QueueType, API, Feature, BufferTextureCopy, SwapchainInfo, FormatFeature, FormatFeatureBit, Format } from '../base/define';
 import { WebGLCmdFuncCopyBuffersToTexture, WebGLCmdFuncCopyTextureToBuffers, WebGLCmdFuncCopyTexImagesToTexture } from './webgl-commands';
 import { GeneralBarrier } from '../base/states/general-barrier';
 import { TextureBarrier } from '../base/states/texture-barrier';
 import { BufferBarrier } from '../base/states/buffer-barrier';
-import { debug, error } from '../../core';
 import { Swapchain } from '../base/swapchain';
 import { IWebGLExtensions, WebGLDeviceManager } from './webgl-define';
 import { IWebGLBindingMapping, IWebGLBlitManager } from './webgl-gpu-objects';
@@ -563,5 +559,37 @@ export class WebGLDevice extends Device {
             (texture as WebGLTexture).gpuTexture,
             regions,
         );
+    }
+
+    public copyImageDatasToTexture (
+        imageDatas: Readonly<ImageData[]>,
+        texture: Texture,
+        regions: Readonly<BufferTextureCopy[]>,
+    ): void {
+        const texImages: TexImageSource[] = [];
+        const buffers: ArrayBufferView[] = [];
+        imageDatas.forEach((item) => {
+            if ('_data' in item.source && ArrayBuffer.isView(item.data)) {
+                buffers.push(item.data);
+            } else {
+                texImages.push(item.source as TexImageSource);
+            }
+        });
+        if (texImages.length > 0) {
+            WebGLCmdFuncCopyTexImagesToTexture(
+                this,
+                texImages,
+                (texture as WebGLTexture).gpuTexture,
+                regions,
+            );
+        }
+        if (buffers.length > 0) {
+            WebGLCmdFuncCopyBuffersToTexture(
+                this,
+                buffers,
+                (texture as WebGLTexture).gpuTexture,
+                regions,
+            );
+        }
     }
 }

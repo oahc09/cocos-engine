@@ -1,12 +1,11 @@
 import { EDITOR } from 'internal:constants';
-import { ccclass, editable, serializable, type, visible } from '../../../../core/data/decorators';
+import { error } from '@base/debug';
+import { ccclass, editable, range, serializable, type, visible } from '../../../../core/data/decorators';
 import { CLASS_NAME_PREFIX_ANIM } from '../../../define';
 import { PoseNode, PoseTransformSpaceRequirement } from '../pose-node';
-import {
-    AnimationGraphBindingContext, AnimationGraphEvaluationContext,
-} from '../../animation-graph-context';
+import { AnimationGraphBindingContext, AnimationGraphEvaluationContext } from '../../animation-graph-context';
 import { input } from '../decorator/input';
-import { approx, assertIsTrue, ccenum, error, Quat, Vec3 } from '../../../../core';
+import { approx, ccenum, Quat, Vec3 } from '../../../../core';
 import { TransformHandle } from '../../../core/animation-handle';
 import { poseGraphNodeAppearance, poseGraphNodeCategory } from '../decorator/node';
 import { POSE_GRAPH_NODE_MENU_PREFIX_POSE } from './menu-common';
@@ -47,7 +46,7 @@ export class PoseNodeApplyTransform extends PoseNodeModifyPoseBase {
     @serializable
     @editable
     @input({ type: PoseGraphType.VEC3 })
-    @visible(function visible(this: PoseNodeApplyTransform) { return this.positionOperation !== TransformOperation.LEAVE_UNCHANGED; })
+    @visible(function visible (this: PoseNodeApplyTransform) { return this.positionOperation !== TransformOperation.LEAVE_UNCHANGED; })
     public position = new Vec3();
 
     @serializable
@@ -58,11 +57,12 @@ export class PoseNodeApplyTransform extends PoseNodeModifyPoseBase {
     @serializable
     @editable
     @input({ type: PoseGraphType.QUAT })
-    @visible(function visible(this: PoseNodeApplyTransform) { return this.rotationOperation !== TransformOperation.LEAVE_UNCHANGED; })
+    @visible(function visible (this: PoseNodeApplyTransform) { return this.rotationOperation !== TransformOperation.LEAVE_UNCHANGED; })
     public rotation = new Quat();
 
     @serializable
     @editable
+    @range([0.0, 1.0, 0.01])
     public intensity = new IntensitySpecification();
 
     @serializable

@@ -24,14 +24,14 @@
 */
 
 import { ccclass, help, executionOrder, menu, requireComponent, tooltip, type, range, slide, serializable } from 'cc.decorator';
+import { warn } from '@base/debug';
+import { cclegacy } from '@base/global';
 import { Component } from '../scene-graph/component';
 import { UITransform } from '../2d/framework';
 import { Size, Vec2, Vec3 } from '../core/math';
 import { Enum } from '../core/value-types';
 import { clamp01 } from '../core/math/utils';
 import { Sprite } from '../2d/components/sprite';
-import { warn } from '../core/platform/debug';
-import { legacyCC } from '../core/global-exports';
 
 /**
  * @en
@@ -342,4 +342,4 @@ export class ProgressBar extends Component {
     }
 }
 
-legacyCC.ProgressBar = ProgressBar;
+cclegacy.ProgressBar = ProgressBar;

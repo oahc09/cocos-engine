@@ -25,13 +25,15 @@
 
 /* eslint-disable no-new-func */
 
-import { DEV } from 'internal:constants';
-import { getClassName, getset, isEmptyObject } from './js';
-import { legacyCC } from '../global-exports';
-import { warnID } from '../platform/debug';
+import { DEBUG, DEV } from 'internal:constants';
+import { setTimeoutRAF } from '@pal/utils';
+import { cclegacy } from '@base/global';
+import { warnID } from '@base/debug';
+import { js } from '@base/utils';
+import { isPlainEmptyObj } from '@base/utils/internal';
 import { macro } from '../platform/macro';
-import { setTimeoutRAF } from '../../../pal/utils';
-import type { Component } from '../../scene-graph';
+
+const { getClassName, getset, isEmptyObject } = js;
 
 export const BUILTIN_CLASSID_RE = /^(?:cc|dragonBones|sp|ccsg)\..+/;
 
@@ -53,31 +55,31 @@ export const BASE64_VALUES = values;
  * @engineInternal
  */
 export function propertyDefine (ctor, sameNameGetSets, diffNameGetSets): void {
-    function define (np, propName, getter, setter): void {
+    function define (np: object, propName: string, getter: string, setter: string): void {
         const pd = Object.getOwnPropertyDescriptor(np, propName);
         if (pd) {
             if (pd.get) { np[getter] = pd.get; }
             if (pd.set && setter) { np[setter] = pd.set; }
         } else {
-            const getterFunc = np[getter];
+            const getterFunc: Getter = np[getter];
             if (DEV && !getterFunc) {
-                const clsName = (legacyCC.Class._isCCClass(ctor) && getClassName(ctor))
+                const clsName: string = (cclegacy.Class._isCCClass(ctor) && getClassName(ctor))
                     || ctor.name
                     || '(anonymous class)';
                 warnID(5700, propName, getter, clsName);
             } else {
-                getset(np, propName, getterFunc, np[setter]);
+                getset(np, propName, getterFunc, np[setter] as Setter);
             }
         }
     }
-    let propName; const np = ctor.prototype;
+    let propName: string; const np: object = ctor.prototype;
     for (let i = 0; i < sameNameGetSets.length; i++) {
         propName = sameNameGetSets[i];
-        const suffix = (propName[0].toUpperCase() as string) + (propName.slice(1) as string);
+        const suffix = propName[0].toUpperCase() + propName.slice(1);
         define(np, propName, `get${suffix}`, `set${suffix}`);
     }
     for (propName in diffNameGetSets) {
-        const gs = diffNameGetSets[propName];
+        const gs: string[] = diffNameGetSets[propName];
         define(np, propName, gs[0], gs[1]);
     }
 }
@@ -179,16 +181,23 @@ export function callInNextTick (callback, p1?: any, p2?: any): void {
  * @zh 被 try catch 包裹的函数名。
  * @returns @en A new function that will invoke `functionName` with try catch.
  * @zh 使用 try catch 机制调用 `functionName` 的新函数.
+ *
+ * @deprecated `misc.tryCatchFunctor_EDITOR` is deprecated since v3.9.0.
  */
-export function tryCatchFunctor_EDITOR (funcName: string): (comp: Component) => void {
+export function tryCatchFunctor_EDITOR (funcName: string): (comp: unknown) => void {
+    if (DEBUG) {
+        warnID(16000, 'misc.tryCatchFunctor_EDITOR', '3.9.0');
+    }
     // eslint-disable-next-line @typescript-eslint/no-implied-eval
-    return Function('target',
+    return Function(
+        'target',
         `${'try {\n'
         + '  target.'}${funcName}();\n`
         + `}\n`
         + `catch (e) {\n`
         + `  cc._throw(e);\n`
-        + `}`) as (comp: Component) => void;
+        + `}`,
+    ) as (comp: unknown) => void;
 }
 
 /**
@@ -197,12 +206,14 @@ export function tryCatchFunctor_EDITOR (funcName: string): (comp: Component) => 
  * @param obj @en The object to check. @zh 要检查的对象。
  * @returns @en True if it is an empty object. False if it is not an empty object, not Object type, null or undefined.
  * @ 如果是空对象，返回 true。如果不是空对象，不是Object类型，空或未定义，则为假。
+ *
+ * @deprecated `misc.isPlainEmptyObj_DEV` is deprecated since v3.9.0, please use `js.isEmptyObject` instead.
  */
 export function isPlainEmptyObj_DEV (obj): boolean {
-    if (!obj || obj.constructor !== Object) {
-        return false;
+    if (DEBUG) {
+        warnID(16001, 'misc.isPlainEmptyObj_DEV', '3.9.0', 'js.isEmptyObject');
     }
-    return isEmptyObject(obj);
+    return isPlainEmptyObj(obj);
 }
 
 /**
@@ -252,6 +263,19 @@ export function radiansToDegrees (angle): number {
     return angle * macro.DEG;
 }
 
+/**
+ * @engineInternal
+ */
+export function applyMixins (derivedCtor: any, baseCtors: any[]): void {
+    baseCtors.forEach((baseCtor) => {
+        Object.getOwnPropertyNames(baseCtor.prototype).forEach((name) => {
+            if (name !== 'constructor') {
+                Object.defineProperty(derivedCtor.prototype, name, Object.getOwnPropertyDescriptor(baseCtor.prototype, name)!);
+            }
+        });
+    });
+}
+
 // if (TEST) {
 //     // editor mocks using in unit tests
 //     if (typeof Editor === 'undefined') {
@@ -266,7 +290,7 @@ export function radiansToDegrees (angle): number {
 //     }
 // }
 
-legacyCC.misc = {
+cclegacy.misc = {
     BUILTIN_CLASSID_RE,
     BASE64_VALUES,
     propertyDefine,

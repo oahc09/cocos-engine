@@ -31,6 +31,8 @@ const _d2r = Math.PI / 180.0;
 
 const _r2d = 180.0 / Math.PI;
 
+let _random = Math.random;
+
 export const HALF_PI = Math.PI * 0.5;
 export const TWO_PI = Math.PI * 2.0;
 
@@ -121,7 +123,18 @@ export function toDegree (a: number): number {
 /**
  * @method random
  */
-export const random = Math.random;
+export function random (): number {
+    return _random();
+}
+
+/**
+ * @en Set a custom random number generator, default to Math.random
+ * @zh 设置自定义随机数生成器，默认为 Math.random
+ * @param func custom random number generator
+ */
+export function setRandGenerator<TFunction extends (...any) => number> (func: TFunction): void {
+    _random = func;
+}
 
 /**
  * @en Returns a floating-point random number between min (inclusive) and max (exclusive).<br/>
@@ -129,10 +142,10 @@ export const random = Math.random;
  * @method randomRange
  * @param min
  * @param max
- * @return The random number.
+ * @return {Number} The random number.
  */
 export function randomRange (min: number, max: number): number {
-    return Math.random() * (max - min) + min;
+    return random() * (max - min) + min;
 }
 
 /**
@@ -285,4 +298,70 @@ export function enumerableProps (prototype: ValueType, attrs: string[]): void {
     attrs.forEach((key): void => {
         Object.defineProperty(prototype, key, { enumerable: true });
     });
+}
+
+/**
+ * convert float to half (short)
+ */
+
+const toHalf = (function () {
+    // https://stackoverflow.com/questions/32633585/how-do-you-convert-to-half-floats-in-javascript
+    const floatView = new Float32Array(1);
+    const int32View = new Int32Array(floatView.buffer);
+
+    return function toHalf (fval: number): number {
+        floatView[0] = fval;
+        const fbits = int32View[0];
+        const s = (fbits >> 16) & 0x8000; // sign
+        const em = fbits & 0x7fffffff; // exp and mantissa
+
+        let h = (em - (112 << 23) + (1 << 12)) >> 13;
+        h = (em < (113 << 23)) ? 0 : h; // denormals-as-zero
+
+        h = (em >= (143 << 23)) ? 0x7c00 : h; // overflow
+
+        h = (em > (255 << 23)) ? 0x7e00 : h; // NaN
+
+        int32View[0] = (s | h); // pack sign and half
+
+        return int32View[0];
+    };
+}());
+
+const fromHalf = (function () {
+    const floatView = new Float32Array(1);
+    const int32View = new Int32Array(floatView.buffer);
+
+    return function fromHalf (hval: number /* uint16 */): number {
+        const s = (hval >> 15) & 0x00000001; // sign
+        const em = hval & 0x00007fff; // exp and mantissa
+
+        let h = (em << 13); // exponent/mantissa bits
+        let fbits = 0;
+
+        if (h !== 0x7c00) { // // NaN/Inf
+            h += (112 << 23); // exp adjust
+
+            if (em === 0) { // // Denormals-as-zero
+                h = (h & 0xfffff) >> 1; // // Mantissa shift
+            } else if (em === 0x7fff) { // // Inf/NaN?
+                h = 0x7fffffff; // // NaN
+            }
+        } else {
+            h = 0x7f800000; // // +/-Inf
+        }
+
+        fbits = (s << 31) | h; // // Sign | Exponent | Mantissa
+        int32View[0] = fbits;
+
+        return floatView[0];
+    };
+}());
+
+export function floatToHalf (val: number) {
+    return toHalf(val);
+}
+
+export function halfToFloat (val: number) {
+    return fromHalf(val);
 }

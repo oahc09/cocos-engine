@@ -25,12 +25,12 @@
 import { EDITOR, TEST } from 'internal:constants';
 import { ConfigOrientation, IScreenOptions, SafeAreaEdge } from 'pal/screen-adapter';
 import { systemInfo } from 'pal/system-info';
-import { warnID } from '../../../cocos/core/platform/debug';
+import { checkPalIntegrity, withImpl } from '@pal/utils';
+import { cclegacy } from '@base/global';
+import { warnID } from '@base/debug';
 import { EventTarget } from '../../../cocos/core/event/event-target';
 import { Size } from '../../../cocos/core/math';
 import { Orientation } from '../enum-type';
-import legacyCC from '../../../predefine';
-import { checkPalIntegrity, withImpl } from '../../integrity-check';
 
 interface ICachedStyle {
     width: string;
@@ -516,7 +516,7 @@ class ScreenAdapter extends EventTarget {
                 return;
             }
             // TODO: access designedResolution from Launcher module.
-            const designedResolution = legacyCC.view.getDesignResolutionSize() as Size;
+            const designedResolution = cclegacy.view.getDesignResolutionSize() as Size;
             const frame = this._gameFrame;
             const frameW = frame.clientWidth;
             const frameH = frame.clientHeight;

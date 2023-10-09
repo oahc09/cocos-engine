@@ -1,8 +1,9 @@
 import { EDITOR } from 'internal:constants';
+import { assertIsTrue } from '@base/debug/internal';
 import { ccclass, editable, serializable, type, visible } from '../../../../../core/data/decorators';
 import { CLASS_NAME_PREFIX_ANIM } from '../../../../define';
 import { PoseTransformSpaceRequirement } from '../../pose-node';
-import { assertIsTrue, ccenum, Vec3 } from '../../../../../core';
+import { ccenum, Vec3 } from '../../../../../core';
 import { TransformHandle } from '../../../../core/animation-handle';
 import { input } from '../../decorator/input';
 import { poseGraphNodeCategory } from '../../decorator/node';
@@ -56,18 +57,18 @@ class TargetSpecification {
 
     @serializable
     @editable
-    @visible(function visible(this: TargetSpecification) { return this.type === TargetSpecificationType.VALUE; })
+    @visible(function visible (this: TargetSpecification) { return this.type === TargetSpecificationType.VALUE; })
     public targetPosition = new Vec3();
 
     @serializable
     @editable
     @type(TransformSpace)
-    @visible(function visible(this: TargetSpecification) { return this.type === TargetSpecificationType.VALUE; })
+    @visible(function visible (this: TargetSpecification) { return this.type === TargetSpecificationType.VALUE; })
     public targetPositionSpace = TransformSpace.WORLD;
 
     @serializable
     @editable
-    @visible(function visible(this: TargetSpecification) { return this.type === TargetSpecificationType.BONE; })
+    @visible(function visible (this: TargetSpecification) { return this.type === TargetSpecificationType.BONE; })
     public targetBone = '';
 
     public bind (context: AnimationGraphBindingContext, sourceBoneHandle: TransformHandle): void {
@@ -117,6 +118,7 @@ export class PoseNodeTwoBoneIKSolver extends PoseNodeModifyPoseBase {
     public readonly endEffectorTarget = new TargetSpecification(TargetSpecificationType.VALUE);
 
     @input({ type: PoseGraphType.VEC3 })
+    @visible(function visible (this: PoseNodeTwoBoneIKSolver) { return this.endEffectorTarget.type === TargetSpecificationType.VALUE; })
     get endEffectorTargetPosition (): Vec3 {
         return this.endEffectorTarget.targetPosition;
     }
@@ -130,6 +132,7 @@ export class PoseNodeTwoBoneIKSolver extends PoseNodeModifyPoseBase {
     public readonly poleTarget = new TargetSpecification(TargetSpecificationType.NONE);
 
     @input({ type: PoseGraphType.VEC3 })
+    @visible(function visible (this: PoseNodeTwoBoneIKSolver) { return this.poleTarget.type === TargetSpecificationType.VALUE; })
     get poleTargetPosition (): Vec3 {
         return this.poleTarget.targetPosition;
     }

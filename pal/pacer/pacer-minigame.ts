@@ -23,8 +23,8 @@
 */
 
 import { minigame } from 'pal/minigame';
-import { assertIsTrue } from '../../cocos/core/data/utils/asserts';
-import { checkPalIntegrity, withImpl } from '../integrity-check';
+import { checkPalIntegrity, withImpl } from '@pal/utils';
+import { assertIsTrue } from '@base/debug/internal';
 
 export class Pacer {
     private _rafHandle = 0;

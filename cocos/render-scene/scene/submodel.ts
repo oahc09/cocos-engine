@@ -22,14 +22,13 @@
  THE SOFTWARE.
 */
 
+import { errorID } from '@base/debug';
+import { cclegacy } from '@base/global';
 import { RenderingSubMesh } from '../../asset/assets/rendering-sub-mesh';
-import { RenderPriority, UNIFORM_REFLECTION_TEXTURE_BINDING, UNIFORM_REFLECTION_STORAGE_BINDING,
-    INST_MAT_WORLD, INST_SH, UBOSH, isEnableEffect } from '../../rendering/define';
+import { RenderPriority, UNIFORM_REFLECTION_TEXTURE_BINDING, UNIFORM_REFLECTION_STORAGE_BINDING, INST_MAT_WORLD, INST_SH, UBOSH, isEnableEffect } from '../../rendering/define';
 import { BatchingSchemes, IMacroPatch, Pass } from '../core/pass';
-import { DescriptorSet, DescriptorSetInfo, Device, InputAssembler, Texture, TextureType, TextureUsageBit, TextureInfo,
-    Format, Sampler, Filter, Address, Shader, SamplerInfo, deviceManager,
-    Attribute, Feature, FormatInfos, getTypedArrayConstructor } from '../../gfx';
-import { errorID, Mat4, cclegacy } from '../../core';
+import { DescriptorSet, DescriptorSetInfo, Device, InputAssembler, Texture, TextureType, TextureUsageBit, TextureInfo, Format, Sampler, Filter, Address, Shader, SamplerInfo, deviceManager, Attribute, Feature, FormatInfos, getTypedArrayConstructor } from '../../gfx';
+import { Mat4 } from '../../core';
 import { getPhaseID } from '../../rendering/pass-phase';
 import { Root } from '../../root';
 
@@ -324,6 +323,7 @@ export class SubModel {
      * @zh 管线更新回调
      */
     public onPipelineStateChanged (): void {
+
         const passes = this._passes;
         if (!passes) { return; }
 
@@ -346,6 +346,7 @@ export class SubModel {
             return;
         } else if (patches) {
             patches = patches.sort();
+            // Sorting on shorter patches outperforms hashing, with negative optimization on longer global patches.
             if (this._patches && patches.length === this._patches.length) {
                 const patchesStateUnchanged = JSON.stringify(patches) === JSON.stringify(this._patches);
                 if (patchesStateUnchanged) return;

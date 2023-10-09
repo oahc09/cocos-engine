@@ -31,22 +31,21 @@ export function patch_BloomStage(ctx: BloomStage_Context_Args, apply = defaultEx
 //---- class cc_AmbientInfo
 interface cc_AmbientInfo_Context_Args {
    AmbientInfo: any;
-   legacyCC: any;
+   cclegacy: any;
    CCFloat: any;
    Vec4: any;
    Ambient: any;
 }
 export function patch_cc_AmbientInfo(ctx: cc_AmbientInfo_Context_Args, apply = defaultExec) {
-  const { AmbientInfo, legacyCC, CCFloat, Vec4, Ambient } = { ...ctx };
+  const { AmbientInfo, cclegacy, CCFloat, Vec4, Ambient } = { ...ctx };
   const skyLightingColorDescriptor = Object.getOwnPropertyDescriptor(AmbientInfo.prototype, 'skyLightingColor');
   const skyIllumDescriptor = Object.getOwnPropertyDescriptor(AmbientInfo.prototype, 'skyIllum');
   const groundLightingColorDescriptor = Object.getOwnPropertyDescriptor(AmbientInfo.prototype, 'groundLightingColor');
   apply(() => { $.tooltip('i18n:ambient.skyLightingColor')(AmbientInfo.prototype, 'skyLightingColor',  skyLightingColorDescriptor); }, 'tooltip', 'skyLightingColor');
   apply(() => { $.editable(AmbientInfo.prototype, 'skyLightingColor',  skyLightingColorDescriptor); }, 'editable', 'skyLightingColor');
   apply(() => { $.visible(() => {
-  const scene = legacyCC.director.getScene();
+  const scene = cclegacy.director.getScene();
   const skybox = scene.globals.skybox;
-
   if (skybox.useIBL && skybox.applyDiffuseMap) {
     return false;
   } else {
@@ -60,9 +59,8 @@ export function patch_cc_AmbientInfo(ctx: cc_AmbientInfo_Context_Args, apply = d
   apply(() => { $.tooltip('i18n:ambient.groundLightingColor')(AmbientInfo.prototype, 'groundLightingColor',  groundLightingColorDescriptor); }, 'tooltip', 'groundLightingColor');
   apply(() => { $.editable(AmbientInfo.prototype, 'groundLightingColor',  groundLightingColorDescriptor); }, 'editable', 'groundLightingColor');
   apply(() => { $.visible(() => {
-  const scene = legacyCC.director.getScene();
+  const scene = cclegacy.director.getScene();
   const skybox = scene.globals.skybox;
-
   if (skybox.useIBL && skybox.applyDiffuseMap) {
     return false;
   } else {
@@ -515,7 +513,6 @@ export function patch_cc_LightProbeInfo(ctx: cc_LightProbeInfo_Context_Args, app
   const giSamplesDescriptor = Object.getOwnPropertyDescriptor(LightProbeInfo.prototype, 'giSamples');
   const bouncesDescriptor = Object.getOwnPropertyDescriptor(LightProbeInfo.prototype, 'bounces');
   const reduceRingingDescriptor = Object.getOwnPropertyDescriptor(LightProbeInfo.prototype, 'reduceRinging');
-  const showProbeDescriptor = Object.getOwnPropertyDescriptor(LightProbeInfo.prototype, 'showProbe');
   const showWireframeDescriptor = Object.getOwnPropertyDescriptor(LightProbeInfo.prototype, 'showWireframe');
   const showConvexDescriptor = Object.getOwnPropertyDescriptor(LightProbeInfo.prototype, 'showConvex');
   const lightProbeSphereVolumeDescriptor = Object.getOwnPropertyDescriptor(LightProbeInfo.prototype, 'lightProbeSphereVolume');
@@ -538,8 +535,6 @@ export function patch_cc_LightProbeInfo(ctx: cc_LightProbeInfo_Context_Args, app
   apply(() => { $.slide(LightProbeInfo.prototype, 'reduceRinging',  reduceRingingDescriptor); }, 'slide', 'reduceRinging');
   apply(() => { $.range([0.0, 0.05, 0.001])(LightProbeInfo.prototype, 'reduceRinging',  reduceRingingDescriptor); }, 'range', 'reduceRinging');
   apply(() => { $.editable(LightProbeInfo.prototype, 'reduceRinging',  reduceRingingDescriptor); }, 'editable', 'reduceRinging');
-  apply(() => { $.tooltip('i18n:light_probe.showProbe')(LightProbeInfo.prototype, 'showProbe',  showProbeDescriptor); }, 'tooltip', 'showProbe');
-  apply(() => { $.editable(LightProbeInfo.prototype, 'showProbe',  showProbeDescriptor); }, 'editable', 'showProbe');
   apply(() => { $.tooltip('i18n:light_probe.showWireframe')(LightProbeInfo.prototype, 'showWireframe',  showWireframeDescriptor); }, 'tooltip', 'showWireframe');
   apply(() => { $.editable(LightProbeInfo.prototype, 'showWireframe',  showWireframeDescriptor); }, 'editable', 'showWireframe');
   apply(() => { $.tooltip('i18n:light_probe.showConvex')(LightProbeInfo.prototype, 'showConvex',  showConvexDescriptor); }, 'tooltip', 'showConvex');
@@ -794,6 +789,21 @@ export function patch_cc_PointLight(ctx: cc_PointLight_Context_Args, apply = def
   apply(() => { $.ccclass('cc.PointLight')(PointLight); }, 'ccclass', null);
 } // end of patch_cc_PointLight
 
+//---- class cc_PostSettingsInfo
+interface cc_PostSettingsInfo_Context_Args {
+   PostSettingsInfo: any;
+   ToneMappingType: any;
+}
+export function patch_cc_PostSettingsInfo(ctx: cc_PostSettingsInfo_Context_Args, apply = defaultExec) {
+  const { PostSettingsInfo, ToneMappingType } = { ...ctx };
+  const toneMappingTypeDescriptor = Object.getOwnPropertyDescriptor(PostSettingsInfo.prototype, 'toneMappingType');
+  apply(() => { $.tooltip('i18n:tone_mapping.toneMappingType')(PostSettingsInfo.prototype, 'toneMappingType',  toneMappingTypeDescriptor); }, 'tooltip', 'toneMappingType');
+  apply(() => { $.type(ToneMappingType)(PostSettingsInfo.prototype, 'toneMappingType',  toneMappingTypeDescriptor); }, 'type', 'toneMappingType');
+  apply(() => { $.editable(PostSettingsInfo.prototype, 'toneMappingType',  toneMappingTypeDescriptor); }, 'editable', 'toneMappingType');
+  apply(() => { $.serializable(PostSettingsInfo.prototype, '_toneMappingType',  () => { return ToneMappingType.DEFAULT; }); }, 'serializable', '_toneMappingType');
+  apply(() => { $.ccclass('cc.PostSettingsInfo')(PostSettingsInfo); }, 'ccclass', null);
+} // end of patch_cc_PostSettingsInfo
+
 //---- class cc_RangedDirectionalLight
 interface cc_RangedDirectionalLight_Context_Args {
    RangedDirectionalLight: any;
@@ -876,9 +886,10 @@ interface cc_SceneGlobals_Context_Args {
    OctreeInfo: any;
    SkinInfo: any;
    LightProbeInfo: any;
+   PostSettingsInfo: any;
 }
 export function patch_cc_SceneGlobals(ctx: cc_SceneGlobals_Context_Args, apply = defaultExec) {
-  const { SceneGlobals, AmbientInfo, ShadowsInfo, SkyboxInfo, FogInfo, OctreeInfo, SkinInfo, LightProbeInfo } = { ...ctx };
+  const { SceneGlobals, AmbientInfo, ShadowsInfo, SkyboxInfo, FogInfo, OctreeInfo, SkinInfo, LightProbeInfo, PostSettingsInfo } = { ...ctx };
   const skyboxDescriptor = Object.getOwnPropertyDescriptor(SceneGlobals.prototype, 'skybox');
   apply(() => { $.editable(SceneGlobals.prototype, 'ambient',  () => { return new AmbientInfo(); }); }, 'editable', 'ambient');
   apply(() => { $.serializable(SceneGlobals.prototype, 'ambient',  () => { return new AmbientInfo(); }); }, 'serializable', 'ambient');
@@ -895,6 +906,8 @@ export function patch_cc_SceneGlobals(ctx: cc_SceneGlobals_Context_Args, apply =
   apply(() => { $.editable(SceneGlobals.prototype, 'skin',  () => { return new SkinInfo(); }); }, 'editable', 'skin');
   apply(() => { $.serializable(SceneGlobals.prototype, 'lightProbeInfo',  () => { return new LightProbeInfo(); }); }, 'serializable', 'lightProbeInfo');
   apply(() => { $.editable(SceneGlobals.prototype, 'lightProbeInfo',  () => { return new LightProbeInfo(); }); }, 'editable', 'lightProbeInfo');
+  apply(() => { $.serializable(SceneGlobals.prototype, 'postSettings',  () => { return new PostSettingsInfo(); }); }, 'serializable', 'postSettings');
+  apply(() => { $.editable(SceneGlobals.prototype, 'postSettings',  () => { return new PostSettingsInfo(); }); }, 'editable', 'postSettings');
   apply(() => { $.serializable(SceneGlobals.prototype, 'bakedWithStationaryMainLight',  () => { return false; }); }, 'serializable', 'bakedWithStationaryMainLight');
   apply(() => { $.editable(SceneGlobals.prototype, 'bakedWithStationaryMainLight',  () => { return false; }); }, 'editable', 'bakedWithStationaryMainLight');
   apply(() => { $.serializable(SceneGlobals.prototype, 'bakedWithHighpLightmap',  () => { return false; }); }, 'serializable', 'bakedWithHighpLightmap');
@@ -1056,7 +1069,6 @@ export function patch_cc_SkyboxInfo(ctx: cc_SkyboxInfo_Context_Args, apply = def
   if (this.useIBL && this.applyDiffuseMap) {
     return true;
   }
-
   return false;
 })(SkyboxInfo.prototype, 'diffuseMap',  diffuseMapDescriptor); }, 'visible', 'diffuseMap');
   apply(() => { $.displayOrder(100)(SkyboxInfo.prototype, 'reflectionMap',  reflectionMapDescriptor); }, 'displayOrder', 'reflectionMap');
@@ -1067,7 +1079,6 @@ export function patch_cc_SkyboxInfo(ctx: cc_SkyboxInfo_Context_Args, apply = def
   if (this._resource?.reflectionMap) {
     return true;
   }
-
   return false;
 })(SkyboxInfo.prototype, 'reflectionMap',  reflectionMapDescriptor); }, 'visible', 'reflectionMap');
   apply(() => { $.tooltip('i18n:skybox.material')(SkyboxInfo.prototype, 'skyboxMaterial',  skyboxMaterialDescriptor); }, 'tooltip', 'skyboxMaterial');

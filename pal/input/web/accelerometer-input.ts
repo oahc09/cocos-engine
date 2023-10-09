@@ -25,6 +25,7 @@
 import { AccelerometerCallback } from 'pal/input';
 import { systemInfo } from 'pal/system-info';
 import { screenAdapter } from 'pal/screen-adapter';
+import { warn } from '@base/debug';
 import { EventTarget } from '../../../cocos/core/event/event-target';
 import { BrowserType, OS } from '../../system-info/enum-type';
 import { EventAcceleration, Acceleration } from '../../../cocos/input/types';
@@ -120,12 +121,14 @@ export class AccelerometerInputSource {
 
     public start (): void {
         // for iOS 13+, safari
-        if (window.DeviceMotionEvent && typeof DeviceMotionEvent.requestPermission === 'function') {
-            DeviceMotionEvent.requestPermission().then((response) => {
+        // NOTE: since TS 4.4, `requestPermission` is not defined in class DeviceMotionEvent in `lib.dom.d.ts`, this should be a breaking change in TS.
+        // Accessing the `requestPermission` would emit a type error, so we assert `DeviceMotionEvent` as any type to skip the TS type checking.
+        if (window.DeviceMotionEvent && typeof (DeviceMotionEvent as any).requestPermission === 'function') {
+            (DeviceMotionEvent as any).requestPermission().then((response) => {
                 if (response === 'granted') {
                     this._registerEvent();
                 }
-            }).catch((e) => {});
+            }).catch((e) => { warn(e); });
         } else {
             this._registerEvent();
         }

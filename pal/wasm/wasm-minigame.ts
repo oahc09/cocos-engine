@@ -24,8 +24,9 @@
 
 import { HUAWEI, TAOBAO_MINIGAME, WASM_SUBPACKAGE, XIAOMI } from 'internal:constants';
 import { minigame } from 'pal/minigame';
+import { checkPalIntegrity, withImpl } from '@pal/utils';
+import { error, log } from '@base/debug';
 import { basename } from '../../cocos/core/utils/path';
-import { checkPalIntegrity, withImpl } from '../integrity-check';
 
 export function instantiateWasm (wasmUrl: string, importObject: WebAssembly.Imports): Promise<any> {
     return getPlatformBinaryUrl(wasmUrl).then((url) => WebAssembly.instantiate(url, importObject));
@@ -35,14 +36,14 @@ export function fetchBuffer (binaryUrl: string): Promise<ArrayBuffer> {
     return new Promise<ArrayBuffer>((resolve, reject) => {
         getPlatformBinaryUrl(binaryUrl).then((url) => {
             // NOTE: fsUtils is defined in engine-adapter, we need to access globalThis explicitly for Taobao platform
-            globalThis.fsUtils.readArrayBuffer(url, (err, arrayBuffer) => {
+            globalThis.fsUtils.readArrayBuffer(url, (err, arrayBuffer: ArrayBuffer) => {
                 if (err) {
                     reject(err);
                     return;
                 }
                 resolve(arrayBuffer);
             });
-        }).catch((e) => {});
+        }).catch((e) => { error(e); });
     });
 }
 
@@ -55,7 +56,8 @@ function loadSubpackage (name: string): Promise<void> {
                     resolve();
                 },
                 fail (err) {
-                    reject(err);
+                    log(`Load subpacakge '${name}' failed, maybe we don't need this subpacakge or it's an engine build issue, for detailed: `, err);
+                    resolve();
                 },
             });
         } else {

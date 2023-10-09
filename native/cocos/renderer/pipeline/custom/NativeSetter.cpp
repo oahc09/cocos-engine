@@ -63,6 +63,11 @@ void NativeSetter::setFloat(const ccstd::string &name, float v) {
     setFloatImpl(data, *layoutGraph, name, v);
 }
 
+void NativeSetter::setUint(const ccstd::string &name, uint32_t v) {
+    auto &data = get(RenderGraph::DataTag{}, *renderGraph, nodeID);
+    setUintImpl(data, *layoutGraph, name, v);
+}
+
 void NativeSetter::setArrayBuffer(const ccstd::string &name, const ArrayBuffer *buffer) {
     auto &data = get(RenderGraph::DataTag{}, *renderGraph, nodeID);
     setArrayBufferImpl(data, *layoutGraph, name, *buffer);
@@ -146,6 +151,21 @@ void NativeSetter::setBuiltinShadowMapConstants(
     const auto &sceneData = *pipelineRuntime->getPipelineSceneData();
     auto &data = get(RenderGraph::DataTag{}, *renderGraph, nodeID);
     setShadowUBOView(*device, *layoutGraph, sceneData, *light, data);
+}
+
+void NativeSetter::setBuiltinDirectionalLightConstants(const scene::DirectionalLight *light, const scene::Camera *camera) {
+}
+
+void NativeSetter::setBuiltinSphereLightConstants(const scene::SphereLight *light, const scene::Camera *camera) {
+}
+
+void NativeSetter::setBuiltinSpotLightConstants(const scene::SpotLight *light, const scene::Camera *camera) {
+}
+
+void NativeSetter::setBuiltinPointLightConstants(const scene::PointLight *light, const scene::Camera *camera) {
+}
+
+void NativeSetter::setBuiltinRangedDirectionalLightConstants(const scene::RangedDirectionalLight *light, const scene::Camera *camera) {
 }
 
 } // namespace render

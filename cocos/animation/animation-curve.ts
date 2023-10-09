@@ -22,7 +22,9 @@
  THE SOFTWARE.
 */
 
-import { lerp, Quat, errorID, cclegacy, binarySearchEpsilon, ValueType, bezierByTime, BezierControlPoints, easing } from '../core';
+import { errorID } from '@base/debug';
+import { cclegacy } from '@base/global';
+import { lerp, Quat, binarySearchEpsilon, ValueType, bezierByTime, BezierControlPoints, easing } from '../core';
 import { ILerpable, isLerpable } from './types';
 import type * as legacy from './legacy-clip-data';
 

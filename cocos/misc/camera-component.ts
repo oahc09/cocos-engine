@@ -25,14 +25,14 @@
 
 import { EDITOR } from 'internal:constants';
 import { ccclass, help, executeInEditMode, menu, tooltip, displayOrder, type, serializable, visible, range, rangeMin } from 'cc.decorator';
+import { cclegacy } from '@base/global';
 import { RenderTexture } from '../asset/assets/render-texture';
 import { UITransform } from '../2d/framework';
 import { Component } from '../scene-graph';
-import { Color, Rect, toRadian, Vec3, cclegacy, geometry, Enum } from '../core';
+import { Color, Rect, toRadian, Vec3, geometry, Enum } from '../core';
 import { CAMERA_DEFAULT_MASK } from '../rendering/define';
 import { scene } from '../render-scene';
-import { SKYBOX_FLAG, CameraProjection, CameraFOVAxis, CameraAperture, CameraISO, CameraShutter,
-    CameraType, TrackingType } from '../render-scene/scene/camera';
+import { SKYBOX_FLAG, CameraProjection, CameraFOVAxis, CameraAperture, CameraISO, CameraShutter, CameraType, TrackingType } from '../render-scene/scene/camera';
 import { Node } from '../scene-graph/node';
 import { Layers } from '../scene-graph/layers';
 import { TransformBit } from '../scene-graph/node-enum';
@@ -249,7 +249,6 @@ export class Camera extends Component {
      */
     @displayOrder(3)
     @tooltip('i18n:camera.color')
-    // @constget
     get clearColor (): Readonly<Color> {
         return this._color;
     }
@@ -313,7 +312,7 @@ export class Camera extends Component {
      */
     @type(FOVAxis)
     @displayOrder(7)
-    @visible(function (this: Camera): boolean {
+    @visible(function visible (this: Camera): boolean {
         return this._projection === ProjectionType.PERSPECTIVE;
     })
     @tooltip('i18n:camera.fov_axis')
@@ -354,10 +353,10 @@ export class Camera extends Component {
      * @zh 正交模式下的相机视角高度。
      */
     @displayOrder(9)
-    @visible(function (this: Camera): boolean {
+    @visible(function visible (this: Camera): boolean {
         return this._projection === ProjectionType.ORTHO;
     })
-    @rangeMin(1)
+    @rangeMin(1e-6)
     @tooltip('i18n:camera.ortho_height')
     get orthoHeight (): number {
         return this._orthoHeight;

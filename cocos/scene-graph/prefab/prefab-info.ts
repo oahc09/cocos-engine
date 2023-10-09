@@ -24,7 +24,7 @@
 
 import { ccclass, serializable, editable, type } from 'cc.decorator';
 import { EDITOR } from 'internal:constants';
-import { cclegacy } from '../../core';
+import { cclegacy } from '@base/global';
 import { Prefab } from './prefab';
 import { CCObject, CCString } from '../../core/data';
 import { Component } from '../component';
@@ -167,7 +167,7 @@ export class PrefabInstance {
     @type([TargetInfo])
     public removedComponents: TargetInfo[] = [];
 
-    public targetMap: Record<string, any | Node | Component> = {};
+    public targetMap: TargetMap = {};
 
     /**
      * make sure prefab instance expand only once
@@ -200,6 +200,8 @@ export class PrefabInstance {
         }
     }
 }
+
+export interface TargetMap { [k: string]: TargetMap | Node | Component }
 
 @ccclass('cc.PrefabInfo')
 export class PrefabInfo {

@@ -26,12 +26,15 @@
 import { systemInfo } from 'pal/system-info';
 import { screenAdapter } from 'pal/screen-adapter';
 import { WECHAT, WECHAT_MINI_PROGRAM } from 'internal:constants';
-import { legacyCC } from '../global-exports';
+import { cclegacy } from '@base/global';
+import { warnID, log } from '@base/debug';
 import { Rect } from '../math/rect';
 import { Vec2 } from '../math/vec2';
-import { warnID, log } from './debug';
 import { NetworkType, Language, OS, Platform, BrowserType, Feature } from '../../../pal/system-info/enum-type';
 import { screen } from './screen';
+
+// TODO: the type Storage conflicts with the one on OH platform.
+type Storage = any;
 
 export declare namespace sys {
     /**
@@ -283,7 +286,7 @@ export const sys = {
         str += `os : ${this.os}\r\n`;
         str += `osVersion : ${this.osVersion}\r\n`;
         str += `platform : ${this.platform}\r\n`;
-        str += `Using ${legacyCC.game.renderType === legacyCC.game.RENDER_TYPE_WEBGL ? 'WEBGL' : 'CANVAS'} renderer.\r\n`;
+        str += `Using ${cclegacy.game.renderType === cclegacy.game.RENDER_TYPE_WEBGL ? 'WEBGL' : 'CANVAS'} renderer.\r\n`;
         log(str);
     },
 
@@ -292,7 +295,7 @@ export const sys = {
      * @zh 尝试打开一个 web 页面，并非在所有平台都有效。
      * @param url @zh 访问的链接。 @en Visited links.
      */
-    openURL (url): void {
+    openURL (url: string): void {
         systemInfo.openURL(url);
     },
 
@@ -304,7 +307,7 @@ export const sys = {
             .then((): any => systemInfo.init())
             .then((): void => {
                 try {
-                    let localStorage: Storage | null = sys.localStorage = window.localStorage;
+                    let localStorage: Storage = sys.localStorage = window.localStorage;
                     localStorage.setItem('storage', '');
                     localStorage.removeItem('storage');
                     localStorage = null;
@@ -361,7 +364,7 @@ export const sys = {
      * @return {Rect}
      */
     getSafeAreaRect (): Rect {
-        const locView = legacyCC.view;
+        const locView = cclegacy.view;
         const edge = screenAdapter.safeAreaEdge;
         const windowSize = screenAdapter.windowSize;
 
@@ -381,4 +384,4 @@ export const sys = {
     },
 };
 
-legacyCC.sys = sys;
+cclegacy.sys = sys;

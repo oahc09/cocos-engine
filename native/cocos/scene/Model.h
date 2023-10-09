@@ -241,6 +241,7 @@ public:
         _receiveDirLight = value;
         onMacroPatchesStateChanged();
     }
+    inline void invalidateLocalData() { _localDataUpdated = true; }
 
     // For JS
     inline void setCalledFromJS(bool v) { _isCalledFromJS = v; }
@@ -251,6 +252,7 @@ public:
     }
     inline void setModelBounds(geometry::AABB *bounds) { _modelBounds = bounds; }
     inline bool isModelImplementedInJS() const { return (_type != Type::DEFAULT && _type != Type::SKINNING && _type != Type::BAKED_SKINNING); };
+    inline const gfx::Texture *getLightmap() const { return _lightmap ? _lightmap->getGFXTexture() : nullptr; }
 
 protected:
     static SubModel *createSubModel();
@@ -258,18 +260,20 @@ protected:
     void updateAttributesAndBinding(index_t subModelIndex);
     bool isLightProbeAvailable() const;
     void updateSHBuffer();
+    bool supportGPUScene(index_t subModelIndex) const;
+    bool isInGPUScene(index_t subModelIndex) const;
 
     // Please declare variables in descending order of memory size occupied by variables.
     Type _type{Type::DEFAULT};
     Layers::Enum _visFlags{Layers::Enum::NONE};
 
-    UseReflectionProbeType _reflectionProbeType{ UseReflectionProbeType::NONE };
+    UseReflectionProbeType _reflectionProbeType{UseReflectionProbeType::NONE};
     int32_t _tetrahedronIndex{-1};
     uint32_t _descriptorSetCount{1};
     uint32_t _priority{0};
     uint32_t _updateStamp{0};
     int32_t _reflectionProbeId{-1};
-    int32_t _reflectionProbeBlendId{ -1 };
+    int32_t _reflectionProbeBlendId{-1};
     float _reflectionProbeBlendWeight{0.F};
 
     OctreeNode *_octreeNode{nullptr};
@@ -292,7 +296,7 @@ protected:
     bool _inited{false};
     bool _localDataUpdated{false};
     bool _worldBoundsDirty{true};
-    bool _useLightProbe = false;
+    bool _useLightProbe{false};
     bool _bakeToReflectionProbe{true};
     bool _receiveDirLight{true};
     // For JS
@@ -300,7 +304,7 @@ protected:
 
     Vec3 _lastWorldBoundCenter{INFINITY, INFINITY, INFINITY};
 
-    Vec4 _shadowBias;
+    Vec4 _shadowBias{0.F, 0.F, -1.F, -1.F};
     Vec4 _lightmapUVParam;
 
     // For JS

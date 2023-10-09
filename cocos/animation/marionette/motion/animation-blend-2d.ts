@@ -22,13 +22,13 @@
  THE SOFTWARE.
 */
 
-import { Vec2, _decorator, ccenum, assertIsTrue, editable } from '../../../core';
+import { assertIsTrue } from '@base/debug/internal';
+import { Vec2, _decorator, ccenum, editable } from '../../../core';
 import { createEval } from '../create-eval';
 import { AnimationBlend, AnimationBlendEval, AnimationBlendItem } from './animation-blend';
 import { BindableNumber, bindOr, VariableType } from '../parametric';
 import { sampleFreeformCartesian, blendSimpleDirectional, PolarSpaceGradientBandInterpolator2D } from './blend-2d';
 import { CLASS_NAME_PREFIX_ANIM } from '../../define';
-import type { ReadonlyClipOverrideMap } from '../clip-overriding';
 import { AnimationGraphBindingContext } from '../animation-graph-context';
 
 const { ccclass, serializable } = _decorator;
@@ -116,7 +116,6 @@ export class AnimationBlend2D extends AnimationBlend {
 
     public [createEval] (
         context: AnimationGraphBindingContext,
-        clipOverrides: ReadonlyClipOverrideMap | null,
         ignoreEmbeddedPlayers: boolean,
     ): AnimationBlendEval {
         const { algorithm } = this;
@@ -126,7 +125,6 @@ export class AnimationBlend2D extends AnimationBlend {
             assertIsTrue(this._polarSpaceGBI, `The polar space interpolator is not setup correctly!`);
             evaluation = new PolarSpaceGradientBandBlend2DEval(
                 context,
-                clipOverrides,
                 ignoreEmbeddedPlayers,
                 this,
                 this._items,
@@ -141,7 +139,6 @@ export class AnimationBlend2D extends AnimationBlend {
         case Algorithm.FREEFORM_CARTESIAN:
             evaluation =  new AnimationBlend2DEval(
                 context,
-                clipOverrides,
                 ignoreEmbeddedPlayers,
                 this,
                 this._items,
@@ -200,7 +197,6 @@ class AnimationBlend2DEval extends AnimationBlendEval {
 
     constructor (
         context: AnimationGraphBindingContext,
-        clipOverrides: ReadonlyClipOverrideMap | null,
         ignoreEmbeddedPlayers: boolean,
         base: AnimationBlend,
         items: AnimationBlendItem[],
@@ -208,7 +204,7 @@ class AnimationBlend2DEval extends AnimationBlendEval {
         algorithm: Algorithm.SIMPLE_DIRECTIONAL | Algorithm.FREEFORM_CARTESIAN,
         inputs: [number, number],
     ) {
-        super(context, clipOverrides, ignoreEmbeddedPlayers, base, items, inputs);
+        super(context, ignoreEmbeddedPlayers, base, items, inputs);
         this._thresholds = thresholds;
         this._algorithm = algorithm;
         this.doEval();
@@ -236,14 +232,13 @@ class PolarSpaceGradientBandBlend2DEval extends AnimationBlendEval {
 
     constructor (
         context: AnimationGraphBindingContext,
-        clipOverrides: ReadonlyClipOverrideMap | null,
         ignoreEmbeddedPlayers: boolean,
         base: AnimationBlend,
         items: AnimationBlendItem[],
         interpolator: PolarSpaceGradientBandInterpolator2D,
         inputs: [number, number],
     ) {
-        super(context, clipOverrides, ignoreEmbeddedPlayers, base, items, inputs);
+        super(context, ignoreEmbeddedPlayers, base, items, inputs);
         this._interpolator = interpolator;
         this.doEval();
     }

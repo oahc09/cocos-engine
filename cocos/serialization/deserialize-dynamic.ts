@@ -24,7 +24,11 @@
 */
 
 import { EDITOR, TEST, DEV, DEBUG, JSB, PREVIEW, SUPPORT_JIT } from 'internal:constants';
-import { cclegacy, js, misc, CCClass, ENUM_TAG, BITMASK_TAG, sys, error, assertIsTrue, CustomSerializable, DeserializationContext, deserializeTag, SerializationInput } from '../core';
+import { error } from '@base/debug';
+import { assertIsTrue } from '@base/debug/internal';
+import { cclegacy } from '@base/global';
+import { js } from '@base/utils';
+import { misc, CCClass, ENUM_TAG, BITMASK_TAG, sys, CustomSerializable, DeserializationContext, deserializeTag, SerializationInput } from '../core';
 import { MissingScript } from '../misc/missing-script';
 import { Details } from './deserialize';
 import { Platform } from '../../pal/system-info/enum-type';
@@ -657,10 +661,12 @@ class _Deserializer {
                     }
 
                     const rawDeserialize: CompiledDeserializeFn = deserialize;
-                    deserialize = function (deserializer: _Deserializer,
+                    deserialize = function (
+                        deserializer: _Deserializer,
                         object: Record<string, unknown>,
                         deserialized: Record<string, unknown>,
-                        constructor: AnyFunction): void {
+                        constructor: AnyFunction,
+                    ): void {
                         rawDeserialize(deserializer, object, deserialized, constructor);
                         if (!object._$erialized) {
                             error(`Unable to stash previously serialized data. ${JSON.stringify(deserialized)}`);
@@ -828,13 +834,15 @@ class _Deserializer {
     }
 }
 
-export function deserializeDynamic (data: SerializedData | CCON, details: Details, options?: {
+export interface DeserializeDynamicOptions {
     classFinder?: ClassFinder;
     ignoreEditorOnly?: boolean;
     createAssetRefs?: boolean;
     customEnv?: unknown;
     reportMissingClass?: ReportMissingClass;
-}): any {
+}
+
+export function deserializeDynamic (data: SerializedData | CCON, details: Details, options?: DeserializeDynamicOptions): any {
     options = options || {};
     const classFinder = options.classFinder || js.getClassById;
     const createAssetRefs = options.createAssetRefs || sys.platform === Platform.EDITOR_CORE;

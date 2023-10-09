@@ -24,11 +24,12 @@
 
 import { TEST, EDITOR, EDITOR_NOT_IN_PREVIEW } from 'internal:constants';
 import { SpriteFrame } from '../../2d/assets/sprite-frame';
-import type { ImageSource } from '../assets/image-asset';
+import type { IMemoryImageSource } from '../../../pal/image/types';
 import assetManager from '../asset-manager/asset-manager';
 import { BuiltinBundleName } from '../asset-manager/shared';
 import Bundle from '../asset-manager/bundle';
-import { Settings, settings, cclegacy } from '../../core';
+import { Settings, settings } from '../../core';
+import { cclegacy } from '@base/global';
 import { releaseManager } from '../asset-manager/release-manager';
 import type { BuiltinResMgr as JsbBuiltinResMgr } from './builtin-res-mgr';
 
@@ -56,7 +57,7 @@ builtinResMgrProto.init = function () {
         blackValueView[offset + 3] = 255;
     }
 
-    const blackMemImageSource: ImageSource = {
+    const blackMemImageSource: IMemoryImageSource = {
         width: len,
         height: len,
         _data: blackValueView,

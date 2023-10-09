@@ -31,6 +31,7 @@
 #include "core/platform/Debug.h"
 #include "math/Color.h"
 #include "renderer/pipeline/helper/Utils.h"
+#include "renderer/pipeline/Define.h"
 #include "scene/Pass.h"
 namespace cc {
 

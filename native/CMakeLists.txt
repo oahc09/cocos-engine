@@ -15,6 +15,7 @@ set(ENGINE_NAME cocos_engine)
 cc_set_if_undefined(CC_DEBUG_FORCE           OFF)
 cc_set_if_undefined(USE_SE_V8                ON)
 cc_set_if_undefined(USE_SE_SM                OFF)
+cc_set_if_undefined(USE_SE_NAPI              OFF)
 cc_set_if_undefined(USE_V8_DEBUGGER          ON)
 cc_set_if_undefined(USE_V8_DEBUGGER_FORCE    OFF)
 cc_set_if_undefined(USE_SOCKET               ON)
@@ -82,6 +83,13 @@ if(USE_SERVER_MODE)
     add_definitions(-DCC_SERVER_MODE)
 endif()
 
+# Fix the issue: https://github.com/cocos/cocos-engine/issues/16190
+# std::unary_function was removed since clang 15
+# The macro has already been defined in boost/config/stdlib/dinkumware.hpp(258,1),
+# so no need to define it again to avoid 'macro redefinition' error.
+if(NOT WINDOWS)
+    add_definitions(-DBOOST_NO_CXX98_FUNCTION_BASE)
+endif()
 
 add_definitions(-DCC_NETMODE_CLIENT=0)
 add_definitions(-DCC_NETMODE_LISTEN_SERVER=1)
@@ -111,11 +119,6 @@ endif()
 if(NOT ANDROID AND NOT IOS AND NOT OHOS AND NOT OPENHARMONY)
     set(USE_VIDEO OFF)
     set(USE_WEBVIEW OFF)
-endif()
-
-if(OPENHARMONY)
-    set(USE_SE_V8 OFF)
-    set(USE_SE_NAPI ON)
 endif()
 
 ## disable middleware when dragonbones and spine are disabled
@@ -480,6 +483,7 @@ cocos_source_files(
     cocos/base/std/hash/extensions.hpp
     cocos/base/std/hash/hash_fwd.hpp
     cocos/base/std/hash/hash.h
+    cocos/base/VirtualInheritBase.h
 )
 
 ############ application
@@ -519,7 +523,7 @@ cocos_source_files(
 )
 
 ############ main
-if(NOT USE_SERVER_MODE AND (WINDOWS OR LINUX))
+if(NOT USE_SERVER_MODE AND (WINDOWS OR LINUX OR MACOSX))
 cocos_source_files(
     cocos/platform/SDLHelper.h
     cocos/platform/SDLHelper.cpp
@@ -571,8 +575,6 @@ elseif(MACOSX)
     cocos_source_files(
         cocos/platform/mac/MacPlatform.mm
         cocos/platform/mac/MacPlatform.h
-        cocos/platform/mac/ViewController.h
-        cocos/platform/mac/ViewController.mm
         cocos/platform/mac/AppDelegate.h
         cocos/platform/mac/AppDelegate.mm
         cocos/platform/apple/AppleCountdownTrigger.cpp
@@ -1539,9 +1541,9 @@ cocos_source_files(
                  cocos/scene/ReflectionProbe.cpp
                  cocos/scene/ReflectionProbeManager.cpp
                  cocos/scene/ReflectionProbeManager.h
-		 cocos/scene/Skin.h
-		 cocos/scene/Skin.cpp
-                 cocos/scene/gpu-scene/Define.h
+                 cocos/scene/Skin.h
+                 cocos/scene/Skin.cpp
+                 cocos/scene/gpu-scene/Const.h
                  cocos/scene/gpu-scene/GPUBatchPool.cpp
                  cocos/scene/gpu-scene/GPUBatchPool.h
                  cocos/scene/gpu-scene/GPUObjectPool.cpp
@@ -1550,6 +1552,8 @@ cocos_source_files(
                  cocos/scene/gpu-scene/GPUMeshPool.h
                  cocos/scene/gpu-scene/GPUScene.cpp
                  cocos/scene/gpu-scene/GPUScene.h
+		         cocos/scene/PostSettings.h
+                 cocos/scene/PostSettings.cpp
 )
 
 ##### primitive
@@ -2131,6 +2135,7 @@ cocos_source_files(MODULE ccgeometry
 cocos_source_files(
     cocos/bindings/utils/BindingUtils.cpp
     cocos/bindings/utils/BindingUtils.h
+    cocos/bindings/utils/jsb_garbagecollect_callback.h
 )
 
 ######## dop
@@ -2386,7 +2391,10 @@ if(USE_MIDDLEWARE)
             NO_WERROR                cocos/editor-support/spine-creator-support/spine-cocos2dx.cpp
                                      cocos/editor-support/spine-creator-support/spine-cocos2dx.h
             NO_WERROR                cocos/editor-support/spine-creator-support/VertexEffectDelegate.cpp
-                                     cocos/editor-support/spine-creator-support/VertexEffectDelegate.h                                  
+                                     cocos/editor-support/spine-creator-support/VertexEffectDelegate.h
+                                     cocos/editor-support/spine-creator-support/VertexEffectDelegate.h
+            NO_WERROR                cocos/editor-support/spine-creator-support/Vector2.cpp
+                                     cocos/editor-support/spine-creator-support/Vector2.h
 
         )
         cocos_source_files(
@@ -3061,6 +3069,8 @@ function(cc_apply_definations target)
         $<IF:$<BOOL:${ENABLE_FLOAT_OUTPUT}>,ENABLE_FLOAT_OUTPUT=1,ENABLE_FLOAT_OUTPUT=0>
         $<$<BOOL:${USE_REMOTE_LOG}>:CC_REMOTE_LOG=1>
         $<$<BOOL:${USE_SE_SM}>:SCRIPT_ENGINE_TYPE=1>
+        $<$<BOOL:${USE_SE_V8}>:SCRIPT_ENGINE_TYPE=2>
+        $<$<BOOL:${USE_SE_NAPI}>:SCRIPT_ENGINE_TYPE=5>
         $<$<OR:$<CONFIG:Debug>,$<BOOL:${CC_DEBUG_FORCE}>>:CC_DEBUG=1>
     )
 endfunction()
@@ -3113,6 +3123,11 @@ if(MSVC)
         /wd4996 # deprecated
         /wd4098 # defaultlib conflicts
         /wd4099 # PDB 'filename' was not found with 'object/library' or at 'path'; linking object as if no debug info
+    )
+    target_link_options(${ENGINE_NAME} PUBLIC
+        /ignore:4099 # PDB 'filename' was not found with 'object/library' or at 'path'; linking object as if no debug info
+        /ignore:4098 # defaultlib 'library' conflicts with use of other libs; use /NODEFAULTLIB:library
+        /ignore:4204 # 'filename' is missing debugging information for referencing module; linking object as if no debug info
     )
 endif()
 

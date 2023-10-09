@@ -133,6 +133,7 @@ template <typename T>
 class Vector;
 template <typename K, typename V>
 class Map;
+class Vector2;
 } // namespace spine
 
 #endif
@@ -372,11 +373,11 @@ inline bool sevalue_to_native(const se::Value &from, ccstd::string **to, se::Obj
 
 bool sevalue_to_native(const se::Value &from, cc::ValueMap *to, se::Object * /*ctx*/); // NOLINT(readability-identifier-naming)
 
-bool sevalue_to_native(const se::Value &from, ccstd::vector<bool> *to, se::Object * /*ctx*/); // NOLINT(readability-identifier-naming)
+bool sevalue_to_native(const se::Value &from, ccstd::vector<bool> *to, se::Object * /*ctx*/);                 // NOLINT(readability-identifier-naming)
 bool sevalue_to_native(const se::Value &from, ccstd::variant<ccstd::string, bool> *to, se::Object * /*ctx*/); // NOLINT(readability-identifier-naming)
-bool sevalue_to_native(const se::Value &from, ccstd::vector<unsigned char> *to, se::Object * /*ctx*/);       // NOLINT(readability-identifier-naming)
-bool sevalue_to_native(const se::Value &from, cc::IPropertyValue *to, se::Object *ctx);                      // NOLINT(readability-identifier-naming)
-inline bool sevalue_to_native(const se::Value & /*from*/, ccstd::monostate * /*to*/, se::Object * /*ctx*/) { // NOLINT(readability-identifier-naming)
+bool sevalue_to_native(const se::Value &from, ccstd::vector<unsigned char> *to, se::Object * /*ctx*/);        // NOLINT(readability-identifier-naming)
+bool sevalue_to_native(const se::Value &from, cc::IPropertyValue *to, se::Object *ctx);                       // NOLINT(readability-identifier-naming)
+inline bool sevalue_to_native(const se::Value & /*from*/, ccstd::monostate * /*to*/, se::Object * /*ctx*/) {  // NOLINT(readability-identifier-naming)
     // nothing todo
     return false;
 }
@@ -600,6 +601,10 @@ bool nativevalue_to_se(const spine::String &obj, se::Value &val, se::Object *ctx
 
 bool sevalue_to_native(const se::Value &v, spine::Vector<spine::String> *ret, se::Object *ctx); // NOLINT(readability-identifier-naming)
 
+bool sevalue_to_native(const se::Value &from, spine::Vector2 *to, se::Object * /*unused*/); // NOLINT(readability-identifier-naming)
+
+bool nativevalue_to_se(const spine::Vector2 &from, se::Value &to, se::Object * /*unused*/); // NOLINT(readability-identifier-naming)
+
 #endif
 
 inline bool nativevalue_to_se(const se::Object *from, se::Value &to, se::Object * /*ctx*/) { // NOLINT(readability-identifier-naming)
@@ -623,6 +628,7 @@ bool nativevalue_to_se(const ccstd::vector<cc::physics::ContactPoint> &from, se:
 bool nativevalue_to_se(const ccstd::vector<std::shared_ptr<cc::physics::ContactEventPair>> &from, se::Value &to, se::Object *ctx);
 bool nativevalue_to_se(const cc::physics::RaycastResult &from, se::Value &to, se::Object *ctx);
 bool nativevalue_to_se(const ccstd::vector<std::shared_ptr<cc::physics::CCTShapeEventPair>> &from, se::Value &to, se::Object *ctx);
+bool nativevalue_to_se(const ccstd::vector<std::shared_ptr<cc::physics::CCTTriggerEventPair>> &from, se::Value &to, se::Object * /*ctx*/);
 
 bool sevalue_to_native(const se::Value &from, cc::physics::ConvexDesc *to, se::Object *ctx);
 bool sevalue_to_native(const se::Value &from, cc::physics::TrimeshDesc *to, se::Object *ctx);

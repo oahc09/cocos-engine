@@ -178,6 +178,10 @@ bool GLES2Device::doInit(const DeviceInfo & /*info*/) {
 #endif
     _features[toNumber(Feature::MULTI_SAMPLE_RESOLVE_DEPTH_STENCIL)] = false; // not implement yet.
 
+    if (checkExtension(CC_TOSTR(GL_EXT_debug_marker))) {
+        _gpuConstantRegistry->debugMarker = true;
+    }
+
     ccstd::string compressedFmts;
     if (getFormatFeatures(Format::ETC_RGB8) != FormatFeature::NONE) {
         compressedFmts += "etc1 ";
@@ -212,6 +216,9 @@ bool GLES2Device::doInit(const DeviceInfo & /*info*/) {
         _caps.max3DTextureSize = 0;
         _caps.maxArrayTextureLayers = 0;
     }
+
+    _caps.supportFirstInstance = checkExtension("base_instance");
+    _caps.supportFilterMinMax = checkExtension("texture_filter_minmax");
 
     QueueInfo queueInfo;
     queueInfo.type = QueueType::GRAPHICS;

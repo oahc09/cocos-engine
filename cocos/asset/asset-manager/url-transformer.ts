@@ -23,8 +23,12 @@
 */
 
 import { EDITOR, PREVIEW } from 'internal:constants';
-import { warnID, js, path, cclegacy } from '../../core';
-import Config, { IAddressableInfo, IAssetInfo } from './config';
+import { warnID } from '@base/debug';
+import { cclegacy } from '@base/global';
+import { js } from '@base/utils';
+import { path } from '../../core';
+import Config from './config';
+import { IAddressableInfo, IAssetInfo } from './config';
 import { decodeUuid } from './helper';
 import RequestItem from './request-item';
 import { assetsOverrideMap, bundles, presets, RequestType } from './shared';

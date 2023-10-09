@@ -173,14 +173,13 @@ enum class Feature : uint32_t {
     MULTIPLE_RENDER_TARGETS,
     BLEND_MINMAX,
     COMPUTE_SHADER,
-    // @deprecated
-    INPUT_ATTACHMENT_BENEFIT,
 
+    INPUT_ATTACHMENT_BENEFIT, // @deprecated
     SUBPASS_COLOR_INPUT,
     SUBPASS_DEPTH_STENCIL_INPUT,
     RASTERIZATION_ORDER_NOCOHERENT,
 
-    MULTI_SAMPLE_RESOLVE_DEPTH_STENCIL,   // resolve depth stencil
+    MULTI_SAMPLE_RESOLVE_DEPTH_STENCIL, // resolve depth stencil
     COUNT,
 };
 CC_ENUM_CONVERSION_OPERATOR(Feature);
@@ -474,12 +473,13 @@ CC_ENUM_BITWISE_OPERATORS(TextureUsageBit);
 
 enum class TextureFlagBit : uint32_t {
     NONE = 0,
-    GEN_MIPMAP = 0x1,      // Generate mipmaps using bilinear filter
-    GENERAL_LAYOUT = 0x2,  // @deprecated, For inout framebuffer attachments
-    EXTERNAL_OES = 0x4,    // External oes texture
-    EXTERNAL_NORMAL = 0x8, // External normal texture
-    MUTABLE_STORAGE = 0x10, //  Texture is mutable or not, default is immutable(only for webgl2)
-    LAZILY_ALLOCATED = 0x20, // Try lazily allocated mode.
+    GEN_MIPMAP = 0x1,           // Generate mipmaps using bilinear filter
+    GENERAL_LAYOUT = 0x2,       // @deprecated, For inout framebuffer attachments
+    EXTERNAL_OES = 0x4,         // External oes texture
+    EXTERNAL_NORMAL = 0x8,      // External normal texture
+    MUTABLE_STORAGE = 0x10,     //  Texture is mutable or not, default is immutable(only for webgl2)
+    LAZILY_ALLOCATED = 0x20,    // Try lazily allocated mode.
+    MUTABLE_VIEW_FORMAT = 0x40, // texture view as different format
 };
 using TextureFlags = TextureFlagBit;
 CC_ENUM_BITWISE_OPERATORS(TextureFlagBit);
@@ -497,10 +497,10 @@ using FormatFeature = FormatFeatureBit;
 CC_ENUM_BITWISE_OPERATORS(FormatFeatureBit);
 
 enum class SampleCount : uint32_t {
-    X1  = 0x01,
-    X2  = 0x02,
-    X4  = 0x04,
-    X8  = 0x08,
+    X1 = 0x01,
+    X2 = 0x02,
+    X4 = 0x04,
+    X8 = 0x08,
     X16 = 0x10,
     X32 = 0x20,
     X64 = 0x40
@@ -547,6 +547,13 @@ enum class Address : uint32_t {
     BORDER,
 };
 CC_ENUM_CONVERSION_OPERATOR(Address);
+
+enum class Reduction : uint32_t {
+    WEIGHTED_AVERAGE,
+    MIN,
+    MAX,
+};
+CC_ENUM_CONVERSION_OPERATOR(Reduction);
 
 enum class ComparisonFunc : uint32_t {
     NEVER,
@@ -853,7 +860,9 @@ struct DeviceCaps {
     bool supportQuery{false};
     bool supportVariableRateShading{false};
     bool supportSubPassShading{false};
-    bool supportMultiDrawIndirect{false};
+    bool supportFirstInstance{false};
+    bool supportFilterMinMax{false};
+    bool supportGPUDriven{false};
 
     float clipSpaceMinZ{-1.F};
     float screenSpaceSignY{1.F};
@@ -974,6 +983,11 @@ struct Color {
 };
 using ColorList = ccstd::vector<Color>;
 
+struct MarkerInfo {
+    ccstd::string name;
+    Color color;
+};
+
 struct BindingMappingInfo {
     /**
      * For non-vulkan backends, to maintain compatibility and maximize
@@ -1040,18 +1054,18 @@ struct BufferViewInfo {
 };
 
 struct DrawIndirectCommand {
-    uint32_t vertexCount;
-    uint32_t instanceCount;
-    uint32_t firstVertex;
-    uint32_t firstInstance;
+    uint32_t vertexCount{0};
+    uint32_t instanceCount{0};
+    uint32_t firstVertex{0};
+    uint32_t firstInstance{0};
 };
 
 struct DrawIndexedIndirectCommand {
-    uint32_t indexCount;
-    uint32_t instanceCount;
-    uint32_t firstIndex;
-    int32_t vertexOffset;
-    uint32_t firstInstance;
+    uint32_t indexCount{0};
+    uint32_t instanceCount{0};
+    uint32_t firstIndex{0};
+    int32_t vertexOffset{0};
+    uint32_t firstInstance{0};
 };
 
 struct DrawInfo {
@@ -1114,6 +1128,8 @@ struct ALIGNAS(8) TextureViewInfo {
     uint32_t levelCount{1};
     uint32_t baseLayer{0};
     uint32_t layerCount{1};
+    uint32_t basePlane{0};
+    uint32_t planeCount{1};
 #if CC_CPU_ARCH == CC_CPU_ARCH_32
     uint32_t _padding{0};
 #endif
@@ -1130,6 +1146,7 @@ struct ALIGNAS(8) SamplerInfo {
     Address addressW{Address::WRAP};
     uint32_t maxAnisotropy{0};
     ComparisonFunc cmpFunc{ComparisonFunc::ALWAYS};
+    Reduction reduction{Reduction::WEIGHTED_AVERAGE};
 
     EXPOSE_COPY_FN(SamplerInfo)
 };
@@ -1296,7 +1313,7 @@ struct ShaderInfo {
 struct InputAssemblerInfo {
     AttributeList attributes;
     BufferList vertexBuffers;
-    Buffer *indexBuffer{nullptr};    // @ts-nullable
+    Buffer *indexBuffer{nullptr}; // @ts-nullable
 
     EXPOSE_COPY_FN(InputAssemblerInfo)
 };
@@ -1365,6 +1382,18 @@ struct RenderPassInfo {
     EXPOSE_COPY_FN(RenderPassInfo)
 };
 
+struct ResourceRange {
+    uint32_t width{0};
+    uint32_t height{0};
+    uint32_t depthOrArraySize{0};
+    uint32_t firstSlice{0};
+    uint32_t numSlices{0};
+    uint32_t mipLevel{0};
+    uint32_t levelCount{0};
+    uint32_t basePlane{0};
+    uint32_t planeCount{0};
+};
+
 struct ALIGNAS(8) GeneralBarrierInfo {
     AccessFlags prevAccesses{AccessFlagBit::NONE};
     AccessFlags nextAccesses{AccessFlagBit::NONE};
@@ -1382,11 +1411,7 @@ struct ALIGNAS(8) TextureBarrierInfo {
 
     BarrierType type{BarrierType::FULL};
 
-    uint32_t baseMipLevel{0};
-    uint32_t levelCount{1};
-    uint32_t baseSlice{0};
-    uint32_t sliceCount{1};
-
+    ResourceRange range{};
     uint64_t discardContents{0}; // @ts-boolean
 
     Queue *srcQueue{nullptr}; // @ts-nullable
@@ -1417,7 +1442,7 @@ using BufferBarrierInfoList = ccstd::vector<BufferBarrierInfo>;
 struct FramebufferInfo {
     RenderPass *renderPass{nullptr};
     TextureList colorTextures;
-    Texture *depthStencilTexture{nullptr}; // @ts-nullable
+    Texture *depthStencilTexture{nullptr};        // @ts-nullable
     Texture *depthStencilResolveTexture{nullptr}; // @ts-nullable
 
     EXPOSE_COPY_FN(FramebufferInfo)
@@ -1635,4 +1660,3 @@ struct DynamicStates {
 
 } // namespace gfx
 } // namespace cc
-

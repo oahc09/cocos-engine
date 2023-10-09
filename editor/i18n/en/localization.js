@@ -49,6 +49,19 @@ module.exports = link(mixin({
                     },
                 },
             },
+            CurveRange: {
+                properties: {
+                    spline: {
+                        displayName: 'Spline',
+                    },
+                    splineMin: {
+                        displayName: 'Spline Min',
+                    },
+                    splineMax: {
+                        displayName: 'Spline Max',
+                    },
+                },
+            },
         },
     },
 
@@ -71,6 +84,7 @@ module.exports = link(mixin({
             DirectionalLight: `${url}/${version}/manual/en/concepts/scene/light/lightType/dir-light.html`,
             SphereLight: `${url}/${version}/manual/en/concepts/scene/light/lightType/sphere-light.html`,
             SpotLight: `${url}/${version}/manual/en/concepts/scene/light/lightType/spot-light.html`,
+            LightProbeGroup: `${url}/${version}/manual/en/concepts/scene/light/probe/light-probe.html`,
             UICoordinateTracker: `${url}/${version}/manual/en/ui-system/components/editor/ui-coordinate-tracker.html`,
             Animation: `${url}/${version}/manual/en/animation/animation-component.html`,
             SkeletalAnimation: `${url}/${version}/manual/en/animation/skeletal-animation.html`,
@@ -129,6 +143,7 @@ module.exports = link(mixin({
             SafeArea: `${url}/${version}/manual/en/ui-system/components/editor/safearea.html`,
             Terrain: `${url}/${version}/manual/en/editor/terrain/`,
             TiledMap: `${url}/${version}/manual/en/editor/components/tiledmap.html`,
+            TiledTile: `${url}/${version}/manual/en/editor/components/tiledtile.html`,
             Spine: `${url}/${version}/manual/en/editor/components/spine.html`,
             DragonBones: `${url}/${version}/manual/en/editor/components/dragonbones.html`,
             OctreeCulling: `${url}/${version}/manual/en/advanced-topics/native-scene-culling.html`,
@@ -137,12 +152,14 @@ module.exports = link(mixin({
             BlitScreen: `${url}/${version}/manual/en/render-pipeline/post-process/blit-screen.html`,
             TAA: `${url}/${version}/manual/en/render-pipeline/post-process/index.html`,
             FSR: `${url}/${version}/manual/en/render-pipeline/post-process/index.html`,
-            Fxaa: `${url}/${version}/manual/en/render-pipeline/post-process/index.html`,
+            FXAA: `${url}/${version}/manual/en/render-pipeline/post-process/index.html`,
             Bloom: `${url}/${version}/manual/en/render-pipeline/post-process/index.html`,
             HBAO: `${url}/${version}/manual/en/render-pipeline/post-process/index.html`,
             ColorGrading: `${url}/${version}/manual/en/render-pipeline/post-process/index.html`,
             Skin: `${url}/${version}/manual/en/shader/advanced-shader/skin.html`,
             RenderRoot2D: `${url}/${version}/manual/en/ui-system/components/editor/renderroot2d.html`,
+            ReflectionProbe: `${url}/${version}/manual/en/concepts/scene/light/probe/reflection-art-workflow.html`,
+            Sorting: `${url}/${version}/manual/en/engine/rendering/sorting.html`,
         },
         assets: {
             javascript: `${url}/${version}/manual/en/concepts/scene/node-component.html`,
@@ -294,15 +311,6 @@ module.exports = link(mixin({
         csmLayersTransition: 'Enable or disable CSM layers transition(Improve quality, reduce performance)',
         csmTransitionRange: 'CSM layers transition range(in NDC space: value range is 0 to 1)',
     },
-    model: {
-        shadow_receiving_model: 'Shadow receive mode',
-        shadow_casting_model: 'Shadow projection mode',
-        mesh: 'The mesh of the model',
-        skinning_root: 'The skinning root, where the controlling Animation is located',
-        shadow_bias: 'Bias value (world space unit) that can avoid moire artifacts with shadows for model. <br>The more the value, the more the light leakage',
-        shadow_normal_bias: 'Bias value (world space unit) that can avoid moire artifacts with surfaces that parallel to the directional light',
-        standard_skin_model: 'Bias value (world space unit) that ensure globally unique standard skin model',
-    },
     sprite: {
         gray_scale: 'Whether turn on grayscale rendering mode',
         sprite_frame: 'Sprite Frame image to use',
@@ -400,6 +408,13 @@ module.exports = link(mixin({
         font_underline: 'Font underlined',
         spacing_x: 'The spacing between text characters, only available in BMFont',
         underline_height: 'The height of underline',
+        outline_enable: 'Whether outline is enabled',
+        outline_width: 'The width of outline',
+        outline_color: 'The color of outline',
+        shadow_enable: 'Whether shadow is enabled',
+        shadow_color: 'The color of shadow',
+        shadow_offset: 'Offset between font and shadow',
+        shadow_blur: 'A non-negative float specifying the level of shadow blur',
     },
     labelOutline: {
         color: 'Outline color',
@@ -1026,6 +1041,10 @@ module.exports = link(mixin({
             label: "Box2D Based 2D Physics System",
             description: "2D Physics system that based on Box2D.",
         },
+        physics_2d_box2d_wasm: {
+            label: "Box2D-wasm Based 2D Physics System",
+            description: "2D Physics system that based on Box2D-wasm.",
+        },
         intersection_2d: {
             label: "2D Intersection Algorithms",
             description: "Include 2D intersection algorithms.",
@@ -1297,6 +1316,8 @@ module.exports = link(mixin({
         needBlur: 'Turn on for a softer effect with less noise, but it consumes some performance.',
     },
     bloom: {
+        enableAlphaMask: 'Transparent channel flag bit, if you turn on this function, please also reduce the object material intrinsic color a channel output, a value of less than 1 object will not have a flood light',
+        useHdrIlluminance: 'To use scene HDR brightness to filter flooded areas, both HDR mode and the CC_USE_FLOAT_OUTPUT macro must be enabled.',
         threshold: 'The brightness threshold, brighter area will produce bloom, this value unit is the LDR brightness seen by the human eye, independent of exposure.',
         iterations: 'The number of blur iterations, the higher the value that results in a larger and softer flare range, but with reduced performance.',
         intensity: 'Flood intensity, the higher the value, the brighter the halo, please adjust it moderately.',
@@ -1317,8 +1338,12 @@ module.exports = link(mixin({
         shadingScale: 'Rendering resolution.',
         enableShadingScaleInEditor: 'Enable Shading Scale In Editor',
     },
+    tone_mapping: {
+        toneMappingType: 'Tone mapping type,valid only when HDR is enabled.',
+    },
 },
 
+require('./modules/rendering'),
 require('./animation'),
 
 ));

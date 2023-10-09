@@ -196,15 +196,31 @@ void cmdFuncCCVKCreateTextureView(CCVKDevice *device, CCVKGPUTextureView *gpuTex
     if (!gpuTextureView->gpuTexture) return;
 
     auto createFn = [device, gpuTextureView](VkImage vkImage, VkImageView *pVkImageView) {
+        auto format = gpuTextureView->format;
+        auto mapAspect = [](CCVKGPUTextureView *gpuTextureView) {
+            auto aspectMask = gpuTextureView->gpuTexture->aspectMask;
+            if (gpuTextureView->gpuTexture->format == Format::DEPTH_STENCIL) {
+                uint32_t planeIndex = gpuTextureView->basePlane;
+                uint32_t planeCount = gpuTextureView->planeCount;
+                aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT << planeIndex;
+                CC_ASSERT(planeIndex + planeCount <= 2);
+                CC_ASSERT(planeCount > 0);
+                while (planeCount && --planeCount) {
+                    aspectMask |= (aspectMask << 1);
+                }
+            }
+            return aspectMask;
+        };
+
         VkImageViewCreateInfo createInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
         createInfo.image = vkImage;
         createInfo.viewType = mapVkImageViewType(gpuTextureView->type);
-        createInfo.format = mapVkFormat(gpuTextureView->format, device->gpuDevice());
-        createInfo.subresourceRange.aspectMask = gpuTextureView->gpuTexture->aspectMask;
+        createInfo.subresourceRange.aspectMask = mapAspect(gpuTextureView);
         createInfo.subresourceRange.baseMipLevel = gpuTextureView->baseLevel;
         createInfo.subresourceRange.levelCount = gpuTextureView->levelCount;
         createInfo.subresourceRange.baseArrayLayer = gpuTextureView->baseLayer;
         createInfo.subresourceRange.layerCount = gpuTextureView->layerCount;
+        createInfo.format = mapVkFormat(format, device->gpuDevice());
 
         VK_CHECK(vkCreateImageView(device->gpuDevice()->vkDevice, &createInfo, nullptr, pVkImageView));
     };
@@ -240,6 +256,12 @@ void cmdFuncCCVKCreateSampler(CCVKDevice *device, CCVKGPUSampler *gpuSampler) {
     // Should use image views with baseMipLevel & levelCount in favor of this
     createInfo.minLod = 0.0;
     createInfo.maxLod = VK_LOD_CLAMP_NONE;
+
+    VkSamplerReductionModeCreateInfoEXT createInfoReduction = {VK_STRUCTURE_TYPE_SAMPLER_REDUCTION_MODE_CREATE_INFO_EXT};
+    if (device->getCapabilities().supportFilterMinMax) {
+        createInfoReduction.reductionMode = VK_SAMPLER_REDUCTION_MODES[toNumber(gpuSampler->reduction)];
+        createInfo.pNext = &createInfoReduction;
+    }
 
     VK_CHECK(vkCreateSampler(device->gpuDevice()->vkDevice, &createInfo, nullptr, &gpuSampler->vkSampler));
 }
@@ -444,13 +466,13 @@ void cmdFuncCCVKCreateRenderPass(CCVKDevice *device, CCVKGPURenderPass *gpuRende
 
         for (uint32_t input : subpassInfo.inputs) {
             bool appearsInOutput = std::find(subpassInfo.colors.begin(), subpassInfo.colors.end(), input) != subpassInfo.colors.end();
+            VkImageLayout layout = appearsInOutput ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            VkImageAspectFlags aspectFlag = VK_IMAGE_ASPECT_COLOR_BIT;
             if (input == gpuRenderPass->colorAttachments.size()) {
-                VkImageLayout layout = subpassInfo.depthStencil != INVALID_BINDING ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-                attachmentReferences.push_back({VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2, nullptr, input, layout, VK_IMAGE_ASPECT_DEPTH_BIT});
-            } else {
-                VkImageLayout layout = appearsInOutput ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                attachmentReferences.push_back({VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2, nullptr, input, layout, VK_IMAGE_ASPECT_COLOR_BIT});
+                layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+                aspectFlag = VK_IMAGE_ASPECT_STENCIL_BIT | VK_IMAGE_ASPECT_DEPTH_BIT;
             }
+            attachmentReferences.push_back({VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2, nullptr, input, layout, aspectFlag});
         }
         for (uint32_t color : subpassInfo.colors) {
             const VkAttachmentDescription2 &attachment = attachmentDescriptions[color];
@@ -518,7 +540,6 @@ void cmdFuncCCVKCreateRenderPass(CCVKDevice *device, CCVKGPURenderPass *gpuRende
                 offset += subpassInfo.resolves.size();
             }
         }
-
         if (!subpassInfo.preserves.empty()) {
             desc.preserveAttachmentCount = utils::toUint(subpassInfo.preserves.size());
             desc.pPreserveAttachments = subpassInfo.preserves.data();

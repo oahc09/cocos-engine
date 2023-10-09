@@ -2,7 +2,7 @@
 // cc_cameraPos.w is flipNDCSign
 #pragma define CC_HANDLE_NDC_SAMPLE_FLIP(uv, flipNDCSign) uv = flipNDCSign == 1.0 ? vec2(uv.x, 1.0 - uv.y) : uv
 
-#ifdef CC_USE_METAL
+#if defined(CC_USE_METAL) || defined(CC_USE_WGPU)
 #define CC_HANDLE_SAMPLE_NDC_FLIP_STATIC(y) y = -y
 #else
 #define CC_HANDLE_SAMPLE_NDC_FLIP_STATIC(y)
@@ -99,6 +99,16 @@ vec3 RotationVecFromAxisY(vec3 v, float cosTheta, float sinTheta)
 vec3 RotationVecFromAxisY(vec3 v, float rotateAngleArc)
 {
   return RotationVecFromAxisY(v, cos(rotateAngleArc), sin(rotateAngleArc));
+}
+
+vec3 RotationVecFromAxis(vec3 v, vec3 axis, float rotateAngleArc)
+{
+    float cosAngle = cos(rotateAngleArc);
+    float sinAngle = sin(rotateAngleArc);
+    vec3 crossProd = cross(axis, v);
+    float dotProd = dot(axis, v);
+    vec3 axisScaled = axis * dotProd * (1.0 - cosAngle);
+    return v * cosAngle + crossProd * sinAngle + axisScaled;
 }
 
 // rotationAngle: radians, 0-2Pi

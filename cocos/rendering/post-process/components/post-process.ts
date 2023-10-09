@@ -1,5 +1,5 @@
 import { EDITOR } from 'internal:constants';
-import { property } from '../../../core/data/class-decorator';
+import { property, serializable } from '../../../core/data/class-decorator';
 import { ccclass, disallowMultiple, executeInEditMode, help, range, slide, tooltip } from '../../../core/data/decorators';
 import { Director, director } from '../../../game';
 import { Component } from '../../../scene-graph';
@@ -10,17 +10,18 @@ import { PostProcessSetting } from './post-process-setting';
 @disallowMultiple
 @executeInEditMode
 export class PostProcess extends Component {
-    static all: PostProcess[] = []
+    static all: PostProcess[] = [];
 
     @tooltip('i18n:postprocess.global')
     @property
+    @serializable
     global = true;
 
-    @property
-    _shadingScale = 1
+    @serializable
+    protected _shadingScale = 1;
     @tooltip('i18n:postprocess.shadingScale')
     @slide
-    @range([0.01, 1, 0.01])
+    @range([0.01, 4, 0.01])
     @property
     get shadingScale (): number {
         return this._shadingScale;
@@ -36,9 +37,10 @@ export class PostProcess extends Component {
 
     @tooltip('i18n:postprocess.enableShadingScaleInEditor')
     @property
+    @serializable
     enableShadingScaleInEditor = false;
 
-    settings: Map<typeof PostProcessSetting, PostProcessSetting> = new Map()
+    settings: Map<typeof PostProcessSetting, PostProcessSetting> = new Map();
 
     addSetting (setting: PostProcessSetting): void {
         this.settings.set(setting.constructor as typeof PostProcessSetting, setting);

@@ -1,8 +1,8 @@
+import { assertIsNonNullable } from '@base/debug/internal';
 import { Node } from '../../../cocos/scene-graph';
 import { Motion, MotionEval, MotionPort } from '../../../cocos/animation/marionette/motion';
 import { createEval } from '../../../cocos/animation/marionette/create-eval';
 import { VarInstance, Value, VariableType, VariableDescription, createInstanceTag } from '../../../cocos/animation/marionette/variable';
-import { assertIsNonNullable } from '../../../cocos/core/data/utils/asserts';
 import {
     AnimationBlendEval,
 } from '../../../cocos/animation/marionette/motion/animation-blend';
@@ -88,7 +88,6 @@ class AnimationGraphPartialPreviewer {
 
         const bindingContext = new AnimationGraphBindingContext(
             this._root, this._poseLayoutMaintainer, this._varInstances, this._dummyAnimationController,
-            new EventTarget(),
         );
 
         poseLayoutMaintainer.startBind();
@@ -433,7 +432,7 @@ class MotionEvalRecord {
     }
 
     public rebind(bindContext: AnimationGraphBindingContext) {
-        const motionEval = this._motion[createEval](bindContext, null, true);
+        const motionEval = this._motion[createEval](bindContext, true);
 
         if (!motionEval) {
             return;

@@ -23,7 +23,8 @@
 */
 
 import { ccclass, tooltip, displayOrder, type, formerlySerializedAs, serializable, range } from 'cc.decorator';
-import { lerp, pseudoRandom, repeat, Enum, error } from '../../core';
+import { error } from '@base/debug';
+import { lerp, pseudoRandom, repeat, Enum, random } from '../../core';
 import { Particle, ParticleModuleBase, PARTICLE_MODULE_NAME } from '../particle';
 import CurveRange from './curve-range';
 import { ModuleRandSeed } from '../enum';
@@ -263,7 +264,7 @@ export default class TextureAnimationModule extends ParticleModuleBase {
      * @internal
      */
     public init (p: Particle): void {
-        p.startRow = Math.floor(Math.random() * this.numTilesY);
+        p.startRow = Math.floor(random() * this.numTilesY);
     }
 
     /**

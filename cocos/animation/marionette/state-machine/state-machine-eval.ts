@@ -1,25 +1,19 @@
 import { DEBUG } from 'internal:constants';
-import {
-    StateMachine, State, isAnimationTransition,
-    SubStateMachine, EmptyState, EmptyStateTransition,
-    ProceduralPoseState, ProceduralPoseTransition,
-} from '../animation-graph';
+import { warnID } from '@base/debug';
+import { assertIsTrue, assertIsNonNullable } from '@base/debug/internal';
+import { memop } from '@base/utils';
+import { StateMachine, State, isAnimationTransition, SubStateMachine, EmptyState, EmptyStateTransition, ProceduralPoseState, ProceduralPoseTransition } from '../animation-graph';
 import { MotionEval, MotionPort } from '../motion';
 import { createEval } from '../create-eval';
 import { BindContext, validateVariableExistence, validateVariableType, VariableType } from '../parametric';
 import { ConditionEval, TriggerCondition } from './condition';
 import { MotionState } from './motion-state';
-import { warnID, assertIsTrue, assertIsNonNullable, Pool, approx, clamp01 } from '../../../core';
+import { approx, clamp01 } from '../../../core';
 import { AnimationClip } from '../../animation-clip';
 import type { AnimationController } from '../animation-controller';
 import { StateMachineComponent } from './state-machine-component';
 import { InteractiveState } from './state';
-import {
-    AnimationGraphBindingContext, AnimationGraphEvaluationContext,
-    AnimationGraphUpdateContext, AnimationGraphUpdateContextGenerator,
-    AnimationGraphSettleContext,
-    TriggerResetter,
-} from '../animation-graph-context';
+import { AnimationGraphBindingContext, AnimationGraphEvaluationContext, AnimationGraphUpdateContext, AnimationGraphUpdateContextGenerator, AnimationGraphSettleContext, TriggerResetter } from '../animation-graph-context';
 import { blendPoseInto, Pose } from '../../core/pose';
 import { PoseNode } from '../pose-graph/pose-node';
 import { instantiatePoseGraph, InstantiatedPoseGraph } from '../pose-graph/instantiation';
@@ -119,7 +113,6 @@ class TopLevelStateMachineEvaluation {
         stateMachine: StateMachine,
         name: string,
         context: AnimationGraphBindingContext,
-        clipOverrides: ReadonlyClipOverrideMap | null,
     ) {
         this._additive = context.additive;
         this.name = name;
@@ -128,7 +121,6 @@ class TopLevelStateMachineEvaluation {
             stateMachine,
             null,
             context,
-            clipOverrides,
             name,
         );
         this._topLevelEntry = entry;
@@ -252,12 +244,12 @@ class TopLevelStateMachineEvaluation {
         }
     }
 
-    public overrideClips (overrides: ReadonlyClipOverrideMap, context: AnimationGraphBindingContext): void {
+    public overrideClips (context: AnimationGraphBindingContext): void {
         const { _motionStates: motionStates } = this;
         const nMotionStates = motionStates.length;
         for (let iMotionState = 0; iMotionState < nMotionStates; ++iMotionState) {
             const node = motionStates[iMotionState];
-            node.overrideClips(overrides, context);
+            node.overrideClips(context);
         }
     }
 
@@ -285,7 +277,6 @@ class TopLevelStateMachineEvaluation {
         graph: StateMachine,
         parentStateMachineInfo: StateMachineInfo | null,
         context: AnimationGraphBindingContext,
-        clipOverrides: ReadonlyClipOverrideMap | null,
         __DEBUG_ID__: string,
     ): StateMachineInfo {
         const nodes = Array.from(graph.states());
@@ -296,7 +287,7 @@ class TopLevelStateMachineEvaluation {
 
         const nodeEvaluations = nodes.map((node): NodeEval | VMSMEval | null => {
             if (node instanceof MotionState) {
-                const motionStateEval = new VMSMEval(node, context, clipOverrides);
+                const motionStateEval = new VMSMEval(node, context);
                 this._motionStates.push(motionStateEval);
                 return motionStateEval;
             } else if (node === graph.entryState) {
@@ -342,7 +333,6 @@ class TopLevelStateMachineEvaluation {
                     node.stateMachine,
                     stateMachineInfo,
                     context,
-                    clipOverrides,
                     `${__DEBUG_ID__}/${node.name}`,
                 );
                 subStateMachineInfo.components = new InstantiatedComponents(node);
@@ -682,9 +672,7 @@ class TopLevelStateMachineEvaluation {
      *
      * @returns The transition matched, or null if there's no matched transition.
      */
-    private _matchTransition (
-        node: NodeEval, realNode: NodeEval,
-    ): TransitionEval | null {
+    private _matchTransition (node: NodeEval, realNode: NodeEval): TransitionEval | null {
         assertIsTrue(node === realNode || node.kind === NodeKind.any);
 
         const { _conditionEvaluationContext: conditionEvaluationContext } = this;
@@ -1214,7 +1202,7 @@ interface StateMachineInfo {
  * Track the evaluation of a virtual motion state-machine.
  */
 class VMSMEval {
-    constructor (state: MotionState, context: AnimationGraphBindingContext, overrides: ReadonlyClipOverrideMap | null) {
+    constructor (state: MotionState, context: AnimationGraphBindingContext) {
         const name = state.name;
 
         this._baseSpeed = state.speed;
@@ -1231,7 +1219,7 @@ class VMSMEval {
             }
         }
 
-        const sourceEval = state.motion?.[createEval](context, overrides, false) ?? null;
+        const sourceEval = state.motion?.[createEval](context, false) ?? null;
         if (sourceEval) {
             Object.defineProperty(sourceEval, '__DEBUG_ID__', { value: name });
         }
@@ -1298,8 +1286,8 @@ class VMSMEval {
         }
     }
 
-    public overrideClips (overrides: ReadonlyClipOverrideMap, context: AnimationGraphBindingContext): void {
-        this._source?.overrideClips(overrides, context);
+    public overrideClips (context: AnimationGraphBindingContext): void {
+        this._source?.overrideClips(context);
     }
 
     private _source: MotionEval | null = null;
@@ -1577,14 +1565,14 @@ class ActivatedTransition {
         }
     }
 
-    public static createPool (initialCapacity: number): Pool<ActivatedTransition> {
+    public static createPool (initialCapacity: number): memop.Pool<ActivatedTransition> {
         const destructor = !DEBUG
             ? undefined
             : (transitionInstance: ActivatedTransition): void => {
                 transitionInstance.normalizedElapsedTime = Number.NaN;
             };
 
-        const pool = new Pool<ActivatedTransition>(
+        const pool = new memop.Pool<ActivatedTransition>(
             () => new ActivatedTransition(),
             initialCapacity,
             destructor,

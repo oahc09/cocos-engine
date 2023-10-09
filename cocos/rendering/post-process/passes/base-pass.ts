@@ -1,5 +1,6 @@
 import { EDITOR } from 'internal:constants';
 
+import { cclegacy } from '@base/global';
 import { Material } from '../../../asset/assets';
 import { Camera } from '../../../render-scene/scene';
 import { getCameraUniqueID } from '../../custom/define';
@@ -7,7 +8,7 @@ import { BasicPipeline, Pipeline, PipelineRuntime } from '../../custom/pipeline'
 import { passContext } from '../utils/pass-context';
 import { Address, Filter, Format, Sampler, SamplerInfo } from '../../../gfx';
 import { supportsRGBA16HalfFloatTexture } from '../../define';
-import { cclegacy, macro } from '../../../core';
+import { macro } from '../../../core';
 
 let _BasePassID = 0;
 let _pointSampler: Sampler| null = null;
@@ -55,7 +56,7 @@ export abstract class BasePass {
     abstract name: string;
     effectName = 'pipeline/post-process/blit-screen';
 
-    _id = 0
+    _id = 0;
     constructor () {
         this._id = _BasePassID++;
     }
@@ -65,7 +66,7 @@ export abstract class BasePass {
 
     // private _materialMap: Map<Camera, Material> = new Map()
 
-    _material: Material | undefined
+    _material: Material | undefined;
     get material (): Material {
         const effectReloaded = false;
         // if (EDITOR && this._material) {
@@ -97,7 +98,7 @@ export abstract class BasePass {
     }
 
     enable = true;
-    outputNames: string[] = []
+    outputNames: string[] = [];
 
     lastPass: BasePass | undefined;
 
@@ -110,6 +111,8 @@ export abstract class BasePass {
     checkEnable (camera: Camera): boolean {
         return this.enable;
     }
+
+    onGlobalPipelineStateChanged?(): void;
 
     renderProfiler (camera): void {
         if (passContext.isFinalCamera && !EDITOR) {

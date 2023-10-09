@@ -27,16 +27,19 @@
 
 import { ccclass } from 'cc.decorator';
 import { EDITOR, TEST, BUILD } from 'internal:constants';
-import { Mat4, Rect, Size, Vec2, Vec3, Vec4, cclegacy, errorID, warnID, js } from '../../core';
+import { errorID, warnID } from '@base/debug';
+import { cclegacy, ccwindow } from '@base/global';
+import { js } from '@base/utils';
+import { IMemoryImageSource } from '../../../pal/image/types';
+import { Mat4, Rect, Size, Vec2, Vec3, Vec4 } from '../../core';
 import { Asset } from '../../asset/assets/asset';
 import { TextureBase } from '../../asset/assets/texture-base';
-import { ImageAsset, ImageSource } from '../../asset/assets/image-asset';
+import { ImageAsset } from '../../asset/assets/image-asset';
 import { Texture2D } from '../../asset/assets/texture-2d';
 import { dynamicAtlasManager } from '../utils/dynamic-atlas/atlas-manager';
 import { Mesh } from '../../3d/assets/mesh';
 import { createMesh } from '../../3d/misc';
 import { Attribute, AttributeName, Format, PrimitiveMode, Sampler, SamplerInfo, Texture } from '../../gfx';
-import { ccwindow } from '../../core/global-exports';
 
 const INSET_LEFT = 0;
 const INSET_TOP = 1;
@@ -105,7 +108,7 @@ interface ISpriteFrameOriginal {
  * @en Information object interface for initialize a [[SpriteFrame]] asset.
  * @zh 用于初始化 [[SpriteFrame]] 资源的对象接口描述。
  */
-interface ISpriteFrameInitInfo {
+export interface ISpriteFrameInitInfo {
     /**
      * @en The texture of the sprite frame, could be `TextureBase`.
      * @zh 贴图对象资源，可以是 `TextureBase` 类型。
@@ -245,12 +248,23 @@ export class SpriteFrame extends Asset {
     /**
      * @en Create a SpriteFrame object by an image asset or an native image asset.
      * @zh 通过 Image 资源或者平台相关 Image 对象创建一个 SpriteFrame 资源。
-     * @param imageSourceOrImageAsset @en ImageAsset or ImageSource, ImageSource could be HTMLCanvasElement, HTMLImageElement, IMemoryImageSource.
-     *                                @zh 图像资源或图像原始图像源，图像原始图像源支持 HTMLCanvasElement HTMLImageElement IMemoryImageSource 三种资源。
+     * @param imageSource @en ImageSource could be HTMLCanvasElement, HTMLImageElement, ImageBitmap.
+     *                    @zh 图像原始图像源支持 HTMLCanvasElement HTMLImageElement ImageBitmap 三种资源。
+     * @returns @en SpriteFrame asset. @zh 精灵资源。
+     * @deprecated @en Please use `createWithImage (memoryImageSourceOrImageAsset: ImageAsset | IMemoryImageSource)` instead.
+     *             @zh 请使用`createWithImage (memoryImageSourceOrImageAsset: ImageAsset | IMemoryImageSource)`代替。
+     */
+    public static createWithImage (imageSource: HTMLCanvasElement | HTMLImageElement | ImageBitmap): SpriteFrame;
+    /**
+     * @en Create a SpriteFrame object by an image asset or an native image asset.
+     * @zh 通过 Image 资源或者平台相关 Image 对象创建一个 SpriteFrame 资源。
+     * @param memoryImageSourceOrImageAsset @en ImageAsset or IMemoryImageSource.
+     *                                      @zh 图像资产或IMemoryImageSource。
      * @returns @en SpriteFrame asset. @zh 精灵资源。
      */
-    public static createWithImage (imageSourceOrImageAsset: ImageSource | ImageAsset): SpriteFrame {
-        const img = imageSourceOrImageAsset instanceof ImageAsset ? imageSourceOrImageAsset : new ImageAsset(imageSourceOrImageAsset);
+    public static createWithImage (memoryImageSourceOrImageAsset: ImageAsset | IMemoryImageSource): SpriteFrame;
+    public static createWithImage (imageSourceOrImageAsset: ImageAsset | IMemoryImageSource | HTMLCanvasElement | HTMLImageElement | ImageBitmap): SpriteFrame {
+        const img = imageSourceOrImageAsset instanceof ImageAsset ? imageSourceOrImageAsset : new ImageAsset(imageSourceOrImageAsset as IMemoryImageSource);
         const tex = new Texture2D();
         tex.image = img;
         const spf = new SpriteFrame();

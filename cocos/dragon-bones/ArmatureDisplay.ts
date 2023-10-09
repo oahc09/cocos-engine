@@ -24,8 +24,11 @@
 
 import { EDITOR_NOT_IN_PREVIEW } from 'internal:constants';
 import { Armature, Bone, EventObject, AnimationState } from '@cocos/dragonbones-js';
+import { errorID, warn, error } from '@base/debug';
+import { cclegacy } from '@base/global';
+import { js, memop } from '@base/utils';
 import { UIRenderer } from '../2d/framework/ui-renderer';
-import { Color, Enum, ccenum, errorID, RecyclePool, js, CCObject, EventTarget, cclegacy, _decorator, warn, error } from '../core';
+import { Color, Enum, ccenum, CCObject, EventTarget, _decorator } from '../core';
 import { BlendFactor } from '../gfx';
 import { AnimationCache, ArmatureCache, ArmatureFrame } from './ArmatureCache';
 import { AttachUtil } from './AttachUtil';
@@ -482,7 +485,7 @@ export class ArmatureDisplay extends UIRenderer {
      * @en Draw call list.
      * @zh Draw call 列表。
      */
-    get drawList (): RecyclePool<ArmatureDisplayDrawData> { return this._drawList; }
+    get drawList (): memop.RecyclePool<ArmatureDisplayDrawData> { return this._drawList; }
     @serializable
     protected _defaultArmatureIndexValue: DefaultArmaturesEnum = DefaultArmaturesEnum.default;
     /**
@@ -566,7 +569,7 @@ export class ArmatureDisplay extends UIRenderer {
     protected _displayProxy: CCArmatureDisplay | null = null;
 
     protected _drawIdx = 0;
-    protected _drawList = new RecyclePool<ArmatureDisplayDrawData>((): ArmatureDisplayDrawData => ({
+    protected _drawList = new memop.RecyclePool<ArmatureDisplayDrawData>((): ArmatureDisplayDrawData => ({
         material: null,
         texture: null,
         indexOffset: 0,
@@ -715,7 +718,7 @@ export class ArmatureDisplay extends UIRenderer {
         let mat;
         if (this._customMaterial) mat = this._customMaterial;
         else mat = this._updateBuiltinMaterial();
-        this.setMaterial(mat, 0);
+        this.setSharedMaterial(mat as Material, 0);
         this._cleanMaterialCache();
     }
 
@@ -732,8 +735,15 @@ export class ArmatureDisplay extends UIRenderer {
                 this._drawIdx = i;
                 const dc = this._drawList.data[i];
                 if (dc.texture) {
-                    batcher.commitMiddleware(this, meshBuffer, origin + dc.indexOffset,
-                        dc.indexCount, dc.texture, dc.material!, this._enableBatch);
+                    batcher.commitMiddleware(
+                        this,
+                        meshBuffer,
+                        origin + dc.indexOffset,
+                        dc.indexCount,
+                        dc.texture,
+                        dc.material!,
+                        this._enableBatch,
+                    );
                 }
                 indicesCount += dc.indexCount;
             }

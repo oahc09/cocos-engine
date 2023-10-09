@@ -1,5 +1,5 @@
+import { warn } from '@base/debug';
 import { RenderTexture } from '../../../asset/assets';
-import { warn } from '../../../core';
 import { property } from '../../../core/data/class-decorator';
 import { ccclass, menu } from '../../../core/data/decorators';
 import { game } from '../../../game';
@@ -14,7 +14,7 @@ export class TAAMask extends Component {
 
     _mask: RenderTexture | undefined;
 
-    get mask () {
+    get mask (): RenderTexture | undefined {
         if (!this.maskCamera || !this.maskCamera.enabledInHierarchy) {
             return undefined;
         }
@@ -25,7 +25,7 @@ export class TAAMask extends Component {
         return this._mask;
     }
 
-    start () {
+    start (): void {
         if (!this.maskCamera) {
             warn('Can not find a Camera for TAAMask');
             return;

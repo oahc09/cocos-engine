@@ -24,9 +24,9 @@
 ****************************************************************************/
 import UIAbility from '@ohos.app.ability.UIAbility';
 import nativerender from "libcocos.so";
-import { ContextType } from "../common/Constants"
 import window from '@ohos.window';
 import resourceManager from '@ohos.resourceManager';
+import { ContextType } from "../common/Constants"
 //import avsession from '@ohos.multimedia.avsession';
 
 const nativeContext = nativerender.getContext(ContextType.ENGINE_UTILS);
@@ -61,9 +61,9 @@ export default class MainAbility extends UIAbility {
             }
         });
         // Set full screen
-        //windowStage.getMainWindow().then((window: window.Window) => {
-        //    window.setFullScreen(true);
-        //});
+        windowStage.getMainWindow().then((window: window.Window) => {
+            window.setWindowSystemBarEnable([]);
+        });
         nativeContext.writablePathInit(this.context.cacheDir);
     }
 

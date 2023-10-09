@@ -22,7 +22,8 @@
  THE SOFTWARE.
 */
 
-import { IVec2Like, log } from '../../../core';
+import { log } from '@base/debug';
+import { IVec2Like } from '../../../core';
 
 //https://github.com/x6ud/poly-partition-js
 

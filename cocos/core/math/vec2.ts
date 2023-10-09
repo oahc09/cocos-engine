@@ -23,6 +23,8 @@
  THE SOFTWARE.
 */
 
+import { cclegacy } from '@base/global';
+import { warn } from '@base/debug';
 import { CCClass } from '../data/class';
 import { ValueType } from '../value-types/value-type';
 import { Mat4 } from './mat4';
@@ -30,8 +32,6 @@ import { IMat3Like, IMat4Like, IVec2Like } from './type-define';
 import { clamp, EPSILON, random } from './utils';
 
 import { Vec3 } from './vec3';
-import { legacyCC } from '../global-exports';
-import { warn } from '../platform/debug';
 
 /**
  * @en Representation of 2D vectors and points.
@@ -298,13 +298,10 @@ export class Vec2 extends ValueType {
      * @override (a:Vec2, b:Vec2) => number
      * @override [deprecated] (out:Vec3, a:Vec2, b:Vec2) => Vec3
      */
-    /**
-     * @deprecated since v3.8.0, There is no physical meaning.
-     */
     public static cross (a: IVec2Like, b: IVec2Like): number;
 
     /**
-     * @deprecated since v3.8.0, There is no physical meaning.
+     * @deprecated Consider use another overrides please.
      */
     public static cross <Out extends IVec2Like> (out: Vec3, a: Out, b: Out): Vec3;
 
@@ -720,9 +717,6 @@ export class Vec2 extends ValueType {
      * @param other specified vector
      * @return `out`
      */
-    /**
-     * @deprecated since v3.8.0, There is no physical meaning.
-     */
     public cross (other: Vec2): number {
         return this.x * other.y - this.y * other.x;
     }
@@ -786,11 +780,18 @@ export class Vec2 extends ValueType {
      * @zh 获取当前向量和指定向量之间的有符号弧度。<br/>
      * 有符号弧度的取值范围为 (-PI, PI]，当前向量可以通过逆时针旋转有符号角度与指定向量同向。<br/>
      * @param other specified vector
-     * @return The signed angle between the current vector and the specified vector (in radians); if there is a zero vector in the current vector and the specified vector, 0 is returned.
+     * @return The signed angle between the current vector and the specified vector (in radians);
+     * if there is a zero vector in the current vector and the specified vector, 0 is returned.
      */
     public signAngle (other: Vec2): number {
-        const angle = this.angle(other);
-        return this.cross(other) < 0 ? -angle : angle;
+        // θ = atan(tan(θ))
+        //   = atan(sin(θ) / cos(θ))
+        //   = atan2(sin(θ), cos(θ))
+        //   = atan2(|a|·|b|·sin(θ), |a|·|b|·cos(θ))
+        //   = atan2(cross(a, b), dot(a, b))
+        const cross = this.cross(other);
+        const dot = this.dot(other);
+        return Math.atan2(cross, dot);
     }
 
     /**
@@ -837,7 +838,7 @@ export class Vec2 extends ValueType {
 }
 
 CCClass.fastDefine('cc.Vec2', Vec2, { x: 0, y: 0 });
-legacyCC.Vec2 = Vec2;
+cclegacy.Vec2 = Vec2;
 
 export function v2 (other: Vec2): Vec2;
 export function v2 (x?: number, y?: number): Vec2;
@@ -846,4 +847,4 @@ export function v2 (x?: number | Vec2, y?: number): Vec2 {
     return new Vec2(x as any, y);
 }
 
-legacyCC.v2 = v2;
+cclegacy.v2 = v2;

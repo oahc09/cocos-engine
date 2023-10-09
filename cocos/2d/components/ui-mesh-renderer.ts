@@ -25,6 +25,8 @@
 
 import { ccclass, help, executionOrder, menu, executeInEditMode } from 'cc.decorator';
 import { DEBUG, JSB } from 'internal:constants';
+import { assert, warn } from '@base/debug';
+import { cclegacy } from '@base/global';
 import { ModelRenderer } from '../../misc/model-renderer';
 import { RenderPriority } from '../../rendering/define';
 import { IBatcher } from '../renderer/i-batcher';
@@ -34,7 +36,6 @@ import { NativeUIModelProxy } from '../renderer/native-2d';
 import { uiRendererManager } from '../framework/ui-renderer-manager';
 import { RenderEntity, RenderEntityType } from '../renderer/render-entity';
 import { MeshRenderData, RenderData } from '../renderer/render-data';
-import { assert, cclegacy, warn } from '../../core';
 import { RenderDrawInfoType } from '../renderer/render-draw-info';
 import type { UIRenderer } from '../framework/ui-renderer';
 
@@ -47,6 +48,8 @@ import type { UIRenderer } from '../framework/ui-renderer';
  * @zh
  * UI 模型基础组件。
  * 当你在 UI 中放置模型或者粒子的时候，必须添加该组件才能渲染。该组件必须放置在带有 [[MeshRenderer]] 或者 [[ParticleSystem]] 组件的节点上。
+ * @deprecated This component is not recommended to be used, please use Render Texture instead.
+ * See [UIMeshRenderer Reference](https://docs.cocos.com/creator/manual/en/ui-system/components/editor/ui-model.html)
  */
 @ccclass('cc.UIMeshRenderer')
 @help('i18n:cc.UIMeshRenderer')
@@ -168,15 +171,17 @@ export class UIMeshRenderer extends Component {
                 this._UIModelNativeProxy.clearModels();
                 this._renderEntity.clearDynamicRenderDrawInfos();
                 for (let i = 0; i < models.length; i++) {
-                    this._uploadRenderData(i);
-                    this._UIModelNativeProxy.updateModels(models[i]);
+                    if (models[i].enabled) {
+                        this._uploadRenderData(i);
+                        this._UIModelNativeProxy.updateModels(models[i]);
+                    }
                 }
                 this._UIModelNativeProxy.attachDrawInfo();
             }
         }
     }
 
-    private _uploadRenderData (index): void {
+    private _uploadRenderData (index: number): void {
         if (JSB) {
             const renderData = MeshRenderData.add();
             // TODO: here we weirdly use UIMeshRenderer as UIRenderer
@@ -187,6 +192,7 @@ export class UIMeshRenderer extends Component {
             // please fix the type @holycanvas
             // issue: https://github.com/cocos/cocos-engine/issues/14637
             this._renderData = renderData as unknown as RenderData;
+            // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
             this._renderData.material = this._modelComponent!.getMaterialInstance(index);
         }
     }
@@ -199,7 +205,9 @@ export class UIMeshRenderer extends Component {
      * 它可能会组装额外的渲染数据到顶点数据缓冲区，也可能只是重置一些渲染状态。
      * 注意：不要手动调用该函数，除非你理解整个流程。
      */
+    // eslint-disable-next-line @typescript-eslint/no-empty-function
     public postUpdateAssembler (render: IBatcher): void {
+        // No behavior for this component
     }
 
     public update (): void {
@@ -250,13 +258,17 @@ export class UIMeshRenderer extends Component {
     /**
      * @deprecated Since v3.7.0, this is an engine private interface that will be removed in the future.
      */
+    // eslint-disable-next-line @typescript-eslint/no-empty-function
     public setNodeDirty (): void {
+        // No behavior for this component
     }
 
     /**
      * @deprecated Since v3.7.0, this is an engine private interface that will be removed in the future.
      */
+    // eslint-disable-next-line @typescript-eslint/no-empty-function
     public setTextureDirty (): void {
+        // No behavior for this component
     }
 
     protected _canRender (): boolean {

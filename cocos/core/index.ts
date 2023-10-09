@@ -23,20 +23,19 @@
  THE SOFTWARE.
 */
 
-import { legacyCC, VERSION } from './global-exports';
+import { cclegacy } from '@base/global';
+import { memop } from '@base/utils';
 import * as geometry from './geometry';
 import * as math from './math';
-import * as memop from './memop';
 import './deprecated';
 import './deprecated-3.7.0';
 
-legacyCC.math = math;
-legacyCC.geometry = geometry;
+cclegacy.math = math;
+cclegacy.geometry = geometry;
 
-export { math, memop, geometry, VERSION };
+export { math, memop, geometry };
 
 export * from './math';
-export * from './memop';
 export * from './value-types';
 export * from './utils';
 export * from './data';
@@ -47,7 +46,6 @@ export * from './curves';
 export * from './settings';
 export * from './system';
 export * from './algorithm';
-export { legacyCC as cclegacy } from './global-exports';
 export * from './curves/bezier';
 
 // TODO: should not include engine internal exports when module mechanism is implemented.

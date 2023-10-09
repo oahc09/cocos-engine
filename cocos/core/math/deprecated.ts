@@ -22,7 +22,8 @@
  THE SOFTWARE.
 */
 
-import { replaceProperty } from '../utils/x-deprecated';
+import { cclegacy } from '@base/global';
+import { replaceProperty } from '@base/utils';
 import { Color } from './color';
 import { Mat3 } from './mat3';
 import { Mat4 } from './mat4';
@@ -30,7 +31,6 @@ import { Quat } from './quat';
 import { Vec2 } from './vec2';
 import { Vec3 } from './vec3';
 import { Vec4 } from './vec4';
-import { legacyCC } from '../global-exports';
 
 replaceProperty(Vec2, 'Vec2', [
     {
@@ -362,7 +362,7 @@ replaceProperty(Color, 'Color', [
         newName: 'fromHEX',
         customFunction (...args: any): any {
             const arg1 = args[1].toString(16);
-            return legacyCC.Color.fromHEX(args[0], arg1);
+            return cclegacy.Color.fromHEX(args[0], arg1);
         },
     },
 ]);

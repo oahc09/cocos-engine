@@ -24,27 +24,30 @@
 */
 
 import { BUILD, EDITOR, PREVIEW } from 'internal:constants';
+import { error } from '@base/debug';
+import { cclegacy } from '@base/global';
 import { Asset } from '../assets/asset';
-import { error, sys, Settings, settings, path, cclegacy, EventTarget } from '../../core';
+import { sys, Settings, settings, path, EventTarget } from '../../core';
 import Bundle from './bundle';
-import Cache, { ICache } from './cache';
+import Cache from './cache';
+import { ICache } from './cache';
 import CacheManager from './cache-manager';
-import dependUtil, { DependUtil } from './depend-util';
-import downloader, { Downloader } from './downloader';
+import dependUtil from './depend-util';
+import { DependUtil } from './depend-util';
+import downloader from './downloader';
+import { Downloader } from './downloader';
 import factory from './factory';
 import fetch from './fetch';
 import * as helper from './helper';
 import load from './load';
 import packManager from './pack-manager';
-import parser, { Parser } from './parser';
+import parser from './parser';
+import { Parser } from './parser';
 import { Pipeline } from './pipeline';
 import preprocess from './preprocess';
 import { releaseManager } from './release-manager';
 import RequestItem from './request-item';
-import {
-    presets,
-    references,
-    assets, BuiltinBundleName, bundles, fetchPipeline, files, parsed, pipeline, transformPipeline, assetsOverrideMap, IRequest } from './shared';
+import { presets, references, assets, BuiltinBundleName, bundles, fetchPipeline, files, parsed, pipeline, transformPipeline, assetsOverrideMap, IRequest } from './shared';
 
 import Task from './task';
 import { combine, parse, replaceOverrideAsset } from './url-transformer';
@@ -201,7 +204,7 @@ export class AssetManager {
      * 是否优先使用 image bitmap 来加载图片，启用之后，图片加载速度会更快, 但内存占用会变高。
      *
      */
-    public allowImageBitmap = !EDITOR && !sys.isMobile;
+    public allowImageBitmap = false;
 
     /**
      * @en
@@ -429,7 +432,7 @@ export class AssetManager {
         this._projectBundles = settings.querySettings(Settings.Category.ASSETS, 'projectBundles') || [];
         const assetsOverride = settings.querySettings(Settings.Category.ASSETS, 'assetsOverrides') || {};
         for (const key in assetsOverride) {
-            this.assetsOverrideMap.set(key, assetsOverride[key]);
+            this.assetsOverrideMap.set(key, assetsOverride[key] as string);
         }
     }
 
@@ -632,9 +635,9 @@ export class AssetManager {
         this.loadAny({ url }, opts, null, (err, data): void => {
             if (err) {
                 error(err.message, err.stack);
-                if (onComp) { onComp(err, data); }
+                if (onComp) { onComp(err, data as T); }
             } else {
-                factory.create(url, data, opts.ext || path.extname(url), opts, (p1, p2): void => {
+                factory.create(url, data, (opts.ext as string) || path.extname(url), opts, (p1, p2): void => {
                     if (onComp) { onComp(p1, p2 as T); }
                 });
             }
@@ -693,7 +696,7 @@ export class AssetManager {
         this.loadAny({ url: nameOrUrl }, opts, null, (err, data): void => {
             if (err) {
                 error(err.message, err.stack);
-                if (onComp) { onComp(err, data); }
+                if (onComp) { onComp(err, data as Bundle); }
             } else {
                 factory.create(nameOrUrl, data, 'bundle', opts, (p1, p2): void => {
                     if (onComp) { onComp(p1, p2 as Bundle); }
@@ -791,7 +794,7 @@ export class AssetManager {
             input: [item],
             onProgress: onProg,
             options: opts,
-            onComplete: asyncify((err, data: T): void => {
+            onComplete: asyncify((err: Error | null, data: T): void => {
                 if (!err) {
                     if (!opts.assetId) {
                         data._uuid = '';
