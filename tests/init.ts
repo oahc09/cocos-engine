@@ -32,14 +32,14 @@ jest.mock(
 );
 
 jest.mock(
-    'pal/minigame',
-    () => jest.requireActual('../pal/minigame/non-minigame'),
+    '@pal/minigame',
+    () => jest.requireActual('../pal/minigame/src/non-minigame'),
     { virtual: true, },
 );
 
 jest.mock(
-    'pal/system-info',
-    () => jest.requireActual('../pal/system-info/web/system-info'),
+    '@pal/system-info',
+    () => jest.requireActual('../pal/system-info/src/web/system-info'),
     { virtual: true, },
 );
 
@@ -74,14 +74,50 @@ jest.mock(
 );
 
 jest.mock(
-    'pal/pacer',
-    () => jest.requireActual('../pal/pacer/pacer-web'),
+    '@base/object',
+    () => jest.requireActual('../cocos/base/object/src/index.ts'),
     { virtual: true, },
 );
 
 jest.mock(
-    'pal/screen-adapter',
-    () => jest.requireActual('../pal/screen-adapter/web/screen-adapter'),
+    '@base/object/internal',
+    () => jest.requireActual('../cocos/base/object/src/internal-index.ts'),
+    { virtual: true, },
+);
+
+jest.mock(
+    '@base/event',
+    () => jest.requireActual('../cocos/base/event/src/index.ts'),
+    { virtual: true, },
+);
+
+jest.mock(
+    '@base/event/internal',
+    () => jest.requireActual('../cocos/base/event/src/internal-index.ts'),
+    { virtual: true, },
+);
+
+jest.mock(
+    '@base/math',
+    () => jest.requireActual('../cocos/base/math/src/index.ts'),
+    { virtual: true, },
+);
+
+jest.mock(
+    '@base/math/internal',
+    () => jest.requireActual('../cocos/base/math/src/internal-index.ts'),
+    { virtual: true, },
+);
+
+jest.mock(
+    '@pal/pacer',
+    () => jest.requireActual('../pal/pacer/src/pacer-web'),
+    { virtual: true, },
+);
+
+jest.mock(
+    '@pal/screen-adapter',
+    () => jest.requireActual('../pal/screen-adapter/src/web/screen-adapter'),
     { virtual: true, },
 );
 
@@ -164,7 +200,6 @@ jest.mock('serialization-test-helper/run-test', () => {
     virtual: true,
 });
 
-import '../exports/base';
 import { DebugMode } from '@base/debug';
 import { EffectAsset, Game, game, IGameConfig } from '../exports/base';
 import './asset-manager/init';

@@ -2,8 +2,8 @@ import * as fs from 'fs-extra';
 import * as ps from 'path';
 import * as os from 'os';
 import { execSync } from "child_process";
-import { CocosParams, NativePackTool } from "../base/default";
-import { toolHelper } from "../utils";
+import { CocosParams, IOpenWithIdeOptions, NativePackTool } from "../base/default";
+import { Paths, cchelper, toolHelper } from "../utils";
 
 export interface IOrientation {
     landscapeLeft: boolean;
@@ -70,6 +70,14 @@ export abstract class MacOSPackTool extends NativePackTool {
             }
             await this.xcodeFixAssetsReferences();
         }
+    }
+
+    // static method, if needs to access instance properties, you can define a instance method
+    static async openWithIde(options: IOpenWithIdeOptions) {
+        const nativePrjDir = ps.join(options.buildDir, 'proj');
+        Paths.cmakePath = options.nativeIdePath;
+        await toolHelper.runCmake(['--open', `"${cchelper.fixPath(nativePrjDir)}"`]);
+        return true;
     }
 
     /**

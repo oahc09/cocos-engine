@@ -23,7 +23,9 @@
  THE SOFTWARE.
 */
 import { cclegacy } from '@base/global';
-import { toRadian, CCBoolean, CCFloat, _decorator } from '../../core';
+import { CCBoolean, CCFloat } from '@base/object';
+import { toRadian } from '@base/math';
+import { _decorator } from '../../core';
 import { scene } from '../../render-scene';
 import { Light, PhotometricTerm } from './light-component';
 import { Root } from '../../root';

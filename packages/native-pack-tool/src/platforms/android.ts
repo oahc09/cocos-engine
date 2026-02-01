@@ -5,7 +5,7 @@ import { spawn, spawnSync } from 'child_process';
 import * as xml2js from 'xml2js';
 import { platform } from 'os';
 import { cchelper, Paths } from "../utils";
-import { CocosParams, NativePackTool } from "../base/default";
+import { CocosParams, IOpenWithIdeOptions, NativePackTool } from "../base/default";
 
 export interface IOrientation {
     landscapeLeft: boolean;
@@ -76,6 +76,24 @@ export class AndroidPackTool extends NativePackTool {
         await this.updateManifest();
         await this.encrypteScripts();
         await this.generateAppNameValues();
+        return true;
+    }
+
+    // static method, if needs to access instance properties, you can define a instance method
+    static async openWithIde(options: IOpenWithIdeOptions) {
+        let projPath = ps.join(options.buildDir, 'proj');
+        let ASFile = "./studio";
+        let ASDir = options.nativeIdePath;
+        if (!ASDir || !fs.existsSync(ASDir)) {
+            throw new Error(`android studio's runnable file Dir not set or not exist`);
+        }
+        if (process.platform === 'win32') {
+            ASFile = "studio.bat";
+            projPath = projPath.replace(/\\/g, '/');
+            ASDir = options.nativeIdePath.replace(/\\/g, '/');
+        }
+
+        cchelper.runCmd(ASFile, [projPath], false, ASDir);
         return true;
     }
 

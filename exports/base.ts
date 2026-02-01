@@ -30,12 +30,17 @@ import '../cocos/core/legacy';
 //TODO(PP): should rename it to render-scene
 import * as renderer from '../cocos/render-scene';
 import * as gfx from '../cocos/gfx';
+import * as math from '@base/math';
 
 // LOAD ENGINE CORE
 export * from '../cocos/core';
 export * from '@base/utils';
+export * from '@base/event';
+export * from '@base/math';
+export { math };
 export { cclegacy, VERSION } from '@base/global';
 export { debug, log, error, warn, assert, logID, errorID, warnID, assertID, isDisplayStats, setDisplayStats, getError, DebugMode } from '@base/debug';
+export { BitMask, Enum, ccenum, ValueType, CCClass, isCCClassOrFastDefined, CCObject, CCInteger, CCFloat, CCBoolean, CCString, editorExtrasTag, setPropertyEnumType, setPropertyEnumTypeOnAttrs, isCCObject, isValid } from '@base/object';
 
 export * from '../cocos/rendering';
 export * from '../cocos/rendering/custom/builtin-pipelines';
@@ -52,6 +57,7 @@ export * from '../cocos/asset/asset-manager';
 
 export { renderer };
 cclegacy.renderer = renderer;
+cclegacy.math = math;
 
 export * from '../extensions/ccpool/node-pool';
 

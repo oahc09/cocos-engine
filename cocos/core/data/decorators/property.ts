@@ -25,11 +25,8 @@
 import { DEV, EDITOR, JSB, TEST } from 'internal:constants';
 import { warnID, errorID } from '@base/debug';
 import { js } from '@base/utils';
-import { CCString, CCInteger, CCFloat, CCBoolean } from '../utils/attribute';
-import { IExposedAttributes } from '../utils/attribute-defines';
+import { CCString, CCInteger, CCBoolean, IExposedAttributes, getFullFormOfProperty, ClassStash, PropertyStash, PropertyStashInternalFlag } from '@base/object';
 import { LegacyPropertyDecorator, getSubDict, BabelPropertyDecoratorDescriptor, Initializer, getOrCreateClassDecoratorStash } from './utils';
-import { getFullFormOfProperty } from '../utils/preprocess-class';
-import { ClassStash, PropertyStash, PropertyStashInternalFlag } from '../class-stash';
 
 const { getClassName, mixin } = js;
 
@@ -192,8 +189,8 @@ function mergePropertyOptions (
     descriptorOrInitializer: Parameters<LegacyPropertyDecorator>[2] | undefined,
 ): void {
     let fullOptions;
-    const isGetset = descriptorOrInitializer && typeof descriptorOrInitializer !== 'function'
-        && (descriptorOrInitializer.get || descriptorOrInitializer.set);
+    const isGetset = !!(descriptorOrInitializer && typeof descriptorOrInitializer !== 'function'
+        && (descriptorOrInitializer.get || descriptorOrInitializer.set));
     if (options) {
         fullOptions = getFullFormOfProperty(options, isGetset);
     }
@@ -208,11 +205,11 @@ function mergePropertyOptions (
                 warnID(3655, propertyKey as string, getClassName(ctor), propertyKey as string, propertyKey as string);
             }
         }
-        if ((descriptorOrInitializer as BabelPropertyDecoratorDescriptor).get) {
-            propertyRecord.get = (descriptorOrInitializer as BabelPropertyDecoratorDescriptor).get;
+        if (descriptorOrInitializer.get) {
+            propertyRecord.get = descriptorOrInitializer.get;
         }
-        if ((descriptorOrInitializer as BabelPropertyDecoratorDescriptor).set) {
-            propertyRecord.set = (descriptorOrInitializer as BabelPropertyDecoratorDescriptor).set;
+        if (descriptorOrInitializer.set) {
+            propertyRecord.set = descriptorOrInitializer.set;
         }
     } else { // Target property is non-accessor
         if (DEV && (propertyRecord.get || propertyRecord.set)) {

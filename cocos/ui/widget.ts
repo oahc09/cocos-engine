@@ -27,9 +27,11 @@ import { ccclass, help, executeInEditMode, executionOrder, menu, requireComponen
 import { EDITOR, DEV, EDITOR_NOT_IN_PREVIEW } from 'internal:constants';
 import { errorID } from '@base/debug';
 import { cclegacy } from '@base/global';
+import { ccenum } from '@base/object';
+import { Size, Vec2, Vec3, Rect } from '@base/math';
 import { Component } from '../scene-graph/component';
 import { UITransform } from '../2d/framework/ui-transform';
-import { Size, Vec2, Vec3, visibleRect, ccenum, Rect } from '../core';
+import { visibleRect } from '../core';
 import { View } from './view';
 import { Scene } from '../scene-graph';
 import { Node } from '../scene-graph/node';

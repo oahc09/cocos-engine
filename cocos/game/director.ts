@@ -32,8 +32,10 @@ import { errorID, error, assertID, warnID } from '@base/debug';
 import { cclegacy } from '@base/global';
 import { js } from '@base/utils';
 import { scalableContainerManager } from '@base/utils/internal';
+import { CCObject, isValid } from '@base/object';
+import { EventTarget } from '@base/event';
 import { SceneAsset } from '../asset/assets/scene-asset';
-import { System, EventTarget, Scheduler, macro, CCObject, isValid } from '../core';
+import { System, Scheduler, macro } from '../core';
 import { input } from '../input';
 import { Root } from '../root';
 import { Node, Scene } from '../scene-graph';
@@ -387,9 +389,11 @@ export class Director extends EventTarget {
             onBeforeLoadScene();
         }
 
-        if (scene.renderScene) {
-            scene.renderScene.activate();
+        if (scene) {
+            scene.renderScene?.activate();
+            scene.globals.activate(scene);
         }
+
         this.emit(Director.EVENT_BEFORE_SCENE_LAUNCH, scene);
 
         // Run an Entity Scene
@@ -535,8 +539,8 @@ export class Director extends EventTarget {
         for (let i = 0; i < renderers.length; i++) {
             const renderer = renderers[i];
             const mesh = renderer.mesh;
-            if (renderer.supportGPUScene()) {
-                meshes.push(mesh!);
+            if (mesh && mesh.supportGPUScene()) {
+                meshes.push(mesh);
             }
         }
 

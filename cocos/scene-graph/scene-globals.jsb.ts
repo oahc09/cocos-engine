@@ -21,12 +21,12 @@
 */
 
 import { cclegacy } from '@base/global';
-import { CCFloat, CCInteger } from '../core/data';
+import { CCFloat, CCInteger } from '@base/object';
 import { TextureCube } from '../asset/assets/texture-cube';
-import { Enum } from '../core/value-types';
+import { Enum } from '@base/object';
 import { Ambient, EnvironmentLightingType, ToneMappingType } from '../render-scene/scene';
 import { Material } from '../asset/assets/material';
-import { Vec2, Vec3, Color, Vec4 } from '../core/math';
+import { Vec2, Vec3, Color, Vec4 } from '@base/math';
 import * as decros from '../native-binding/decorators';
 import type { AmbientInfo as JsbAmbientInfo, SkyboxInfo as JsbSkyboxInfo, FogInfo as JsbFogInfo, ShadowsInfo as JsbShadowsInfo, OctreeInfo as JsbOctreeInfo, SceneGlobals as JsbSceneGlobals, LightProbeInfo as JsbLightProbeInfo, SkinInfo as JsbSkinInfo, PostSettingsInfo as JsbPostSettingsInfo } from './scene-globals';
 

@@ -40,7 +40,7 @@ module.exports = {
         newPac: 'Auto Atlas',
         newLabelAtlas: 'Label Atlas',
         newTerrain: 'Terrain',
-        autoGenerateMaterial: '自动生成材质',
+        autoGenerateMaterial: 'Auto Generate Material',
         'label-atlas': {
             SpriteFrameTip: 'Sprite Frame',
             ItemWidthTip: 'Item Width',
@@ -441,6 +441,15 @@ module.exports = {
                     'When exporting FBX animations, whether prefer to use the time range recorded in FBX file.<br>' +
                     'If one is not preferred, or one is invalid for use, the time range is robustly calculated.<br>' +
                     'Some FBX generators may not export this information.',
+            },
+            preserveMeshInstances: {
+                name: 'Preserve Mesh Instances',
+                title:
+                    'In the FBX model, if a mesh is referenced by multiple nodes (aka, mesh instancing), whether to create only one mesh asset. <br>' +
+                    'If not, each reference will create a mesh asset copy.<br>' +
+                    'This option is by default unchecked but is checked for those models migrated from version prior to V3.9.0,<br>' +
+                    'since in previous versions the instances are always not preserved. <br>' +
+                    'This option is read-only here. To modify this option for special purpose, see manual docs.',
             },
             smartMaterialEnabled: {
                 name: 'Smart Material Conversion',

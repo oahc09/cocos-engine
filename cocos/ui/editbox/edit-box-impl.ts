@@ -25,21 +25,22 @@
  THE SOFTWARE.
 */
 
-import { screenAdapter } from 'pal/screen-adapter';
+import { screenAdapter } from '@pal/screen-adapter';
 import { ccwindow } from '@base/global';
+import { isDescendantElementOf } from '@pal/utils';
+import { BrowserType, OS } from '@pal/system-info';
+import { Mat4, Vec3 } from '@base/math';
 import { BitmapFont } from '../../2d/assets';
 import { director } from '../../game/director';
 import { game } from '../../game';
-import { Mat4, Vec3, visibleRect, sys } from '../../core';
+import { visibleRect, sys } from '../../core';
 import { view } from '../view';
 import { KeyCode } from '../../input/types';
-import { contains } from '../../core/utils/misc';
 import { Label } from '../../2d/components/label';
 import { EditBox } from './edit-box';
 import { tabIndexUtil } from './tabIndexUtil';
 import { InputFlag, InputMode, KeyboardReturnType } from './types';
 import { EditBoxImplBase } from './edit-box-impl-base';
-import { BrowserType, OS } from '../../../pal/system-info/enum-type';
 
 const ccdocument = ccwindow.document;
 
@@ -64,15 +65,15 @@ export class EditBoxImpl extends EditBoxImplBase {
     /**
      * @deprecated since v3.5.0, this is an engine private interface that will be removed in the future.
      */
-    public _inputMode: InputMode = -1;
+    public _inputMode: InputMode = InputMode.ANY;
     /**
      * @deprecated since v3.5.0, this is an engine private interface that will be removed in the future.
      */
-    public _inputFlag: InputFlag = -1;
+    public _inputFlag: InputFlag = InputFlag.DEFAULT;
     /**
      * @deprecated since v3.5.0, this is an engine private interface that will be removed in the future.
      */
-    public _returnType: KeyboardReturnType = -1;
+    public _returnType: KeyboardReturnType = KeyboardReturnType.DEFAULT;
     /**
      * @deprecated since v3.5.0, this is an engine private interface that will be removed in the future.
      */
@@ -160,6 +161,7 @@ export class EditBoxImpl extends EditBoxImplBase {
         }
 
         this._editing = true;
+        // eslint-disable-next-line @typescript-eslint/no-this-alias
         _currentEditBoxImpl = this;
         this._delegate!._editBoxEditingDidBegan();
         this._showDom();
@@ -188,11 +190,11 @@ export class EditBoxImpl extends EditBoxImplBase {
     }
 
     private _removeDomFromGameContainer (): void {
-        const hasElem = contains(game.container, this._edTxt);
+        const hasElem = isDescendantElementOf(game.container, this._edTxt);
         if (hasElem && this._edTxt) {
             game.container!.removeChild(this._edTxt);
         }
-        const hasStyleSheet = contains(ccdocument.head, this._placeholderStyleSheet);
+        const hasStyleSheet = isDescendantElementOf(ccdocument.head, this._placeholderStyleSheet);
         if (hasStyleSheet) {
             ccdocument.head.removeChild(this._placeholderStyleSheet!);
         }

@@ -1,8 +1,9 @@
 import { assertIsTrue } from '@base/debug/internal';
 import { js } from '@base/utils';
+import { attr } from '@base/object';
+import { lerp, quat, v3, Vec3 } from '@base/math';
 import { Pose } from '../../../../cocos/animation/core/pose';
 import { AnimationGraph, PoseGraph } from '../../../../cocos/animation/marionette/asset-creation';
-import { lerp, quat, v3, Vec3 } from '../../../../cocos/core';
 import { Node } from '../../../../cocos/scene-graph';
 import { captureErrors, captureWarns } from '../../../utils/log-capture';
 import { input } from '../../../../cocos/animation/marionette/pose-graph/decorator/input';
@@ -16,7 +17,6 @@ import { PoseGraphNodeEditorMetadata, getPoseGraphNodeEditorMetadata } from '../
 import { composeInputKeyInternally, createPoseGraph, getTheOnlyInputKey, getTheOnlyOutputKey, normalizeNodeInputMetadata, UnimplementedPoseNode, UnimplementedPVNode } from './utils/misc';
 import { PoseNode } from '../../../../cocos/animation/marionette/pose-graph/pose-node';
 import { ccclass } from '../../../../cocos/core/data/class-decorator';
-import { attr } from '../../../../cocos/core/data/utils/attribute';
 
 const { unregisterClass } = js;
 

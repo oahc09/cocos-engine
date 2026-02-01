@@ -24,9 +24,9 @@
 
 import { EDITOR_NOT_IN_PREVIEW } from 'internal:constants';
 import * as debug from '@base/debug';
+import { EventTarget } from '@base/event';
+import { clamp01 } from '@base/math';
 import { AudioPCMDataView, AudioEvent, AudioState, AudioType } from '../type';
-import { EventTarget } from '../../../cocos/core/event';
-import { clamp01 } from '../../../cocos/core';
 import { enqueueOperation, OperationInfo, OperationQueueable } from '../operation-queue';
 import AudioTimer from '../audio-timer';
 import { audioBufferManager } from '../audio-buffer-manager';
