@@ -24,9 +24,8 @@
 
 #include "core/scene-graph/Scene.h"
 #include "core/scene-graph/SceneGlobals.h"
-// #include "core/Director.h"
+#include "core/Director.h"
 #include "core/Root.h"
-//#include "core/scene-graph/NodeActivator.h"
 #include "engine/EngineEvents.h"
 
 namespace cc {
@@ -53,10 +52,10 @@ void Scene::load() {
         //cjh        if (TEST) {
         //            CC_ASSERT(!_activeInHierarchy, 'Should deactivate ActionManager by default');
         //        }
-        // expandNestedPrefabInstanceNode(this); // TODO(xwx): expandNestedPrefabInstanceNode not implement yet
-        // applyTargetOverrides(this); // TODO(xwx): applyTargetOverrides not implement yet
-        //cjh _onBatchCreated is implemented in TS now, so comment the following line
-        //        onBatchCreated(false); //cjh EDITOR && _prefabSyncedInLiveReload);
+        // expandNestedPrefabInstanceNode / applyTargetOverrides: stub until M3-S2 PrefabUtils
+        // expandNestedPrefabInstanceNode(this);
+        // applyTargetOverrides(this);
+        onBatchCreated(false);
         _inited = true;
     }
     _scene = this;
@@ -64,13 +63,12 @@ void Scene::load() {
     walk(Node::setScene);
 }
 
-void Scene::activate(bool active /* = true */) { // NOLINT(misc-unused-parameters)
+void Scene::activate(bool active /* = true */) {
 #if CC_EDITOR
     this->notifyEditorAttached(active);
 #endif
-    //cjh
-    //    Director::getInstance()->getNodeActivator()->activateNode(this, active);
-    //     The test environment does not currently support the renderer
+    Director::getInstance()->getNodeActivator()->activateNode(this, active);
+    // The test environment does not currently support the renderer
     //        if (!TEST) {
     _globals->activate(this);
     if (_renderScene) {

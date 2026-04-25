@@ -74,6 +74,7 @@ elseif(ANDROID OR WINDOWS OR OHOS)
     cc_set_if_undefined(CC_USE_GLES3 ON)
     cc_set_if_undefined(CC_USE_VULKAN OFF)
     cc_set_if_undefined(CC_USE_GLES2 OFF)
+    cc_set_if_undefined(CC_USE_D3D12 OFF)
 elseif(MACOSX OR IOS)
     cc_set_if_undefined(CC_USE_METAL ON)
     cc_set_if_undefined(CC_USE_VULKAN OFF)
@@ -84,6 +85,7 @@ endif()
 set(CC_USE_GLES3 ${CC_USE_GLES3} CACHE INTERNAL "")
 set(CC_USE_GLES2 ${CC_USE_GLES2} CACHE INTERNAL "")
 set(CC_USE_VULKAN ${CC_USE_VULKAN} CACHE INTERNAL "")
+set(CC_USE_D3D12 ${CC_USE_D3D12} CACHE INTERNAL "")
 set(CC_USE_METAL ${CC_USE_METAL}  CACHE INTERNAL "")
 
 if(USE_SERVER_MODE)
@@ -91,6 +93,7 @@ if(USE_SERVER_MODE)
     set(CC_USE_METAL OFF)
     set(CC_USE_GLES3 OFF)
     set(CC_USE_GLES2 OFF)
+    set(CC_USE_D3D12 OFF)
     add_definitions(-DCC_SERVER_MODE)
 endif()
 
@@ -214,6 +217,7 @@ cc_inspect_values(
     CC_USE_GLES3
     CC_USE_GLES2
     CC_USE_VULKAN
+    CC_USE_D3D12
     CC_DEBUG_FORCE
     USE_SE_V8
     USE_SE_JSVM
@@ -1971,6 +1975,41 @@ if(CC_USE_VULKAN)
     endif()
 endif()
 
+if(CC_USE_D3D12)
+    cocos_source_files(
+        cocos/renderer/gfx-d3d12/D3D12Buffer.h
+        cocos/renderer/gfx-d3d12/D3D12Buffer.cpp
+        cocos/renderer/gfx-d3d12/D3D12CommandBuffer.h
+        cocos/renderer/gfx-d3d12/D3D12CommandBuffer.cpp
+        cocos/renderer/gfx-d3d12/D3D12DescriptorSet.h
+        cocos/renderer/gfx-d3d12/D3D12DescriptorSet.cpp
+        cocos/renderer/gfx-d3d12/D3D12DescriptorSetLayout.h
+        cocos/renderer/gfx-d3d12/D3D12DescriptorSetLayout.cpp
+        cocos/renderer/gfx-d3d12/D3D12Device.h
+        cocos/renderer/gfx-d3d12/D3D12Device.cpp
+        cocos/renderer/gfx-d3d12/D3D12Framebuffer.h
+        cocos/renderer/gfx-d3d12/D3D12Framebuffer.cpp
+        cocos/renderer/gfx-d3d12/D3D12InputAssembler.h
+        cocos/renderer/gfx-d3d12/D3D12InputAssembler.cpp
+        cocos/renderer/gfx-d3d12/D3D12PipelineLayout.h
+        cocos/renderer/gfx-d3d12/D3D12PipelineLayout.cpp
+        cocos/renderer/gfx-d3d12/D3D12PipelineState.h
+        cocos/renderer/gfx-d3d12/D3D12PipelineState.cpp
+        cocos/renderer/gfx-d3d12/D3D12QueryPool.h
+        cocos/renderer/gfx-d3d12/D3D12QueryPool.cpp
+        cocos/renderer/gfx-d3d12/D3D12Queue.h
+        cocos/renderer/gfx-d3d12/D3D12Queue.cpp
+        cocos/renderer/gfx-d3d12/D3D12RenderPass.h
+        cocos/renderer/gfx-d3d12/D3D12RenderPass.cpp
+        cocos/renderer/gfx-d3d12/D3D12Shader.h
+        cocos/renderer/gfx-d3d12/D3D12Shader.cpp
+        cocos/renderer/gfx-d3d12/D3D12Swapchain.h
+        cocos/renderer/gfx-d3d12/D3D12Swapchain.cpp
+        cocos/renderer/gfx-d3d12/D3D12Texture.h
+        cocos/renderer/gfx-d3d12/D3D12Texture.cpp
+    )
+endif()
+
 if(NX)
     include(${CMAKE_CURRENT_LIST_DIR}/platform-nx/source.cmake)
 endif()
@@ -2184,6 +2223,25 @@ cocos_source_files(
     cocos/core/assets/BitmapFont.cpp
     cocos/core/assets/Font.h
     cocos/core/assets/Font.cpp
+    cocos/core/assets/AssetRefManager.h
+    cocos/core/assets/AssetRefManager.cpp
+
+    # serialization (C++ migration)
+    cocos/core/serialization/TypeRegistry.h
+    cocos/core/serialization/TypeRegistry.cpp
+
+    # components (C++ migration)
+    cocos/core/components/BuiltinTypeIds.h
+    cocos/core/components/ComponentMacros.h
+    cocos/core/components/Component.h
+    cocos/core/components/Component.cpp
+    cocos/core/components/ScriptComponent.h
+    cocos/core/components/ScriptComponent.cpp
+    cocos/core/components/ThreeBucketArray.h
+    cocos/core/components/ComponentScheduler.h
+    cocos/core/components/ComponentScheduler.cpp
+    cocos/core/components/NodeActivator.h
+    cocos/core/components/NodeActivator.cpp
 
     # builtin
     cocos/core/builtin/BuiltinResMgr.cpp
@@ -2192,6 +2250,9 @@ cocos_source_files(
     cocos/core/data/Object.cpp
     cocos/core/data/Object.h
     cocos/core/data/JSBNativeDataHolder.h
+    cocos/core/Director.h
+    cocos/core/Director.cpp
+
     cocos/core/scene-graph/Layers.h
     cocos/core/scene-graph/Node.cpp
     cocos/core/scene-graph/Node.h
@@ -2862,6 +2923,8 @@ cocos_source_files(
             cocos/bindings/manual/jsb_scene_manual.h
             cocos/bindings/manual/jsb_assets_manual.cpp
             cocos/bindings/manual/jsb_assets_manual.h
+            cocos/bindings/manual/jsb_AssetRefManager.cpp
+            cocos/bindings/manual/jsb_AssetRefManager.h
             cocos/bindings/manual/jsb_network_manual.cpp
             cocos/bindings/manual/jsb_network_manual.h
             cocos/bindings/manual/jsb_xmlhttprequest.cpp
@@ -3374,6 +3437,10 @@ if(CMAKE_GENERATOR STREQUAL "Xcode")
     add_dependencies(${ENGINE_NAME} genbindings)
 endif()
 
+# ── Micro-benchmarks (M1-S3, G-15) ──────────────────────────────────────
+if(EXISTS ${CMAKE_CURRENT_LIST_DIR}/tests/benchmarks/CMakeLists.txt)
+    add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/tests/benchmarks ${CMAKE_CURRENT_BINARY_DIR}/tests/benchmarks)
+endif()
 
 if(USE_MODULES)
     target_link_libraries(${ENGINE_NAME} PUBLIC
@@ -3529,6 +3596,10 @@ if(CC_USE_VULKAN)
     endif()
 endif()
 
+if(WINDOWS AND CC_USE_D3D12)
+    target_link_libraries(${ENGINE_NAME} PUBLIC d3d12 dxgi dxguid)
+endif()
+
 if(CC_USE_METAL)
     target_compile_definitions(${ENGINE_NAME} PUBLIC CC_USE_METAL)
 endif()
@@ -3539,6 +3610,10 @@ endif()
 
 if(CC_USE_GLES2)
     target_compile_definitions(${ENGINE_NAME} PUBLIC CC_USE_GLES2)
+endif()
+
+if(CC_USE_D3D12)
+    target_compile_definitions(${ENGINE_NAME} PUBLIC CC_USE_D3D12)
 endif()
 
 target_include_directories(${ENGINE_NAME}

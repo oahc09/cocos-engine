@@ -27,7 +27,7 @@
 #include "base/Ptr.h"
 #include "base/std/any.h"
 #include "bindings/utils/BindingUtils.h"
-// #include "core/components/Component.h"
+#include "core/components/Component.h"
 // #include "core/event/Event.h"
 #include "core/data/Object.h"
 #include "core/event/EventTarget.h"
@@ -593,6 +593,12 @@ public:
     //    friend void componentCorrupted(Node *node, Component *comp, uint32_t index);
     // ------------------  Component code end -----------------------------
 
+    // ---- Component management (C++ migration, M3-S1a) ----
+    Component *addComponent(Component *comp);
+    void       removeComponent(Component *comp);
+    inline const ccstd::vector<Component *> &getComponents() const { return _components; }
+    // ---- Component management end ----
+
     // For deserialization
     //    void     _setChild(index_t i, Node *child);
     //    Node *   _getChild(index_t i);
@@ -686,6 +692,7 @@ private:
     IntrusivePtr<UserData> _userData;
 
     ccstd::vector<IntrusivePtr<Node>> _children;
+    ccstd::vector<Component *> _components; // C++ migration M3-S1a
     bindings::NativeMemorySharedToScriptActor _sharedMemoryActor;
     // local transform
     Vec3 _localPosition{Vec3::ZERO};

@@ -170,6 +170,9 @@ using namespace cc;
 %ignore cc::Node::getWorldRT;
 %ignore cc::Node::isTransformDirty;
 %ignore cc::Node::_getSharedArrayBufferObject;
+%ignore cc::Node::addComponent;
+%ignore cc::Node::removeComponent;
+%ignore cc::Node::getComponents;
 
 %ignore cc::scene::Camera::screenPointToRay;
 %ignore cc::scene::Camera::screenToWorld;

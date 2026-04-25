@@ -91,6 +91,7 @@ export enum API {
     GLES3,
     METAL,
     VULKAN,
+    D3D12,
     NVN,
     WEBGL,
     WEBGL2,

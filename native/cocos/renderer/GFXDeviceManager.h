@@ -44,6 +44,10 @@
     #include "gfx-vulkan/VKDevice.h"
 #endif
 
+#ifdef CC_USE_D3D12
+    #include "gfx-d3d12/D3D12Device.h"
+#endif
+
 #ifdef CC_USE_METAL
     #include "gfx-metal/MTLDevice.h"
 #endif
@@ -90,6 +94,10 @@ public:
         if (!skipVulkan && tryCreate<CCVKDevice>(info, &device)) return device;
 #endif
 
+#ifdef CC_USE_D3D12
+        if (tryCreate<CCD3D12Device>(info, &device)) return device;
+#endif
+
 #ifdef CC_USE_METAL
         if (tryCreate<CCMTLDevice>(info, &device)) return device;
 #endif
@@ -127,6 +135,8 @@ public:
         gfx = "NVN";
 #elif defined(CC_USE_VULKAN)
         gfx = "Vulkan";
+#elif defined(CC_USE_D3D12)
+        gfx = "D3D12";
 #elif defined(CC_USE_METAL)
         gfx = "Metal";
 #elif defined(CC_USE_GLES3)

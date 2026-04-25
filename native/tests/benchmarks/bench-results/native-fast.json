@@ -1,0 +1,35 @@
+﻿{
+  "timestamp": "2026-04-25T12:03:26",
+  "platform": "Windows/x64",
+  "build_type": "Debug",
+  "compiler": "MSVC 19.42 (VS 2022)",
+  "type_registry": {
+    "registerType_10000_us": 21079,
+    "getTypeInfo_100000_us": 11539,
+    "getTypeInfo_ns_per_op": 115.39,
+    "getClassIdByName_100000_us": 62046,
+    "hasType_100000_us": 11014,
+    "registerScriptType_1000_us": 1950,
+    "create_trivial_10000_us": 1099
+  },
+  "ref_manager": {
+    "addRef_10000_us": 72,
+    "addRef_ns_per_op": 7.20,
+    "decRef_10000_us": 74,
+    "decRef_ns_per_op": 7.40,
+    "getRefCount_100000_us": 299,
+    "getRefCount_ns_per_op": 2.99,
+    "addRefBatch_100x1000_us": 629,
+    "decRefBatch_100x1000_us": 636,
+    "addRef_no_callback_10000_us": 75,
+    "addRef_with_callback_10000_us": 181,
+    "addRef_null_100000_us": 118,
+    "raw_addAssetRef_100000_us": 196
+  },
+  "gate_check": {
+    "name": "getTypeInfo query < 1us/op",
+    "actual_ns_per_op": 115.39,
+    "threshold_ns_per_op": 1000,
+    "passed": true
+  }
+}

@@ -308,6 +308,54 @@ declare namespace jsb {
         }
     }
 
+    // ─── AssetRefManager (C++ migration M1-S2) ───────────────────────────────
+    /**
+     * @en Unified reference counting manager for assets.
+     * C++ side is the authoritative source; JS side syncs via callback.
+     * @zh 统一资产管理器，C++ 侧为引用计数权威源，JS 侧通过回调同步。
+     */
+    export class AssetRefManager {
+        private constructor();
+        /**
+         * @en Get the singleton instance.
+         * @zh 获取单例实例。
+         */
+        static getInstance(): AssetRefManager;
+        /**
+         * @en Add reference count for an asset.
+         * @zh 增加资产的引用计数。
+         */
+        addRef(asset: Asset): void;
+        /**
+         * @en Decrease reference count for an asset.
+         * @zh 减少资产的引用计数。
+         * @param autoRelease Whether to auto-release when ref count reaches 0 (default: true)
+         */
+        decRef(asset: Asset, autoRelease?: boolean): void;
+        /**
+         * @en Get the reference count of an asset.
+         * @zh 获取资产的引用计数。
+         */
+        getRefCount(asset: Asset): number;
+        /**
+         * @en Batch add reference count for multiple assets.
+         * @zh 批量增加资产的引用计数。
+         */
+        addRefBatch(assets: Asset[]): void;
+        /**
+         * @en Batch decrease reference count for multiple assets.
+         * @zh 批量减少资产的引用计数。
+         */
+        decRefBatch(assets: Asset[], autoRelease?: boolean): void;
+        /**
+         * @en Set callback invoked when any asset's ref count changes.
+         * Pass null/undefined to clear the callback.
+         * @zh 设置引用计数变化回调。传入 null/undefined 清除回调。
+         * @param callback (asset, oldCount, newCount) => void
+         */
+        setRefCountChangedCallback(callback: ((asset: Asset, oldCount: number, newCount: number) => void) | null): void;
+    }
+
     export class AssetsManager {
         constructor(manifestUrl: string, storagePath: string, versionCompareHandle?: (versionA: string, versionB: string) => number);
         static create(manifestUrl: string, storagePath: string): AssetsManager;

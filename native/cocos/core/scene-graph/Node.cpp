@@ -23,7 +23,9 @@
 ****************************************************************************/
 
 #include "core/scene-graph/Node.h"
+#include <algorithm>
 #include "base/StringUtil.h"
+#include "core/Director.h"
 #include "core/data/Object.h"
 #include "core/memop/CachedArray.h"
 #include "core/platform/Debug.h"
@@ -144,8 +146,7 @@ void Node::onHierarchyChangedBase(Node *oldParent) { // NOLINT(misc-unused-param
 
     bool shouldActiveNow = isActive() && !!(newParent && newParent->isActiveInHierarchy());
     if (isActiveInHierarchy() != shouldActiveNow) {
-        // Director::getInstance()->getNodeActivator()->activateNode(this, shouldActiveNow); // TODO(xwx): use TS temporarily
-        emit<ActiveNode>(shouldActiveNow);
+        Director::getInstance()->getNodeActivator()->activateNode(this, shouldActiveNow);
     }
 }
 
@@ -157,8 +158,7 @@ void Node::setActive(bool isActive) {
         if (parent) {
             bool couldActiveInScene = parent->isActiveInHierarchy();
             if (couldActiveInScene) {
-                // Director::getInstance()->getNodeActivator()->activateNode(this, isActive); // TODO(xwx): use TS temporarily
-                emit<ActiveNode>(isActive);
+                Director::getInstance()->getNodeActivator()->activateNode(this, isActive);
             }
         }
     }
@@ -233,23 +233,24 @@ void Node::walk(const WalkCallback &preFunc, const WalkCallback &postFunc) { // 
     }
 }
 
-// Component *Node::addComponent(Component *comp) {
-//     comp->_node = this; // cjh TODO: shared_ptr
-//     _components.emplace_back(comp);
-//
-//     if (isActiveInHierarchy()) {
-//         NodeActivator::activateComp(comp);
-//     }
-//
-//     return comp;
-// }
-//
-// void Node::removeComponent(Component *comp) {
-//     auto iteComp = std::find(_components.begin(), _components.end(), comp);
-//     if (iteComp != _components.end()) {
-//         _components.erase(iteComp);
-//     }
-// }
+Component *Node::addComponent(Component *comp) {
+    comp->_node = this;
+    _components.emplace_back(comp);
+
+    if (isActiveInHierarchy()) {
+        // Activate the component immediately if node is active in hierarchy
+        Director::getInstance()->getNodeActivator()->activateComponent(comp, true);
+    }
+
+    return comp;
+}
+
+void Node::removeComponent(Component *comp) {
+    auto iteComp = std::find(_components.begin(), _components.end(), comp);
+    if (iteComp != _components.end()) {
+        _components.erase(iteComp);
+    }
+}
 
 bool Node::onPreDestroyBase() {
     Flags destroyingFlag = Flags::DESTROYING;

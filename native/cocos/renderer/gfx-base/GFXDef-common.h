@@ -152,6 +152,7 @@ enum class API : uint32_t {
     GLES3,
     METAL,
     VULKAN,
+    D3D12,
     NVN,
     WEBGL,
     WEBGL2,

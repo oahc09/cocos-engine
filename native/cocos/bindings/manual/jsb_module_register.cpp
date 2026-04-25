@@ -38,6 +38,7 @@
 #include "cocos/bindings/dop/jsb_dop.h"
 #include "cocos/bindings/jswrapper/SeApi.h"
 #include "cocos/bindings/manual/jsb_assets_manual.h"
+#include "cocos/bindings/manual/jsb_AssetRefManager.h"
 #include "cocos/bindings/manual/jsb_cocos_manual.h"
 #include "cocos/bindings/manual/jsb_conversions.h"
 #include "cocos/bindings/manual/jsb_geometry_manual.h"
@@ -167,6 +168,7 @@ bool jsb_register_all_modules() {
     se->addRegisterCallback(register_all_dop_bindings);
     se->addRegisterCallback(register_all_assets);
     se->addRegisterCallback(register_all_assets_manual);
+    se->addRegisterCallback(register_all_AssetRefManager);
     // pipeline depend on asset
     se->addRegisterCallback(register_all_pipeline);
     se->addRegisterCallback(register_all_pipeline_manual);
