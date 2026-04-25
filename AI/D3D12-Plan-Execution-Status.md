@@ -176,3 +176,145 @@
   - 进程退出码 `-1073741819`（访问异常），当前为“可启动并进入 D3D12 渲染循环，但稳定性未达标”。
 - 下一步动作：
   - 优先排查 D3D12 路径访问异常（建议先关 debug layer 对比 + 最小化 present 前后对象生命周期检查）。
+
+## 2026-04-25 12:50:30 刷新快照（崩溃定位：排除 present/fence）
+- 本轮动作：
+  - 为 D3D12Device.cpp / D3D12Swapchain.cpp 增加文件级 trace（d3d12_trace.txt）并对 present 增加空句柄防护。
+  - 降低每帧日志频率，排除日志风暴干扰。
+- 复现结果：
+  - WebGPUDemo.exe 仍以 -1073741819 (0xC0000005) 退出。
+- 关键证据：
+  - trace 起始命中：[Device] doInit begin/done、[Swapchain] doInit begin/done。
+  - 崩溃前持续命中：[Device] present enter -> [Device] present leave。
+  - 未见 present 内 swapchain ready 分支的细粒度 trace 异常中断。
+- 当前结论：
+  - 本轮已基本排除“present/fence 生命周期路径直接触发 AV”的假设。
+  - 下一步转向资源对象与上层渲染调用链（D3D12Texture/Buffer/DescriptorSet/Pipeline* 空实现触发的后续非法访问）。
+
+## 2026-04-25 13:47:00 刷新快照（崩溃根因命中 + D3D12 运行复验）
+- 根因命中：
+  - DescriptorSetAgent::bindTexture 存在空指针解引用风险：static_cast<TextureAgent *>(texture)->getActor() 未判空。
+  - 证据链：ShadowFlow.cpp 存在 indTexture(..., nullptr) 调用，且崩溃 RVA 曾落在 DescriptorSetAgent::bindTexture 邻域。
+- 已实施修复：
+  - 文件：
+ative/cocos/renderer/gfx-agent/DescriptorSetAgent.cpp
+  - 变更：indTexture / indBuffer 增加 actor 判空透传（空资源时向 actor 侧传 
+ullptr）。
+- D3D12 真机复验：
+  - 构建：D:/Work/CocosProjects/WebGPUDemo/build/windows/proj，cmake --build . --config Release --target WebGPUDemo 成功。
+  - 配置证据：CMakeCache.txt 中 CC_USE_D3D12:INTERNAL=ON、CC_USE_VULKAN:INTERNAL=OFF。
+  - 运行证据：WebGPUDemo.exe 60 秒稳定检查 ALIVE_AFTER_60S=1（期间未复现 -1073741819）。
+  - trace 证据：d3d12_trace.txt 持续出现 present enter/leave，与进程存活一致。
+- 当前结论：
+  - 本轮已解除“present 前后 descriptor bind 空指针”崩溃路径，-1073741819 在当前复现窗口内未再出现。
+- 下一步动作：
+  - 增加 5~10 分钟 soak 测试与退出路径（主动关闭窗口）验证，确认无延迟崩溃。
+
+## 2026-04-25 19:52:03 刷新快照（5分钟 Soak 结果）
+- 验证动作：
+  - 启动 Release/WebGPUDemo.exe（D3D12 ON, Vulkan OFF）并持续运行 300 秒。
+- 结果：
+  - 输出 ALIVE_AFTER_300S=1，进程在 5 分钟窗口内持续存活。
+  - 为避免占用，测试后主动 Stop-Process 结束。
+- 运行证据：
+  - d3d12_trace.txt 末尾持续为 [Device] present enter/leave 成对出现。
+- 结论更新：
+  - -1073741819 在当前短中时窗口（60s + 300s）均未复现。
+
+## 2026-04-25 21:04:34 刷新快照（退出路径验证 + 诊断代码清理完成）
+- 代码清理：
+  - 已移除 gfx-d3d12 临时诊断代码（trace 文件写入、异常过滤器、一次性调试日志）。
+  - 保留必要防护：DescriptorSetAgent::bindTexture/bindBuffer 空指针 actor 透传保护。
+- 影响文件：
+  - 
+ative/cocos/renderer/gfx-d3d12/D3D12Device.cpp
+  - 
+ative/cocos/renderer/gfx-d3d12/D3D12Swapchain.cpp
+  - 
+ative/cocos/renderer/gfx-d3d12/D3D12Buffer.cpp
+  - 
+ative/cocos/renderer/gfx-d3d12/D3D12Texture.cpp
+  - 
+ative/cocos/renderer/gfx-d3d12/D3D12CommandBuffer.cpp
+- 编译验证：
+  - cmake --build . --config Release --target WebGPUDemo 成功。
+- 退出路径验证（窗口关闭消息）：
+  - CLOSE_MAIN_WINDOW_SENT=True
+  - EXITED_WITHIN_60S=True
+  - EXIT_CODE=0
+  - ALIVE_20S_AFTER_EXIT=0（无延迟崩溃残留进程）
+- 环境清理：
+  - 已删除外部工程旧诊断文件 d3d12_trace.txt。
+- 结论：
+  - 当前 D3D12 路径在“运行 + 正常关闭”场景未复现 -1073741819。
+
+## 2026-04-25 21:07:17 刷新快照（整体任务状态）
+- 当前阶段：
+  - D3D12 Windows 后端 PoC 已从“可行性评估/骨架接入”推进到“外部工程 D3D12 ON 运行验证通过”。
+- 已完成：
+  - `native/CMakeLists.txt` 已接入 `gfx-d3d12` 源文件，外部工程可链接生成 `WebGPUDemo.exe`。
+  - D3D12 Device/Swapchain 已具备真实 swapchain、RTV、backbuffer、clear、present、fence 等最小运行链路。
+  - `DescriptorSetAgent::bindTexture/bindBuffer` 已修复空指针 actor 解引用风险。
+  - 临时 trace、异常过滤器、诊断日志已清理，`rg` 未再命中 `d3d12_trace` / `traceD3D12` / `UnhandledExceptionFilter`。
+- 验证状态：
+  - 外部工程配置：`CC_USE_D3D12=ON`、`CC_USE_VULKAN=OFF`。
+  - 构建验证：`cmake --build . --config Release --target WebGPUDemo` 成功。
+  - 运行验证：60 秒稳定检查通过，未复现 `-1073741819`。
+  - 长稳验证：300 秒 soak 通过，进程存活。
+  - 退出验证：窗口关闭消息退出成功，`ExitCode=0`，退出 20 秒后无残留进程。
+- 当前阻塞：
+  - D3D12 当前验证链路无硬阻塞。
+- 剩余风险：
+  - 当前工作区存在多项非 D3D12 相关并行改动，未纳入本轮 D3D12 判断。
+  - D3D12 仍是最小运行链路，完整资源上传、descriptor heap、pipeline state、draw 调度还需要后续阶段实现。
+- 下一步：
+  - 提交前建议做一次 scoped diff review，确认 D3D12 改动与其它并行迁移改动边界清晰。
+  - 后续阶段可进入 D3D12 texture/buffer 资源上传与 descriptor heap 实现。
+
+## 2026-04-25 21:25:00 刷新快照（资源层集成推进）
+- 本轮目标：
+  - 将 D3D12 Buffer/Texture 从空实现推进到真实 D3D12 resource 创建路径，为后续 descriptor/pipeline/draw 链路提供基础句柄。
+- 已完成：
+  - `D3D12Buffer.h/.cpp`
+    - 增加 pImpl，避免在公开头暴露 Win32/D3D12 头文件。
+    - 普通 buffer 创建 `ID3D12Resource` upload heap。
+    - `update()` 通过 `Map/Unmap` 写入 CPU 数据。
+    - buffer view 复用父 buffer resource，并记录 offset。
+    - 暴露 resource handle、GPU virtual address、resource offset。
+  - `D3D12Texture.h/.cpp`
+    - 增加 pImpl 与 resource handle。
+    - 普通 texture 创建 `ID3D12Resource` default heap。
+    - 支持常用 Cocos `Format` 到 `DXGI_FORMAT` 的基础映射。
+    - texture view 复用父 texture resource。
+    - swapchain texture 保持由 swapchain/backbuffer 管理，不重复创建 resource。
+- 验证状态：
+  - 构建：`cmake --build . --config Release --target WebGPUDemo` 成功。
+  - D3D12 运行：`ALIVE_AFTER_60S=1`。
+  - 正常退出：`CLOSE_MAIN_WINDOW_SENT=True`、`EXITED_WITHIN_60S=True`、`EXIT_CODE=0`。
+- 当前结论：
+  - Buffer/Texture resource 层已具备最小真实 D3D12 对象，不再是纯 stub。
+- 剩余缺口：
+  - texture 数据上传尚未接入 `copyBuffersToTexture`。
+  - descriptor heap/root signature 尚未消费 Buffer/Texture resource handle。
+  - pipeline state 与 draw 调度仍未接入真实 D3D12 命令。
+
+## 2026-04-25 21:34:30 刷新快照（Texture 上传路径接入）
+- 本轮新增：
+  - `D3D12Device::copyBuffersToTexture` 已接入最小即时上传路径。
+  - 每个 `BufferTextureCopy` region 创建临时 upload buffer。
+  - 使用 `ID3D12Device::GetCopyableFootprints` 生成 D3D12 对齐 footprint。
+  - CPU 数据按 row pitch / slice pitch 拷贝进 upload buffer。
+  - 使用 `CopyTextureRegion` 上传到 `D3D12Texture` resource。
+  - 上传前后执行 `COMMON -> COPY_DEST -> COMMON` barrier，并通过 fence 等待完成。
+  - 对空源 buffer 增加跳过防护。
+- 验证状态：
+  - 构建：`cmake --build . --config Release --target WebGPUDemo` 成功。
+  - 运行：WebGPUDemo D3D12 运行 60 秒存活。
+  - 退出：窗口关闭消息退出成功，`ExitCode=0`。
+  - 空源 buffer 防护补丁后追加 smoke：D3D12 运行 30 秒存活，窗口关闭退出 `ExitCode=0`。
+- 当前结论：
+  - D3D12 已具备最小 Buffer 创建/更新、Texture 创建、CPU buffer 到 texture 上传能力。
+- 剩余缺口：
+  - 上传路径当前为即时同步实现，后续需要接入统一 command queue/transport 与资源状态跟踪。
+  - descriptor heap/root signature 仍未消费已创建的 buffer/texture resource。
+  - pipeline state 与 draw 调度仍未接入真实 D3D12 命令。

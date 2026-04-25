@@ -1,11 +1,11 @@
 /****************************************************************************
- Copyright (c) 2020-2023 Xiamen Yaji Software Co., Ltd.
+ Copyright (c) 2026 Xiamen Yaji Software Co., Ltd.
 
  http://www.cocos.com
 
  Permission is hereby granted, free of charge, to any person obtaining a copy
  of this software and associated documentation files (the "Software"), to deal
- in the Software without restriction, including without limitation the rights to
+ in the Software without restriction, including without limitation the rights
  use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
  of the Software, and to permit persons to whom the Software is furnished to do so,
  subject to the following conditions:
@@ -24,32 +24,48 @@
 
 #pragma once
 
-#include "gfx-base/GFXTexture.h"
-#include <memory>
+#include "base/Ptr.h"
+#include "base/Macros.h"
 
 namespace cc {
-namespace gfx {
 
-class CC_DLL CCD3D12Texture final : public Texture {
-public:
-    CCD3D12Texture();
-    ~CCD3D12Texture() override;
+class Prefab;
+class Node;
 
-    void *getD3D12ResourceHandle() const;
+/**
+ * @en Information about a prefab instance within a node tree.
+ * @zh 节点树中预制件实例的信息。
+ */
+struct PrefabInfo {
+    /**
+     * @en The prefab asset reference.
+     * @zh 预制件资源引用。
+     */
+    IntrusivePtr<Prefab> asset;
 
-protected:
-    void doInit(const TextureInfo &info) override;
-    void doInit(const TextureViewInfo &info) override;
-    void doInit(const SwapchainTextureInfo &info) override;
-    void doDestroy() override;
-    void doResize(uint32_t width, uint32_t height, uint32_t size) override;
+    /**
+     * @en The file ID of this prefab instance.
+     * @zh 此预制件实例的文件 ID。
+     */
+    ccstd::string fileId;
 
-private:
-    bool createResource(uint32_t width, uint32_t height);
+    /**
+     * @en The info ID of this prefab instance.
+     * @zh 此预制件实例的信息 ID。
+     */
+    uint32_t infoId{0};
 
-    struct Impl;
-    std::unique_ptr<Impl> _impl;
+    /**
+     * @en The root node of the prefab instance.
+     * @zh 预制件实例的根节点。
+     */
+    Node *root{nullptr};
+
+    /**
+     * @en Whether this prefab instance has been deleted.
+     * @zh 此预制件实例是否已被删除。
+     */
+    bool isDeleted{false};
 };
 
-} // namespace gfx
 } // namespace cc

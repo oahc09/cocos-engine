@@ -1,0 +1,38 @@
+{
+  "name": "cpp-migration-batch3",
+  "leadAgentId": "1aa6cae967544ab8827060ab9419d7db",
+  "workspacePath": "d:/cocos_custome/cocos-engine",
+  "createdAt": "2026-04-25T05:34:03.408Z",
+  "options": {
+    "workspacePath": "d:/cocos_custome/cocos-engine",
+    "isAutoTeam": false
+  },
+  "members": [
+    {
+      "memberId": "team-lead@cpp-migration-batch3",
+      "name": "team-lead",
+      "role": "Team Lead - coordinates the team and interacts with the user"
+    },
+    {
+      "memberId": "m5-s2-agent@cpp-migration-batch3",
+      "name": "m5-s2-agent",
+      "role": "M5-S2 Engine tick integration"
+    },
+    {
+      "memberId": "m6-s2-agent@cpp-migration-batch3",
+      "name": "m6-s2-agent",
+      "role": "M6-S2 ScriptBridge JSB binding"
+    },
+    {
+      "memberId": "m7-s1a-agent@cpp-migration-batch3",
+      "name": "m7-s1a-agent",
+      "role": "M7-S1a NativePipeline impl"
+    },
+    {
+      "memberId": "m7-s1bc-agent@cpp-migration-batch3",
+      "name": "m7-s1bc-agent",
+      "role": "M7-S1b+c Bundle+DependUtil"
+    }
+  ],
+  "isAutoTeam": false
+}

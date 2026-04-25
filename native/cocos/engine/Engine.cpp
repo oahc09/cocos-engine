@@ -30,6 +30,7 @@
 #include "base/DeferredReleasePool.h"
 #include "base/Macros.h"
 #include "bindings/jswrapper/SeApi.h"
+#include "core/Director.h"
 #include "core/builtin/BuiltinResMgr.h"
 #include "engine/EngineEvents.h"
 #include "platform/BasePlatform.h"
@@ -312,6 +313,7 @@ void Engine::tick() {
         prevTime = std::chrono::steady_clock::now();
         if (_xr) _xr->beginRenderFrame();
         _scheduler->update(dt);
+        Director::getInstance()->tick(dt);
 
         se::ScriptEngine::getInstance()->handlePromiseExceptions();
         events::Tick::broadcast(dt);

@@ -171,3 +171,90 @@
 - 当前状态结论：
   - D3D12 运行链路验证通过（已真实进入 D3D12 渲染与 present）。
   - 存在稳定性问题：进程退出码 `-1073741819`，需下一轮专项排查。
+
+## 2026-04-25 12:50:30 追加快照（监工：present/fence 排除）
+- 新增定位手段：
+  - d3d12_trace.txt 跟踪 Device::doInit、Swapchain::doInit、Device::present 关键点。
+- 结果摘要：
+  - init 与 swapchain 创建均完成。
+  - 崩溃前 present enter/leave 持续完整出现，未卡在 Clear/Execute/Present/FenceWait。
+  - 进程仍异常退出  xC0000005。
+- 结论：
+  - 排除首要假设（present/fence 直接崩溃）。
+  - 下轮聚焦资源对象空实现引发的后续访问异常。
+
+## 2026-04-25 13:47:00 追加快照（监工：空指针崩溃修复已验证）
+- 监工定位：
+  - DescriptorSetAgent::bindTexture 对 	exture==nullptr 无防护，命中高概率 AV 根因。
+  - 同链路 indBuffer 同样补齐空指针防护，避免后续同类问题。
+- 监工执行：
+  - 已修改 
+ative/cocos/renderer/gfx-agent/DescriptorSetAgent.cpp。
+  - 外部工程重新构建并运行 60 秒稳定性检查，进程存活后主动停止。
+- 验证输出：
+  - 构建成功：WebGPUDemo.exe。
+  - 运行检查：ALIVE_AFTER_60S=1，未见 -1073741819。
+  - D3D12 配置：CC_USE_D3D12=ON、CC_USE_VULKAN=OFF（来自 CMakeCache.txt）。
+- 状态判定：
+  - 任务从“崩溃复现中”推进为“修复后稳定运行（短时窗口）”。
+  - 无子任务停滞；当前进入长稳与退出路径复验阶段。
+
+## 2026-04-25 19:52:03 追加快照（监工：长稳验证通过）
+- 长稳测试：
+  - 5 分钟 soak 已执行，进程存活，未见崩溃退出。
+- 当前任务状态：
+  - 主阻塞从“崩溃定位”切换为“清理临时诊断日志并补最终回归”。
+- 下一步：
+  - 验证主动退出路径（用户手动关闭窗口）与多次启停一致性。
+
+## 2026-04-25 21:04:34 追加快照（监工：手动关闭窗口回归通过）
+- 本轮动作：清理临时 trace/诊断代码并重建 WebGPUDemo。
+- 回归结果：
+  - 发送窗口关闭消息后进程正常退出，ExitCode=0。
+  - 退出 20 秒后无残留进程，未见延迟崩溃。
+- 状态更新：
+  - 崩溃定位/修复阶段完成；当前进入常规回归与提交准备阶段。
+
+## 2026-04-25 21:07:17 追加快照（监工：整体任务状态刷新）
+- 子任务状态：
+  - 子 agent 无新增回包依赖；本阶段关键验证由监工本地完成并记录。
+  - 当前无停滞任务，D3D12 崩溃定位/修复/验证链路已闭环。
+- 当前有效成果：
+  - D3D12 外部工程配置保持 `CC_USE_D3D12=ON`、`CC_USE_VULKAN=OFF`。
+  - 构建、60 秒运行、300 秒 soak、窗口关闭退出均已通过。
+  - 临时 trace/异常过滤器/调试日志已清理，仅保留空指针防护与最小 D3D12 运行链路。
+- 风险记录：
+  - 工作区仍有非 D3D12 相关并行改动，提交或合并前需要分清责任边界。
+  - 后续完整 D3D12 后端仍需继续实现资源上传、descriptor heap、pipeline/draw 等能力。
+- 下一步动作：
+  - 进入提交前 scoped diff review。
+  - 规划下一阶段 D3D12 resource/descriptor/pipeline 任务拆解。
+
+## 2026-04-25 21:25:00 追加快照（监工：资源层集成推进）
+- 本轮执行：
+  - 监工本地推进 `D3D12Buffer` 与 `D3D12Texture` 的真实 D3D12 resource 集成。
+- 完成内容：
+  - `D3D12Buffer` 已创建 upload heap `ID3D12Resource`，支持 `Map/Unmap` 写入，buffer view 可复用父 resource。
+  - `D3D12Texture` 已创建 default heap `ID3D12Resource`，支持常用格式映射，texture view 可复用父 resource。
+  - 两个类均使用 pImpl，维持公开头隔离。
+- 验证输出：
+  - `cmake --build . --config Release --target WebGPUDemo` 成功。
+  - WebGPUDemo D3D12 运行 60 秒存活，正常关闭退出码 `0`。
+- 状态判定：
+  - 资源对象层不再是纯空实现，可支撑下一步 descriptor heap / root signature / copy upload 工作。
+- 下一步：
+  - 优先实现 `copyBuffersToTexture` 的 upload buffer 到 texture 拷贝，或先实现 descriptor layout/descriptor set 的 D3D12 CPU descriptor 管理。
+
+## 2026-04-25 21:34:30 追加快照（监工：Texture 上传路径接入）
+- 本轮执行：
+  - 监工本地推进 `D3D12Device::copyBuffersToTexture`。
+- 完成内容：
+  - 已实现临时 upload buffer、D3D12 footprint、row/slice 拷贝、`CopyTextureRegion`、barrier 与 fence 等待。
+  - 已对空源 buffer 做跳过防护。
+- 验证输出：
+  - `cmake --build . --config Release --target WebGPUDemo` 成功。
+  - D3D12 运行 60 秒存活，窗口关闭退出码 `0`。
+  - 空源 buffer 防护补丁后追加 30 秒 smoke，窗口关闭退出码 `0`。
+- 状态判定：
+  - 资源上传层已从空实现推进到最小可用实现。
+  - 当前下一阶段应转向 descriptor heap/root signature，开始让资源句柄进入绑定模型。

@@ -105,13 +105,17 @@ SE_HOT void jsbFunctionWrapper(const v8::FunctionCallbackInfo<v8::Value> &v8args
 
 SE_HOT void jsbFinalizeWrapper(se::Object *thisObject, se_function_ptr func, const char *funcName) {
     auto *engine = se::ScriptEngine::getInstance();
-    engine->_setGarbageCollecting(true);
+    if (engine != nullptr) {
+        engine->_setGarbageCollecting(true);
+    }
     se::State state(thisObject);
     bool ret = func(state);
     if (!ret) {
         SE_LOGE("[ERROR] Failed to invoke %s\n", funcName);
     }
-    engine->_setGarbageCollecting(false);
+    if (engine != nullptr) {
+        engine->_setGarbageCollecting(false);
+    }
 }
 SE_HOT void jsbConstructorWrapper(const v8::FunctionCallbackInfo<v8::Value> &v8args, se_function_ptr func, se_finalize_ptr finalizeCb, se::Class *cls, const char *funcName) {
     v8::Isolate *isolate = v8args.GetIsolate();

@@ -1,12 +1,12 @@
 /****************************************************************************
- Copyright (c) 2020-2023 Xiamen Yaji Software Co., Ltd.
+ Copyright (c) 2026 Xiamen Yaji Software Co., Ltd.
 
  http://www.cocos.com
 
  Permission is hereby granted, free of charge, to any person obtaining a copy
  of this software and associated documentation files (the "Software"), to deal
- in the Software without restriction, including without limitation the rights to
- use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+ in the Software without restriction, including without limitation the rights
+ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
  of the Software, and to permit persons to whom the Software is furnished to do so,
  subject to the following conditions:
 
@@ -24,32 +24,6 @@
 
 #pragma once
 
-#include "gfx-base/GFXTexture.h"
-#include <memory>
+#include "bindings/jswrapper/SeApi.h"
 
-namespace cc {
-namespace gfx {
-
-class CC_DLL CCD3D12Texture final : public Texture {
-public:
-    CCD3D12Texture();
-    ~CCD3D12Texture() override;
-
-    void *getD3D12ResourceHandle() const;
-
-protected:
-    void doInit(const TextureInfo &info) override;
-    void doInit(const TextureViewInfo &info) override;
-    void doInit(const SwapchainTextureInfo &info) override;
-    void doDestroy() override;
-    void doResize(uint32_t width, uint32_t height, uint32_t size) override;
-
-private:
-    bool createResource(uint32_t width, uint32_t height);
-
-    struct Impl;
-    std::unique_ptr<Impl> _impl;
-};
-
-} // namespace gfx
-} // namespace cc
+bool register_all_binary_deser(se::Object *obj); // NOLINT(readability-identifier-naming)

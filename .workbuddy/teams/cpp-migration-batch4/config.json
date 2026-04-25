@@ -1,0 +1,28 @@
+{
+  "name": "cpp-migration-batch4",
+  "leadAgentId": "1aa6cae967544ab8827060ab9419d7db",
+  "workspacePath": "d:/cocos_custome/cocos-engine",
+  "createdAt": "2026-04-25T12:57:15.164Z",
+  "options": {
+    "workspacePath": "d:/cocos_custome/cocos-engine",
+    "isAutoTeam": false
+  },
+  "members": [
+    {
+      "memberId": "team-lead@cpp-migration-batch4",
+      "name": "team-lead",
+      "role": "Team Lead - coordinates the team and interacts with the user"
+    },
+    {
+      "memberId": "m8-s2-agent@cpp-migration-batch4",
+      "name": "m8-s2-agent",
+      "role": "M8-S2 ReleaseManager实现"
+    },
+    {
+      "memberId": "m8-s1-agent@cpp-migration-batch4",
+      "name": "m8-s1-agent",
+      "role": "M8-S1 AssetManager实现"
+    }
+  ],
+  "isAutoTeam": false
+}

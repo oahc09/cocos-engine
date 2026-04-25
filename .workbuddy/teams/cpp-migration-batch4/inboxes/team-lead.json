@@ -1,0 +1,11 @@
+[
+  {
+    "id": "msg-1777122327689-3z8lib",
+    "from": "m8-s2-agent",
+    "to": "team-lead",
+    "type": "message",
+    "content": "M8-S2 ReleaseManager 实现已完成，验证通过。\n\n## 1. 完成内容摘要\n\n### 新建文件\n- `native/cocos/core/assets/ReleaseManager.h` — 头文件，定义 ReleaseManager 单例类、AssetRefInfo 结构体、RefRecord 内部结构\n- `native/cocos/core/assets/ReleaseManager.cpp` — 实现文件，包含全部 14 个公共方法实现\n\n### 修改文件\n- `native/CMakeLists.txt` — 在 cocos_source_files 中追加 ReleaseManager.h / ReleaseManager.cpp\n\n### 实现要点\n| 方法 | 说明 |\n|------|------|\n| `getInstance()` | 局部静态单例 |\n| `init()` | 清空 _records 和 _pendingRelease |\n| `registerAsset(asset)` | 提取 uuid，创建/更新 RefRecord，存入 asset 指针 |\n| `unregisterAsset(asset)` | 从 _records 中移除对应 uuid |\n| `addRef(uuid)` | count++ |\n| `decRef(uuid)` | count--，若变为 0 则加入 _pendingRelease |\n| `getRefCount(uuid)` | 查 _records，不存在返回 0 |\n| `autoRelease()` | 遍历 _pendingRelease，对每个 uuid 调用 releaseAsset，最后清空 |\n| `releaseAll()` | 将所有已注册 uuid 加入 pending 后调用 autoRelease |\n| `releaseAsset(uuid)` | 先递归 decRef 所有 dependencies，再从 _records 移除（Asset 由 IntrusivePtr 管理，不手动 delete） |\n| `getPendingReleaseCount()` | 返回 pending 队列大小 |\n| `getAllRefInfos()` | 遍历 _records 构造 AssetRefInfo 列表 |\n| `addDependency/removeDependency/getDependencies` | 操作 record.dependencies |\n\n### 约束遵守\n- 无 C++ 异常\n- 单线程模型，无锁\n- Asset 生命周期由 IntrusivePtr 管理，ReleaseManager 只维护引用计数\n- 代码风格参考 NativePipeline.cpp / NativeBundle.cpp\n- 版权头与引擎一致\n- 未修改 jsb_module_register.cpp\n\n## 2. 验证命令与结果\n\n```bash\ncmake -B build -S native\n# → Configuring done (0.4s), Generating done (0.3s)\n\ncmake --build build --config Debug --target cocos_engine -j4\n# → cocos_engine.vcxproj -> D:\\cocos_custome\\cocos-engine\\build\\Debug\\cocos_engine.lib\n# → 编译成功，0 errors\n```\n\n## 3. 风险与下一步建议\n\n1. **循环依赖风险**：`releaseAsset` 递归 decRef dependencies 时，若依赖图存在环，可能导致同一资源被多次 decRef。建议后续增加环检测或已释放标记。\n2. **与 Asset::decAssetRef 整合**：当前 Asset::decAssetRef 中的 `//cjh TODO:` 注释表明原引擎预留了自动释放逻辑，建议后续将 Asset::decAssetRef 与 ReleaseManager::decRef 对接。\n3. **JSB 绑定**：ReleaseManager 尚未暴露给 JS 层，如需 JS 侧调用（如 AssetManager TS 层对接），需后续在 jsb_module_register.cpp 中注册（按任务要求，由主 agent 统一整合）。\n4. **线程安全**：当前假设单线程模型。若未来引入多线程加载/释放，需为 _records 和 _pendingRelease 加锁。",
+    "timestamp": "2026-04-25T13:05:27.689Z",
+    "read": true
+  }
+]

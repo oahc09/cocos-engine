@@ -23,16 +23,9 @@
 ****************************************************************************/
 
 #include "D3D12CommandBuffer.h"
-#include "base/Log.h"
 
 namespace cc {
 namespace gfx {
-
-namespace {
-constexpr float D3D12_POC_CLEAR_COLOR[4] = {0.1F, 0.2F, 0.8F, 1.0F};
-bool gLoggedClearBegin = false;
-bool gLoggedClearEnd = false;
-}
 
 void CCD3D12CommandBuffer::doInit(const CommandBufferInfo &info) {
     (void)info;
@@ -45,18 +38,9 @@ void CCD3D12CommandBuffer::begin(RenderPass *renderPass, uint32_t subpass, Frame
     (void)renderPass;
     (void)subpass;
     (void)frameBuffer;
-    if (!gLoggedClearBegin) {
-        gLoggedClearBegin = true;
-        CC_LOG_INFO("D3D12 clear begin: color=(%.2f, %.2f, %.2f, %.2f), barrier PRESENT->RENDER_TARGET (stub).",
-                    D3D12_POC_CLEAR_COLOR[0], D3D12_POC_CLEAR_COLOR[1], D3D12_POC_CLEAR_COLOR[2], D3D12_POC_CLEAR_COLOR[3]);
-    }
 }
 
 void CCD3D12CommandBuffer::end() {
-    if (!gLoggedClearEnd) {
-        gLoggedClearEnd = true;
-        CC_LOG_INFO("D3D12 clear end: barrier RENDER_TARGET->PRESENT (stub).");
-    }
 }
 
 void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *fbo, const Rect &renderArea, const Color *colors, float depth, uint32_t stencil, CommandBuffer *const *secondaryCBs, uint32_t secondaryCBCount) {

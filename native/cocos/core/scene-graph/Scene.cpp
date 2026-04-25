@@ -24,6 +24,7 @@
 
 #include "core/scene-graph/Scene.h"
 #include "core/scene-graph/SceneGlobals.h"
+#include "core/scene-graph/PrefabUtils.h"
 #include "core/Director.h"
 #include "core/Root.h"
 #include "engine/EngineEvents.h"
@@ -52,9 +53,8 @@ void Scene::load() {
         //cjh        if (TEST) {
         //            CC_ASSERT(!_activeInHierarchy, 'Should deactivate ActionManager by default');
         //        }
-        // expandNestedPrefabInstanceNode / applyTargetOverrides: stub until M3-S2 PrefabUtils
-        // expandNestedPrefabInstanceNode(this);
-        // applyTargetOverrides(this);
+        PrefabUtils::expandNestedPrefabInstanceNode(this);
+        PrefabUtils::applyTargetOverrides(this);
         onBatchCreated(false);
         _inited = true;
     }

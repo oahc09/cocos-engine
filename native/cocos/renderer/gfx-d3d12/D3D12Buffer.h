@@ -25,19 +25,33 @@
 #pragma once
 
 #include "gfx-base/GFXBuffer.h"
+#include <memory>
 
 namespace cc {
 namespace gfx {
 
 class CC_DLL CCD3D12Buffer final : public Buffer {
 public:
+    CCD3D12Buffer();
+    ~CCD3D12Buffer() override;
+
     void update(const void *buffer, uint32_t size) override;
+
+    void *getD3D12ResourceHandle() const;
+    uint64_t getD3D12GPUVirtualAddress() const;
+    uint32_t getD3D12ResourceOffset() const;
 
 protected:
     void doInit(const BufferInfo &info) override;
     void doInit(const BufferViewInfo &info) override;
     void doResize(uint32_t size, uint32_t count) override;
     void doDestroy() override;
+
+private:
+    bool createResource(uint32_t size);
+
+    struct Impl;
+    std::unique_ptr<Impl> _impl;
 };
 
 } // namespace gfx

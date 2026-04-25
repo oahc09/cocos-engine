@@ -43,6 +43,8 @@
     #ifndef NOMINMAX
         #define NOMINMAX
     #endif
+    #include <algorithm>
+    #include <cstring>
     #include <windows.h>
     #include <d3d12.h>
     #include <dxgi1_6.h>
@@ -56,7 +58,19 @@ CCD3D12Device *CCD3D12Device::instance = nullptr;
 
 namespace {
 constexpr float D3D12_POC_CLEAR_COLOR[4] = {0.1F, 0.2F, 0.8F, 1.0F};
-bool gLoggedPresentSubmitted = false;
+
+#if defined(_WIN32)
+D3D12_RESOURCE_BARRIER textureTransition(ID3D12Resource *resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
+    D3D12_RESOURCE_BARRIER barrier{};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+    barrier.Transition.pResource = resource;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barrier.Transition.StateBefore = before;
+    barrier.Transition.StateAfter = after;
+    return barrier;
+}
+#endif
 }
 
 struct CCD3D12Device::Impl {
@@ -231,16 +245,6 @@ void CCD3D12Device::present() {
             }
         }
     }
-
-    if (!gLoggedPresentSubmitted) {
-        gLoggedPresentSubmitted = true;
-        CC_LOG_INFO("D3D12 present submitted.");
-    }
-#else
-    if (!gLoggedPresentSubmitted) {
-        gLoggedPresentSubmitted = true;
-        CC_LOG_INFO("D3D12 present submitted.");
-    }
 #endif
 }
 
@@ -303,10 +307,168 @@ PipelineState *CCD3D12Device::createPipelineState() {
 }
 
 void CCD3D12Device::copyBuffersToTexture(const uint8_t *const *buffers, Texture *dst, const BufferTextureCopy *regions, uint32_t count) {
+#if defined(_WIN32)
+    if (!buffers || !dst || !regions || count == 0 || !_impl->d3dDevice || !_impl->graphicsQueue || !_impl->commandAllocator || !_impl->commandList) {
+        return;
+    }
+
+    auto *d3d12Texture = static_cast<CCD3D12Texture *>(dst);
+    auto *textureResource = static_cast<ID3D12Resource *>(d3d12Texture->getD3D12ResourceHandle());
+    if (!textureResource) {
+        return;
+    }
+
+    const auto &textureInfo = dst->getInfo();
+    const uint32_t bytesPerTexel = GFX_FORMAT_INFOS[toNumber(textureInfo.format)].size;
+    if (bytesPerTexel == 0) {
+        CC_LOG_WARNING("D3D12 texture upload skipped for unsupported texel size.");
+        return;
+    }
+
+    waitForGpu();
+
+    HRESULT hr = _impl->commandAllocator->Reset();
+    if (FAILED(hr)) {
+        CC_LOG_ERROR("D3D12 upload command allocator reset failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+        return;
+    }
+
+    hr = _impl->commandList->Reset(_impl->commandAllocator.Get(), nullptr);
+    if (FAILED(hr)) {
+        CC_LOG_ERROR("D3D12 upload command list reset failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+        return;
+    }
+
+    auto toCopyDest = textureTransition(textureResource, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+    _impl->commandList->ResourceBarrier(1, &toCopyDest);
+
+    for (uint32_t regionIndex = 0; regionIndex < count; ++regionIndex) {
+        if (!buffers[regionIndex]) {
+            continue;
+        }
+
+        const auto &region = regions[regionIndex];
+        const uint32_t mipLevel = region.texSubres.mipLevel;
+        const uint32_t arrayLayer = textureInfo.type == TextureType::TEX3D ? 0 : region.texSubres.baseArrayLayer;
+        const uint32_t subresource = mipLevel + arrayLayer * textureInfo.levelCount;
+
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+        UINT rowCount = 0;
+        UINT64 rowSizeInBytes = 0;
+        UINT64 uploadSize = 0;
+        D3D12_RESOURCE_DESC textureDesc = textureResource->GetDesc();
+        _impl->d3dDevice->GetCopyableFootprints(&textureDesc, subresource, 1, 0, &footprint, &rowCount, &rowSizeInBytes, &uploadSize);
+        if (uploadSize == 0 || rowCount == 0) {
+            continue;
+        }
+
+        D3D12_HEAP_PROPERTIES heapProperties{};
+        heapProperties.Type = D3D12_HEAP_TYPE_UPLOAD;
+        heapProperties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+        heapProperties.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+        heapProperties.CreationNodeMask = 1;
+        heapProperties.VisibleNodeMask = 1;
+
+        D3D12_RESOURCE_DESC uploadDesc{};
+        uploadDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        uploadDesc.Alignment = 0;
+        uploadDesc.Width = uploadSize;
+        uploadDesc.Height = 1;
+        uploadDesc.DepthOrArraySize = 1;
+        uploadDesc.MipLevels = 1;
+        uploadDesc.Format = DXGI_FORMAT_UNKNOWN;
+        uploadDesc.SampleDesc.Count = 1;
+        uploadDesc.SampleDesc.Quality = 0;
+        uploadDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        uploadDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+        Microsoft::WRL::ComPtr<ID3D12Resource> uploadResource;
+        hr = _impl->d3dDevice->CreateCommittedResource(
+            &heapProperties,
+            D3D12_HEAP_FLAG_NONE,
+            &uploadDesc,
+            D3D12_RESOURCE_STATE_GENERIC_READ,
+            nullptr,
+            IID_PPV_ARGS(&uploadResource));
+        if (FAILED(hr)) {
+            CC_LOG_ERROR("CreateCommittedResource(texture upload) failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+            continue;
+        }
+
+        void *mappedData = nullptr;
+        D3D12_RANGE readRange{};
+        hr = uploadResource->Map(0, &readRange, &mappedData);
+        if (FAILED(hr) || !mappedData) {
+            CC_LOG_ERROR("D3D12 texture upload Map failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+            continue;
+        }
+
+        const uint32_t sourceRowTexels = region.buffStride > 0 ? region.buffStride : region.texExtent.width;
+        const uint32_t sourceRows = region.buffTexHeight > 0 ? region.buffTexHeight : region.texExtent.height;
+        const uint32_t sourceRowPitch = sourceRowTexels * bytesPerTexel;
+        const uint32_t sourceSlicePitch = sourceRowPitch * sourceRows;
+        const uint32_t copyRowBytes = region.texExtent.width * bytesPerTexel;
+        const uint32_t copyRows = std::min<uint32_t>(region.texExtent.height, rowCount);
+        const uint32_t copyDepth = std::max<uint32_t>(region.texExtent.depth, 1);
+        const auto *src = buffers[regionIndex] + region.buffOffset;
+        auto *dstBytes = static_cast<uint8_t *>(mappedData) + footprint.Offset;
+
+        for (uint32_t z = 0; z < copyDepth; ++z) {
+            for (uint32_t row = 0; row < copyRows; ++row) {
+                const uint8_t *srcRow = src + z * sourceSlicePitch + row * sourceRowPitch;
+                uint8_t *dstRow = dstBytes + z * footprint.Footprint.RowPitch * rowCount + row * footprint.Footprint.RowPitch;
+                std::memcpy(dstRow, srcRow, std::min<uint32_t>(copyRowBytes, static_cast<uint32_t>(rowSizeInBytes)));
+            }
+        }
+
+        D3D12_RANGE writeRange{0, static_cast<SIZE_T>(uploadSize)};
+        uploadResource->Unmap(0, &writeRange);
+
+        D3D12_TEXTURE_COPY_LOCATION srcLocation{};
+        srcLocation.pResource = uploadResource.Get();
+        srcLocation.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        srcLocation.PlacedFootprint = footprint;
+
+        D3D12_TEXTURE_COPY_LOCATION dstLocation{};
+        dstLocation.pResource = textureResource;
+        dstLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dstLocation.SubresourceIndex = subresource;
+
+        D3D12_BOX srcBox{};
+        srcBox.left = 0;
+        srcBox.top = 0;
+        srcBox.front = 0;
+        srcBox.right = region.texExtent.width;
+        srcBox.bottom = region.texExtent.height;
+        srcBox.back = copyDepth;
+
+        _impl->commandList->CopyTextureRegion(
+            &dstLocation,
+            region.texOffset.x,
+            region.texOffset.y,
+            region.texOffset.z,
+            &srcLocation,
+            &srcBox);
+    }
+
+    auto toCommon = textureTransition(textureResource, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+    _impl->commandList->ResourceBarrier(1, &toCommon);
+
+    hr = _impl->commandList->Close();
+    if (FAILED(hr)) {
+        CC_LOG_ERROR("D3D12 upload command list close failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+        return;
+    }
+
+    ID3D12CommandList *commandLists[] = {_impl->commandList.Get()};
+    _impl->graphicsQueue->ExecuteCommandLists(1, commandLists);
+    waitForGpu();
+#else
     (void)buffers;
     (void)dst;
     (void)regions;
     (void)count;
+#endif
 }
 
 void CCD3D12Device::copyTextureToBuffers(Texture *src, uint8_t *const *buffers, const BufferTextureCopy *region, uint32_t count) {

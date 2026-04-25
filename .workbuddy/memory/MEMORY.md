@@ -86,8 +86,71 @@
 - **递归激活**: activateNodeRecursively — 设置 activeInHierarchy → 激活组件 → 递归子节点
 - **递归停用**: deactivateNodeRecursively — 设置 Deactivating 标记 → 清 activeInHierarchy → 先递归子节点 → 逆序停用组件 → 清标记
 - **Scene::activate()**: 接入 `Director::getInstance()->getNodeActivator()->activateNode(this, active)`
-- **Scene::load()**: 取消注释 `onBatchCreated(false)`；`expandNestedPrefabInstanceNode/applyTargetOverrides` 保留 stub（等 M3-S2）
 - **Node::setActive/onHierarchyChangedBase**: 替换 `emit<ActiveNode>` 为 `Director::getInstance()->getNodeActivator()->activateNode()`
 - **Node::addComponent**: 对 active 节点立即调用 `activateComponent(comp, true)`
 - **NodeActivator::activateComponent**: 公共接口，委托给私有 activateComp
 - **C++ emit 事件类型**: 外部调用 Node emit 时需完整限定名 `node->emit<Node::ActiveInHierarchyChanged>()`
+
+## 第二批并行任务 (2026-04-25 M3-S2/M4/M5-S1/M6-S1/M7-S0)
+
+### M3-S2: Prefab C++ 类
+- **新建**: Prefab.h/cpp, PrefabInfo.h, PrefabUtils.h/cpp
+- **Prefab**: 继承 Asset，OptimizationPolicy(AUTO/SINGLE/MULTI)，BinaryTemplate 结构，initFromBinary/instantiate
+- **PrefabUtils**: expandNestedPrefabInstanceNode/applyTargetOverrides 当前 stub (等 M4 完整实现)
+- **Scene.cpp**: 替换注释为 `PrefabUtils::expandNestedPrefabInstanceNode(this)` / `PrefabUtils::applyTargetOverrides(this)`
+
+### M4-S0+S1: 二进制序列化
+- **新建**: BinarySceneFormat.h (格式规范: Header/StringTable/InstanceTable/NodeEntry/ComponentEntry/AssetRefEntry/Footer)
+- **新建**: BinaryDeserializer.h/cpp
+- **static_assert**: BinarySceneHeader 32B, BinarySceneFooter 32B
+- **BinaryDeserializer::deserialize**: validateHeader → parseStringTable → createScene → createNodeTree → resolveReferences
+- **IntrusivePtr<Asset> 析构问题**: 头文件中使用 IntrusivePtr<Asset> 时必须 include Asset.h，前向声明不够
+
+### M5-S1: Director 完整实现
+- **扩展 Director.h/cpp**: tick/loadScene/runScene/runSceneImmediate/addPersistRootNode/removePersistRootNode/isPersistRootNode
+- **tick**: Scheduler::update → ComponentScheduler::invokeStart/Update/LateUpdate
+- **runSceneImmediate**: onBeforeLoadScene → scene->load → handlePersistRootNodes → destroyOldScene → setScene → scene->activate → onLaunched
+- **常驻节点**: _persistRootNodes (uuid → Node*)，addPersistRootNode 设置 DONT_DESTROY 标志
+- **Scheduler**: 懒初始化 getScheduler()，类在 base/Scheduler.h
+
+### M6-S1: ScriptBridge 核心实现
+- **新建**: scripting/ScriptBridge.h/cpp
+- **接口**: invokeStartBatch/UpdateBatch/LateUpdateBatch (批量), invokeOnDestroy/OnEnable/OnDisable/OnLoad (单个)
+- **注册**: registerScriptClass (调用 TypeRegistry), registerScriptInstance/unregisterScriptInstance (compId → ScriptInstanceInfo)
+- **ScriptInstanceInfo**: se::Object* jsObject, ScriptComponent* scriptComp, typeId, className
+- **collectAssetRefs/isInstanceOf**: 与 JS 侧交互
+
+### M7-S0: NativePipeline 接口定义
+- **新建**: assets/NativePipeline.h (纯头文件，无 cpp)
+- **PipelineTask**: taskId/path/uuid/data/output/isComplete/hasError
+- **PipelineHandler**: 虚函数 handle(PipelineTask&)
+- **NativePipeline**: insert/removeHandler/executeSync/executeAsync/Mode(JS_ONLY/NATIVE_FAST)
+- **门控**: 编译通过
+
+## Prefab C++ 实现 (2026-04-25 M3-S2)
+- **Prefab.h/.cpp**: 继承 Asset，含 OptimizationPolicy 枚举(AUTO/SINGLE/MULTI)、BinaryTemplate 结构体
+- **Prefab::initFromBinary()**: stub，存储原始二进制数据，TODO(M4) 等待 BinaryDeserializer
+- **Prefab::instantiate()**: 根据 OptimizationPolicy 选择路径，有二进制模板走 instantiateFromBinary()
+- **Prefab::instantiateFromBinary()**: stub，返回 nullptr，TODO(M4)
+- **PrefabInfo.h**: 结构体 (asset/fileId/infoId/root/isDeleted)
+- **PrefabUtils.h/.cpp**: 静态工具类，expandNestedPrefabInstanceNode/applyTargetOverrides stub 实现
+- **Scene::load() 修改**: 注释替换为 `PrefabUtils::expandNestedPrefabInstanceNode(this)` / `PrefabUtils::applyTargetOverrides(this)`
+- **CMakeLists.txt**: 添加 Prefab.cpp/h, PrefabInfo.h, PrefabUtils.cpp/h 到 cocos_source_files
+
+## 第四批并行任务 (2026-04-25 M8-S1/S2)
+
+### M8-S1: AssetManager C++ 核心实现
+- **新建**: `native/cocos/core/assets/AssetManager.h/cpp`
+- **功能**: 单例模式，支持同步/异步加载、Bundle 管理、缓存管理、预加载、双模式检测
+- **loadSync 查找顺序**: 缓存 → Bundle → nullptr (远程加载未实现)
+- **异步加载**: 当前同步执行后回调，TODO 未来接入线程池
+- **Bundle 集成**: 通过 NativeBundle::get() / getUuidByPath() 查找资源
+- **CMakeLists.txt**: 已添加 AssetManager.cpp/h
+
+### M8-S2: ReleaseManager C++ 核心实现
+- **新建**: `native/cocos/core/assets/ReleaseManager.h/cpp`
+- **功能**: 资源引用计数管理、自动释放、依赖管理
+- **核心机制**: registerAsset → addRef/decRef → autoRelease → releaseAsset (递归 decRef dependencies)
+- **Asset 生命周期**: 由 IntrusivePtr 管理，ReleaseManager 只维护引用计数，不直接 delete
+- **风险**: 依赖图存在环时可能导致同一资源被多次 decRef，需后续增加环检测
+- **CMakeLists.txt**: 已添加 ReleaseManager.cpp/h

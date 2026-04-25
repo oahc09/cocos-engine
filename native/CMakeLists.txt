@@ -2197,6 +2197,8 @@ cocos_source_files(
     cocos/core/assets/Asset.h
     cocos/core/assets/AssetEnum.h
     cocos/core/assets/AssetsModuleHeader.h
+    cocos/core/assets/NativePipeline.h
+    cocos/core/assets/NativePipeline.cpp
     cocos/core/assets/BufferAsset.cpp
     cocos/core/assets/BufferAsset.h
     cocos/core/assets/EffectAsset.cpp
@@ -2225,10 +2227,21 @@ cocos_source_files(
     cocos/core/assets/Font.cpp
     cocos/core/assets/AssetRefManager.h
     cocos/core/assets/AssetRefManager.cpp
+    cocos/core/assets/NativeBundle.h
+    cocos/core/assets/NativeBundle.cpp
+    cocos/core/assets/NativeDependUtil.h
+    cocos/core/assets/NativeDependUtil.cpp
+    cocos/core/assets/AssetManager.h
+    cocos/core/assets/AssetManager.cpp
+    cocos/core/assets/ReleaseManager.h
+    cocos/core/assets/ReleaseManager.cpp
 
     # serialization (C++ migration)
     cocos/core/serialization/TypeRegistry.h
     cocos/core/serialization/TypeRegistry.cpp
+    cocos/core/serialization/BinarySceneFormat.h
+    cocos/core/serialization/BinaryDeserializer.h
+    cocos/core/serialization/BinaryDeserializer.cpp
 
     # components (C++ migration)
     cocos/core/components/BuiltinTypeIds.h
@@ -2238,6 +2251,10 @@ cocos_source_files(
     cocos/core/components/ScriptComponent.h
     cocos/core/components/ScriptComponent.cpp
     cocos/core/components/ThreeBucketArray.h
+
+    # scripting bridge (M6-S1)
+    cocos/core/scripting/ScriptBridge.h
+    cocos/core/scripting/ScriptBridge.cpp
     cocos/core/components/ComponentScheduler.h
     cocos/core/components/ComponentScheduler.cpp
     cocos/core/components/NodeActivator.h
@@ -2262,6 +2279,11 @@ cocos_source_files(
     cocos/core/scene-graph/SceneGlobals.cpp
     cocos/core/scene-graph/SceneGlobals.h
     cocos/core/scene-graph/SceneGraphModuleHeader.h
+    cocos/core/scene-graph/Prefab.cpp
+    cocos/core/scene-graph/Prefab.h
+    cocos/core/scene-graph/PrefabInfo.h
+    cocos/core/scene-graph/PrefabUtils.cpp
+    cocos/core/scene-graph/PrefabUtils.h
 
     cocos/core/utils/IDGenerator.cpp
     cocos/core/utils/IDGenerator.h
@@ -2925,6 +2947,8 @@ cocos_source_files(
             cocos/bindings/manual/jsb_assets_manual.h
             cocos/bindings/manual/jsb_AssetRefManager.cpp
             cocos/bindings/manual/jsb_AssetRefManager.h
+            cocos/bindings/manual/jsb_script_bridge_manual.cpp
+            cocos/bindings/manual/jsb_script_bridge_manual.h
             cocos/bindings/manual/jsb_network_manual.cpp
             cocos/bindings/manual/jsb_network_manual.h
             cocos/bindings/manual/jsb_xmlhttprequest.cpp
