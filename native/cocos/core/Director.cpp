@@ -25,8 +25,15 @@
 #include "core/Director.h"
 #include "base/Scheduler.h"
 #include "base/memory/Memory.h"
+#include "base/std/container/unordered_set.h"
+#include "core/assets/AssetManager.h"
+#include "core/assets/ReleaseManager.h"
+#include "core/assets/SceneAsset.h"
 #include "core/scene-graph/Scene.h"
 #include "core/scene-graph/Node.h"
+#include "core/components/ScriptComponent.h"
+#include "core/scripting/ScriptBridge.h"
+#include "base/Log.h"
 
 namespace cc {
 
@@ -51,9 +58,21 @@ Director *Director::getInstance() {
 // ===========================================================================
 
 void Director::tick(float dt) {
+    // ── Phase A4: Single Responsibility Clarification ──
+    // Director::tick() is responsible for:
+    //   1. Component lifecycle phases (start → update → lateUpdate)
+    //   2. Deferred destruction of CCObjects
+    //
+    // Scheduler::update(dt) is called SEPARATELY by Engine::tick() BEFORE
+    // Director::tick(). This split is intentional:
+    //   - Engine::tick() drives: Scheduler (timers, tweens) → Director::tick()
+    //   - Director::tick() drives: ComponentScheduler + deferred destroy
+    //
+    // Future: If Director should become the single entry point, Scheduler::update
+    // would move here. For now, the split avoids duplicate scheduling with the
+    // existing Engine::tick() path. See design-cpp-master-spec.md §1.5.
+
     // 1. ComponentScheduler phases - invoke start, update, lateUpdate in order
-    //    Note: Scheduler::update(dt) is called by Engine::tick() before this,
-    //    to avoid duplicate scheduling.
     _compScheduler.invokeStart();
     _compScheduler.invokeUpdate(dt);
     _compScheduler.invokeLateUpdate(dt);
@@ -71,12 +90,29 @@ void Director::loadScene(const ccstd::string &sceneName,
     // Store loading scene name for reference
     _loadingScene = sceneName;
 
-    // TODO: Implement actual scene loading from AssetManager in M5-S2.
-    // For now, this is a placeholder that stores the scene name.
-    // The full implementation will:
-    // 1. Look up scene asset by name via AssetManager
-    // 2. Deserialize the scene
-    // 3. Call runScene() with the loaded scene
+    if (sceneName.empty()) {
+        if (onLaunched) {
+            onLaunched(nullptr);
+        }
+        return;
+    }
+
+    auto &assetManager = AssetManager::getInstance();
+    auto sceneAsset = assetManager.loadSceneAsset(sceneName);
+    Scene *scene = sceneAsset ? sceneAsset->getScene() : nullptr;
+    if (scene == nullptr) {
+        CC_LOG_WARNING("Director::loadScene - failed to resolve scene '%s'", sceneName.c_str());
+        if (onLaunched) {
+            onLaunched(nullptr);
+        }
+        return;
+    }
+
+    runSceneImmediate(scene, nullptr, [onLaunched, scene]() {
+        if (onLaunched) {
+            onLaunched(scene);
+        }
+    });
 }
 
 void Director::runScene(Scene *scene,
@@ -214,12 +250,55 @@ void Director::handlePersistRootNodes(Scene *newScene) {
 }
 
 void Director::destroyOldScene() {
-    // If there is a current scene, destroy it.
-    // Persist root nodes should already be migrated out by handlePersistRootNodes().
-    if (_scene) {
-        _scene->destroy();
-        _scene.reset();
+    if (!_scene) return;
+
+    // ── Phase D2: Scene-switch release strategy ──
+    // Persist root nodes have already been migrated to the new scene by
+    // handlePersistRootNodes(), so they won't appear in the walk below.
+    //
+    // Walk all remaining nodes in the old scene, collect asset references
+    // from their components, and decRef each unique asset. After scene
+    // destruction, autoRelease() will free assets with ref count == 0.
+
+    // 1. Collect all unique asset UUIDs referenced by old scene components
+    ccstd::unordered_set<ccstd::string> assetUuids;
+
+    _scene->walk([&](Node *node) {
+        for (Component *comp : node->getComponents()) {
+            // Builtin components: getAssetProperties() returns C++ side refs
+            auto refs = comp->getAssetProperties();
+            for (Asset *asset : refs) {
+                if (asset && !asset->getUuid().empty()) {
+                    assetUuids.insert(asset->getUuid());
+                }
+            }
+
+            // Script components: collect asset refs through ScriptBridge (JS side)
+            auto *scriptComp = dynamic_cast<ScriptComponent *>(comp);
+            if (scriptComp != nullptr && scriptComp->getScriptBridgeCompId() != 0) {
+                auto scriptRefs = ScriptBridge::getInstance().collectAssetRefs(
+                    scriptComp->getScriptBridgeCompId());
+                for (Asset *asset : scriptRefs) {
+                    if (asset && !asset->getUuid().empty()) {
+                        assetUuids.insert(asset->getUuid());
+                    }
+                }
+            }
+        }
+    });
+
+    // 2. decRef all collected assets
+    auto &releaseMgr = ReleaseManager::getInstance();
+    for (const auto &uuid : assetUuids) {
+        releaseMgr.decRef(uuid);
     }
+
+    // 3. Destroy old scene (persist nodes already migrated out)
+    _scene->destroy();
+    _scene.reset();
+
+    // 4. Auto-release assets with zero ref count
+    releaseMgr.autoRelease();
 }
 
 } // namespace cc

@@ -189,6 +189,20 @@ void Profiler::update() {
     printStats();
 }
 
+void Profiler::recordScriptBridgeBatch(const std::string_view &method, uint32_t componentCount, uint64_t durationUs) {
+    _scriptBridgeStats.totalBatchCalls++;
+    _scriptBridgeStats.totalComponents += componentCount;
+    _scriptBridgeStats.totalDurationUs += durationUs;
+
+    if (method == "start") {
+        _scriptBridgeStats.startCalls++;
+    } else if (method == "update") {
+        _scriptBridgeStats.updateCalls++;
+    } else if (method == "lateUpdate") {
+        _scriptBridgeStats.lateUpdateCalls++;
+    }
+}
+
 void Profiler::doIntervalUpdate() {
     const auto *pipeline = Root::getInstance()->getPipeline();
     const auto *root = Root::getInstance();

@@ -24,6 +24,7 @@
 
 #include "core/assets/AssetRefManager.h"
 #include "core/assets/Asset.h"
+#include "core/assets/ReleaseManager.h"
 
 namespace cc {
 
@@ -34,6 +35,8 @@ AssetRefManager &AssetRefManager::getInstance() {
 
 void AssetRefManager::addRef(Asset *asset) {
     if (!asset) return;
+    ReleaseManager::getInstance().registerAsset(asset);
+    ReleaseManager::getInstance().addRef(asset->getUuid());
     uint32_t oldCount = asset->getAssetRefCount();
     asset->addAssetRef();
     uint32_t newCount = asset->getAssetRefCount();
@@ -44,7 +47,12 @@ void AssetRefManager::decRef(Asset *asset, bool autoRelease) {
     if (!asset) return;
     uint32_t oldCount = asset->getAssetRefCount();
     if (oldCount == 0) return;
+    ReleaseManager::getInstance().registerAsset(asset);
     asset->decAssetRef(autoRelease);
+    ReleaseManager::getInstance().decRef(asset->getUuid());
+    if (autoRelease) {
+        ReleaseManager::getInstance().autoRelease();
+    }
     uint32_t newCount = asset->getAssetRefCount();
     if (_callback) _callback(asset, oldCount, newCount);
 }

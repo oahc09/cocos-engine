@@ -25,12 +25,16 @@
 #pragma once
 
 #include "gfx-base/GFXCommandBuffer.h"
+#include <memory>
 
 namespace cc {
 namespace gfx {
 
 class CC_DLL CCD3D12CommandBuffer final : public CommandBuffer {
 public:
+    CCD3D12CommandBuffer();
+    ~CCD3D12CommandBuffer() override;
+
     void begin(RenderPass *renderPass, uint32_t subpass, Framebuffer *frameBuffer) override;
     void end() override;
     void beginRenderPass(RenderPass *renderPass, Framebuffer *fbo, const Rect &renderArea, const Color *colors, float depth, uint32_t stencil, CommandBuffer *const *secondaryCBs, uint32_t secondaryCBCount) override;
@@ -63,9 +67,16 @@ public:
     void endQuery(QueryPool *queryPool, uint32_t id) override;
     void resetQueryPool(QueryPool *queryPool) override;
 
+    // Returns the closed ID3D12GraphicsCommandList as void* for Queue::submit
+    void *getD3D12CommandList() const;
+
 protected:
     void doInit(const CommandBufferInfo &info) override;
     void doDestroy() override;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> _impl;
 };
 
 } // namespace gfx

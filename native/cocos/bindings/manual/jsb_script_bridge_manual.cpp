@@ -120,34 +120,58 @@ static bool js_ScriptBridge_registerScriptClass(se::State &s) { // NOLINT(readab
 SE_BIND_FUNC(js_ScriptBridge_registerScriptClass)
 
 // ─── registerScriptInstance ────────────────────────────────────────────────
-// JS: scriptBridge.registerScriptInstance(jsComp, scriptComp, className) -> number
+// JS:
+//   scriptBridge.registerScriptInstance(jsComp, scriptComp, className) -> number
+//   scriptBridge.registerScriptInstance(jsComp, compId, className, scriptComp?) -> number
 static bool js_ScriptBridge_registerScriptInstance(se::State &s) { // NOLINT(readability-identifier-naming)
     auto *cobj = SE_THIS_OBJECT<cc::ScriptBridge>(s);
     SE_PRECONDITION2(cobj, false, "Invalid Native Object");
     const auto &args = s.args();
     size_t argc = args.size();
-    if (argc == 3) {
+    if (argc == 3 || argc == 4) {
         // arg0: jsComp — se::Object* (JS component object)
         SE_PRECONDITION2(args[0].isObject(), false, "First argument (jsComp) must be an object");
         se::Object *jsComp = args[0].toObject();
 
-        // arg1: scriptComp — ScriptComponent* (C++ component object)
-        // Since ScriptComponent may not have JSB auto binding, extract via getPrivateData.
-        SE_PRECONDITION2(args[1].isObject(), false, "Second argument (scriptComp) must be an object");
-        se::Object *scriptCompObj = args[1].toObject();
-        auto *scriptComp = static_cast<cc::ScriptComponent *>(scriptCompObj->getPrivateData());
-        SE_PRECONDITION2(scriptComp != nullptr, false, "Failed to extract ScriptComponent from JS object");
+        if (args[1].isObject()) {
+            SE_PRECONDITION2(argc == 3, false, "Legacy registerScriptInstance expects exactly 3 arguments");
 
-        // arg2: className
+            // arg1: scriptComp — ScriptComponent* (C++ component object)
+            // Since ScriptComponent may not have JSB auto binding, extract via getPrivateData.
+            se::Object *scriptCompObj = args[1].toObject();
+            auto *scriptComp = static_cast<cc::ScriptComponent *>(scriptCompObj->getPrivateData());
+            SE_PRECONDITION2(scriptComp != nullptr, false, "Failed to extract ScriptComponent from JS object");
+
+            ccstd::string className;
+            bool ok = sevalue_to_native(args[2], &className, s.thisObject());
+            SE_PRECONDITION2(ok, false, "Error processing className argument");
+
+            uint32_t compId = cobj->registerScriptInstance(jsComp, scriptComp, className);
+            s.rval().setUint32(compId);
+            return true;
+        }
+
+        uint32_t compId = 0;
+        bool ok = sevalue_to_native(args[1], &compId, s.thisObject());
+        SE_PRECONDITION2(ok, false, "Second argument (compId) must be a uint32");
+
         ccstd::string className;
-        bool ok = sevalue_to_native(args[2], &className, s.thisObject());
+        ok = sevalue_to_native(args[2], &className, s.thisObject());
         SE_PRECONDITION2(ok, false, "Error processing className argument");
 
-        uint32_t compId = cobj->registerScriptInstance(jsComp, scriptComp, className);
-        s.rval().setUint32(compId);
+        cc::ScriptComponent *scriptComp = nullptr;
+        if (argc == 4) {
+            SE_PRECONDITION2(args[3].isObject(), false, "Fourth argument (scriptComp) must be an object");
+            se::Object *scriptCompObj = args[3].toObject();
+            scriptComp = static_cast<cc::ScriptComponent *>(scriptCompObj->getPrivateData());
+            SE_PRECONDITION2(scriptComp != nullptr, false, "Failed to extract ScriptComponent from JS object");
+        }
+
+        uint32_t registeredCompId = cobj->registerScriptInstance(compId, jsComp, className, scriptComp);
+        s.rval().setUint32(registeredCompId);
         return true;
     }
-    SE_REPORT_ERROR("wrong number of arguments: %d, was expecting %d", (int)argc, 3);
+    SE_REPORT_ERROR("wrong number of arguments: %d, was expecting %d or %d", (int)argc, 3, 4);
     return false;
 }
 SE_BIND_FUNC(js_ScriptBridge_registerScriptInstance)
@@ -362,6 +386,33 @@ static bool js_ScriptBridge_isInstanceOf(se::State &s) { // NOLINT(readability-i
 }
 SE_BIND_FUNC(js_ScriptBridge_isInstanceOf)
 
+// ─── collectAssetRefs ──────────────────────────────────────────────────────
+// JS: scriptBridge.collectAssetRefs(compId) -> jsb.Asset[]
+static bool js_ScriptBridge_collectAssetRefs(se::State &s) { // NOLINT(readability-identifier-naming)
+    auto *cobj = SE_THIS_OBJECT<cc::ScriptBridge>(s);
+    SE_PRECONDITION2(cobj, false, "Invalid Native Object");
+    const auto &args = s.args();
+    size_t argc = args.size();
+    if (argc == 1) {
+        uint32_t compId = 0;
+        bool ok = sevalue_to_native(args[0], &compId, s.thisObject());
+        SE_PRECONDITION2(ok, false, "Error processing compId argument");
+
+        auto refs = cobj->collectAssetRefs(compId);
+        se::HandleObject arrObj(se::Object::createArrayObject(static_cast<uint32_t>(refs.size())));
+        for (size_t i = 0; i < refs.size(); ++i) {
+            se::Value assetVal;
+            native_ptr_to_seval<cc::Asset>(refs[i], &assetVal);
+            arrObj->setArrayElement(static_cast<uint32_t>(i), assetVal);
+        }
+        s.rval().setObject(arrObj);
+        return true;
+    }
+    SE_REPORT_ERROR("wrong number of arguments: %d, was expecting %d", (int)argc, 1);
+    return false;
+}
+SE_BIND_FUNC(js_ScriptBridge_collectAssetRefs)
+
 // ─── Registration ──────────────────────────────────────────────────────────
 bool register_all_script_bridge(se::Object *obj) { // NOLINT(readability-identifier-naming)
     // Get the jsb namespace
@@ -392,6 +443,7 @@ bool register_all_script_bridge(se::Object *obj) { // NOLINT(readability-identif
     cls->defineFunction("invokeOnDisable", _SE(js_ScriptBridge_invokeOnDisable));
     cls->defineFunction("invokeOnLoad", _SE(js_ScriptBridge_invokeOnLoad));
     cls->defineFunction("isInstanceOf", _SE(js_ScriptBridge_isInstanceOf));
+    cls->defineFunction("collectAssetRefs", _SE(js_ScriptBridge_collectAssetRefs));
 
     cls->install();
 

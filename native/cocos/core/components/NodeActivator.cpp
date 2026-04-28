@@ -23,6 +23,7 @@
 ****************************************************************************/
 
 #include "core/components/NodeActivator.h"
+#include "core/Director.h"
 #include "core/components/Component.h"
 #include "core/data/Object.h"
 #include "core/scene-graph/Node.h"
@@ -85,18 +86,24 @@ void NodeActivator::deactivateNodeRecursively(Node *node) {
 
 void NodeActivator::activateComp(Component *comp, bool active) {
     if (active) {
-        if (comp->_enabled) {
+        if (comp->_enabled && !comp->_enabledInHierarchy) {
             comp->_enabledInHierarchy = true;
-            comp->__preload();
-            comp->onLoad();
+            if (!comp->_preloaded) {
+                comp->__preload();
+                comp->_preloaded = true;
+            }
+            if (!comp->_loaded) {
+                comp->onLoad();
+                comp->_loaded = true;
+            }
             comp->onEnable();
-            // Register with ComponentScheduler (wired in M5)
+            Director::getInstance()->getCompScheduler()->registerComponent(comp);
         }
     } else {
         if (comp->_enabledInHierarchy) {
             comp->_enabledInHierarchy = false;
+            Director::getInstance()->getCompScheduler()->unregisterComponent(comp);
             comp->onDisable();
-            // Unregister from ComponentScheduler (wired in M5)
         }
     }
 }

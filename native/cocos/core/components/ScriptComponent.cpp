@@ -24,6 +24,7 @@
 
 #include "core/components/ScriptComponent.h"
 #include "bindings/jswrapper/SeApi.h"
+#include "core/scripting/ScriptBridge.h"
 
 namespace cc {
 
@@ -134,6 +135,12 @@ void ScriptComponent::onDestroy() {
         }
     });
     _dead = true;
+
+    // Unregister from ScriptBridge if we have a valid compId (C1)
+    if (_compId != 0) {
+        ScriptBridge::getInstance().unregisterScriptInstance(_compId);
+        _compId = 0;
+    }
 }
 
 void ScriptComponent::deserializeBinary(const uint8_t *data, uint32_t size) {

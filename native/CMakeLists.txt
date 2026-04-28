@@ -1981,6 +1981,8 @@ if(CC_USE_D3D12)
         cocos/renderer/gfx-d3d12/D3D12Buffer.cpp
         cocos/renderer/gfx-d3d12/D3D12CommandBuffer.h
         cocos/renderer/gfx-d3d12/D3D12CommandBuffer.cpp
+        cocos/renderer/gfx-d3d12/D3D12DescriptorHeapPool.h
+        cocos/renderer/gfx-d3d12/D3D12DescriptorHeapPool.cpp
         cocos/renderer/gfx-d3d12/D3D12DescriptorSet.h
         cocos/renderer/gfx-d3d12/D3D12DescriptorSet.cpp
         cocos/renderer/gfx-d3d12/D3D12DescriptorSetLayout.h
@@ -2248,9 +2250,17 @@ cocos_source_files(
     cocos/core/components/ComponentMacros.h
     cocos/core/components/Component.h
     cocos/core/components/Component.cpp
+    cocos/core/components/CameraComponent.h
+    cocos/core/components/CameraComponent.cpp
     cocos/core/components/ScriptComponent.h
     cocos/core/components/ScriptComponent.cpp
     cocos/core/components/ThreeBucketArray.h
+
+    # Phase E: builtin component migration (E2 + E3)
+    cocos/core/components/MeshRendererComponent.h
+    cocos/core/components/MeshRendererComponent.cpp
+    cocos/core/components/LightComponent.h
+    cocos/core/components/LightComponent.cpp
 
     # scripting bridge (M6-S1)
     cocos/core/scripting/ScriptBridge.h
@@ -2949,6 +2959,17 @@ cocos_source_files(
             cocos/bindings/manual/jsb_AssetRefManager.h
             cocos/bindings/manual/jsb_script_bridge_manual.cpp
             cocos/bindings/manual/jsb_script_bridge_manual.h
+            cocos/bindings/manual/jsb_binary_deser_manual.cpp
+            cocos/bindings/manual/jsb_binary_deser_manual.h
+            # CameraComponent (Phase E1) - JSB binding enabled
+            cocos/bindings/manual/jsb_camera_component_manual.cpp
+            cocos/bindings/manual/jsb_camera_component_manual.h
+            # MeshRendererComponent (Phase E4)
+            cocos/bindings/manual/jsb_mesh_renderer_manual.cpp
+            cocos/bindings/manual/jsb_mesh_renderer_manual.h
+            # LightComponents (Phase E5)
+            cocos/bindings/manual/jsb_light_component_manual.cpp
+            cocos/bindings/manual/jsb_light_component_manual.h
             cocos/bindings/manual/jsb_network_manual.cpp
             cocos/bindings/manual/jsb_network_manual.h
             cocos/bindings/manual/jsb_xmlhttprequest.cpp
@@ -3621,7 +3642,7 @@ if(CC_USE_VULKAN)
 endif()
 
 if(WINDOWS AND CC_USE_D3D12)
-    target_link_libraries(${ENGINE_NAME} PUBLIC d3d12 dxgi dxguid)
+    target_link_libraries(${ENGINE_NAME} PUBLIC d3d12 dxgi dxguid d3dcompiler)
 endif()
 
 if(CC_USE_METAL)

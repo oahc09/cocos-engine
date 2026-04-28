@@ -1,6 +1,8 @@
 // some interfaces might be overridden
 /* eslint-disable import/no-mutable-exports */
 
+type Asset = import('../cocos/asset/assets/asset').Asset;
+
 /**
  * API for jsb module
  * Author: haroel
@@ -354,6 +356,73 @@ declare namespace jsb {
          * @param callback (asset, oldCount, newCount) => void
          */
         setRefCountChangedCallback(callback: ((asset: Asset, oldCount: number, newCount: number) => void) | null): void;
+    }
+
+    // ─── ScriptBridge (C++ migration M6-S1, Phase C) ──────────────────────────
+    /**
+     * @en Bridge between C++ engine and JS user scripts.
+     * Manages script type registration, instance lifecycle, and batch JS callbacks.
+     * @zh C++ 引擎与 JS 用户脚本之间的桥梁。
+     * 负责脚本类型注册、实例生命周期管理和批量 JS 回调执行。
+     */
+    export class ScriptBridge {
+        private constructor();
+        /** Get the singleton instance */
+        static getInstance(): ScriptBridge;
+        /** Initialize with the global JS object */
+        init(): void;
+        /** Shutdown and release all references */
+        shutdown(): void;
+        /** Register a script class type, returns classId */
+        registerScriptClass(
+            className: string, hasStart: boolean, hasUpdate: boolean, hasLateUpdate: boolean,
+            hasOnLoad: boolean, hasOnDestroy: boolean, hasOnEnable: boolean, hasOnDisable: boolean,
+            executionOrder: number, requireComponent: number, disallowMultiple: boolean
+        ): number;
+        /** Register a script component instance, returns compId */
+        registerScriptInstance(jsComp: object, scriptComp: object, className: string): number;
+        /** Register a script component instance with an explicit bridge compId, returns compId */
+        registerScriptInstance(jsComp: object, compId: number, className: string, scriptComp?: object): number;
+        /** Unregister a script component instance */
+        unregisterScriptInstance(compId: number): void;
+        /** Batch invoke start on component IDs */
+        invokeStartBatch(compIds: number[]): void;
+        /** Batch invoke update on component IDs */
+        invokeUpdateBatch(compIds: number[], dt: number): void;
+        /** Batch invoke lateUpdate on component IDs */
+        invokeLateUpdateBatch(compIds: number[], dt: number): void;
+        /** Invoke onDestroy on a single component */
+        invokeOnDestroy(compId: number): void;
+        /** Invoke onEnable on a single component */
+        invokeOnEnable(compId: number): void;
+        /** Invoke onDisable on a single component */
+        invokeOnDisable(compId: number): void;
+        /** Invoke onLoad on a single component */
+        invokeOnLoad(compId: number): void;
+        /** Check if a component is an instance of a class */
+        isInstanceOf(compId: number, className: string): boolean;
+        /** Collect asset references from a script component's serialized properties */
+        collectAssetRefs(compId: number): Asset[];
+    }
+
+    // ─── BinaryDeserializer (C++ migration M4-S1) ────────────────────────────
+    /**
+     * @en Binary scene deserializer. Parses .scene.bin format into C++ scene graph.
+     * @zh 二进制场景反序列化器。将 .scene.bin 格式解析为 C++ 场景图。
+     */
+    export class BinaryDeserializer {
+        private constructor();
+        /**
+         * Deserialize a binary scene buffer.
+         * @param buffer ArrayBuffer or TypedArray containing the .scene.bin data
+         * @returns An object with { scene, assets, success, errorMessage } properties
+         */
+        static deserialize(buffer: ArrayBuffer | Uint8Array): {
+            scene: Node | null;
+            assets: Asset[];
+            success: boolean;
+            errorMessage: string;
+        };
     }
 
     export class AssetsManager {

@@ -28,6 +28,7 @@
 #include "core/assets/Asset.h"
 #include "core/components/ScriptComponent.h"
 #include "core/serialization/TypeRegistry.h"
+#include "profiler/Profiler.h"
 
 namespace cc {
 
@@ -56,6 +57,15 @@ void ScriptBridge::init(se::Object *globalObj) {
             // Prevent GC from collecting the function reference
             _globalObj->attachObject(_batchCallFn);
         }
+
+        // Look up JS-side asset reference collector: __scriptBridgeCollectAssetRefs
+        // Signature: __scriptBridgeCollectAssetRefs(compId: number) => Asset[]
+        se::Value collectFnVal;
+        _globalObj->getProperty("__scriptBridgeCollectAssetRefs", &collectFnVal);
+        if (collectFnVal.isObject() && collectFnVal.toObject()->isFunction()) {
+            _collectRefsFn = collectFnVal.toObject();
+            _globalObj->attachObject(_collectRefsFn);
+        }
     }
 }
 
@@ -64,7 +74,11 @@ void ScriptBridge::shutdown() {
     if (_batchCallFn && _globalObj) {
         _globalObj->detachObject(_batchCallFn);
     }
+    if (_collectRefsFn && _globalObj) {
+        _globalObj->detachObject(_collectRefsFn);
+    }
     _batchCallFn = nullptr;
+    _collectRefsFn = nullptr;
     _globalObj = nullptr;
 }
 
@@ -147,19 +161,36 @@ uint32_t ScriptBridge::registerScriptClass(const ccstd::string &className,
 
 uint32_t ScriptBridge::registerScriptInstance(se::Object *jsComp, ScriptComponent *scriptComp,
                                               const ccstd::string &className) {
-    uint32_t compId = _nextCompId++;
+    return registerScriptInstance(_nextCompId++, jsComp, className, scriptComp);
+}
+
+uint32_t ScriptBridge::registerScriptInstance(uint32_t compId, se::Object *jsComp,
+                                              const ccstd::string &className,
+                                              ScriptComponent *scriptComp) {
+    if (compId == 0) {
+        compId = _nextCompId++;
+    } else if (compId >= _nextCompId) {
+        _nextCompId = compId + 1;
+    }
+
+    auto existing = _instances.find(compId);
+    if (existing != _instances.end() && existing->second.jsObject && _globalObj) {
+        _globalObj->detachObject(existing->second.jsObject);
+    }
 
     ScriptInstanceInfo info;
     info.jsObject = jsComp;
     info.scriptComp = scriptComp;
     info.className = className;
-
-    // Look up the type ID from TypeRegistry
     info.typeId = TypeRegistry::getInstance().getClassIdByName(className);
 
     _instances[compId] = info;
 
-    // Prevent GC from collecting the JS component object while it's registered
+    if (scriptComp) {
+        scriptComp->setScriptBridgeCompId(compId);
+        scriptComp->bindJSObject(jsComp);
+    }
+
     if (jsComp && _globalObj) {
         _globalObj->attachObject(jsComp);
     }
@@ -187,18 +218,62 @@ void ScriptBridge::unregisterScriptInstance(uint32_t compId) {
 
 ccstd::vector<Asset *> ScriptBridge::collectAssetRefs(uint32_t compId) {
     auto it = _instances.find(compId);
-    if (it == _instances.end() || !it->second.scriptComp) {
+    if (it == _instances.end()) {
         return {};
     }
 
-    // Delegate to ScriptComponent's getAssetProperties if available
-    if (!it->second.scriptComp->isDead()) {
-        return it->second.scriptComp->getAssetProperties();
+    // For builtin components (unlikely but safe): delegate to getAssetProperties
+    if (it->second.scriptComp && !it->second.scriptComp->isDead()) {
+        auto props = it->second.scriptComp->getAssetProperties();
+        if (!props.empty()) {
+            return props;
+        }
     }
 
-    // TODO: Call JS-side __collectAssetRefs(compId) for user-script properties
-    // once the TS runtime layer implements it. (G-8 safeCallJS pattern)
-    return {};
+    // For user scripts: call JS-side __scriptBridgeCollectAssetRefs(compId)
+    // which inspects serialized @property fields for Asset references.
+    if (!_collectRefsFn || !it->second.jsObject) {
+        return {};
+    }
+
+    se::ValueArray args;
+    args.emplace_back(se::Value(compId));
+    se::Value rval;
+    _collectRefsFn->call(args, nullptr, &rval);
+
+    // Parse returned JS array of Asset objects into C++ Asset pointers
+    ccstd::vector<Asset *> result;
+    if (rval.isObject()) {
+        se::Object *arrObj = rval.toObject();
+        if (arrObj->isArray()) {
+            uint32_t length = 0;
+            arrObj->getArrayLength(&length);
+            result.reserve(length);
+            for (uint32_t i = 0; i < length; ++i) {
+                se::Value elem;
+                if (arrObj->getArrayElement(i, &elem) && elem.isObject()) {
+                    // Extract native Asset pointer from JS object's private data
+                    se::Object *elemObj = elem.toObject();
+                    void *nativePtr = elemObj->getPrivateData();
+                    if (nativePtr != nullptr) {
+                        auto *asset = static_cast<Asset *>(nativePtr);
+                        result.push_back(asset);
+                    }
+                }
+            }
+        }
+    }
+
+    return result;
+}
+
+ccstd::vector<Asset *> ScriptBridge::collectAssetRefsBatch(const ccstd::vector<uint32_t> &compIds) {
+    ccstd::vector<Asset *> result;
+    for (uint32_t compId : compIds) {
+        auto refs = collectAssetRefs(compId);
+        result.insert(result.end(), refs.begin(), refs.end());
+    }
+    return result;
 }
 
 // ========================================================================
@@ -260,6 +335,15 @@ void ScriptBridge::callJSBatchMethod(const ccstd::vector<uint32_t> &compIds, con
         return;
     }
 
+    utils::Timer timer;
+    timer.reset();
+
+    const auto recordBatchStats = [&compIds, method, &timer]() {
+        if (auto *profiler = Profiler::getInstance()) {
+            profiler->recordScriptBridgeBatch(method, static_cast<uint32_t>(compIds.size()), timer.getMicroseconds());
+        }
+    };
+
     if (!_batchCallFn) {
         // Fallback: call each instance individually
         for (uint32_t compId : compIds) {
@@ -290,6 +374,7 @@ void ScriptBridge::callJSBatchMethod(const ccstd::vector<uint32_t> &compIds, con
                 methodVal.toObject()->call(args, it->second.jsObject);
             }
         }
+        recordBatchStats();
         return;
     }
 
@@ -314,6 +399,7 @@ void ScriptBridge::callJSBatchMethod(const ccstd::vector<uint32_t> &compIds, con
 
     se::Value rval;
     _batchCallFn->call(args, nullptr, &rval);
+    recordBatchStats();
 }
 
 } // namespace cc

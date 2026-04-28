@@ -5,8 +5,8 @@
 
  Permission is hereby granted, free of charge, to any person obtaining a copy
  of this software and associated documentation files (the "Software"), to deal
- in the Software without restriction, including without limitation the rights to
- use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+ in the Software without restriction, including without limitation the rights
+ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
  of the Software, and to permit persons to whom the Software is furnished to do so,
  subject to the following conditions:
 
@@ -25,15 +25,30 @@
 #pragma once
 
 #include "gfx-base/GFXRenderPass.h"
+#include <memory>
 
 namespace cc {
 namespace gfx {
 
 class CC_DLL CCD3D12RenderPass final : public RenderPass {
 public:
+    CCD3D12RenderPass();
+    ~CCD3D12RenderPass() override;
+
+    // Returns DXGI_FORMAT values packed as uint32_t (avoids including dxgiformat.h in header).
+    // PipelineState will interpret these as DXGI_FORMAT.
+    const ccstd::vector<uint32_t> &getRTVFormats() const;
+    uint32_t getDSVFormat() const;
+    uint32_t getColorAttachmentCount() const;
+    uint32_t getSampleCount() const;
+
 protected:
     void doInit(const RenderPassInfo &info) override;
     void doDestroy() override;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> _impl;
 };
 
 } // namespace gfx

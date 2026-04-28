@@ -78,10 +78,16 @@ public:
     // === Script component instance registration ===
     uint32_t registerScriptInstance(se::Object *jsComp, ScriptComponent *scriptComp,
                                     const ccstd::string &className);
+    uint32_t registerScriptInstance(uint32_t compId, se::Object *jsComp,
+                                    const ccstd::string &className,
+                                    ScriptComponent *scriptComp = nullptr);
     void unregisterScriptInstance(uint32_t compId);
 
     // === Asset reference collection ===
     ccstd::vector<Asset *> collectAssetRefs(uint32_t compId);
+
+    // === Batch collect asset refs from multiple components ===
+    ccstd::vector<Asset *> collectAssetRefsBatch(const ccstd::vector<uint32_t> &compIds);
 
     // === instanceof check ===
     bool isInstanceOf(uint32_t compId, const ccstd::string &className);
@@ -103,7 +109,8 @@ private:
     se::Object *_globalObj{nullptr};
 
     // Cached JS function references
-    se::Object *_batchCallFn{nullptr}; // JS side batch executor
+    se::Object *_batchCallFn{nullptr};       // JS side batch executor
+    se::Object *_collectRefsFn{nullptr};     // JS side asset ref collector
 
     // Internal helpers
     void callJSMethod(uint32_t compId, const char *method);

@@ -41,7 +41,7 @@ void ComponentScheduler::invokeStart() {
     _invokingStart = true;
     _startList.forEach([](Component *comp) {
         comp->start();
-        comp->_registeredToScheduler = false;
+        comp->_started = true;
     });
     _startList.clear();
     _invokingStart = false;
@@ -86,16 +86,19 @@ void ComponentScheduler::invokeLateUpdate(float dt) {
 // ---- Lifecycle registration helpers ----
 
 void ComponentScheduler::registerComponent(Component *comp) {
-    if (comp->hasStartMethod()) {
+    bool registered = false;
+    if (comp->hasStartMethod() && !comp->_started) {
         addStart(comp);
     }
     if (comp->hasUpdateMethod()) {
         addUpdate(comp); // TODO: support executionOrder per component
+        registered = true;
     }
     if (comp->hasLateUpdateMethod()) {
         addLateUpdate(comp);
+        registered = true;
     }
-    comp->_registeredToScheduler = true;
+    comp->_registeredToScheduler = registered;
 }
 
 void ComponentScheduler::unregisterComponent(Component *comp) {

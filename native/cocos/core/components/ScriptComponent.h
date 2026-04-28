@@ -73,6 +73,10 @@ public:
     void setScriptClassId(uint32_t id) { _scriptClassId = id; }
     uint32_t getScriptClassId() const { return _scriptClassId; }
 
+    // ---- ScriptBridge instance ID (set by ScriptBridge::registerScriptInstance) ----
+    void setScriptBridgeCompId(uint32_t compId) { _compId = compId; }
+    uint32_t getScriptBridgeCompId() const { return _compId; }
+
     // ---- JS object binding ----
     void bindJSObject(se::Object *jsObj);
     se::Object *getJSObject() const { return _jsObject; }
@@ -90,6 +94,7 @@ private:
     void safeCallJS(Fn &&fn);
 
     uint32_t _scriptClassId{0};
+    uint32_t _compId{0}; // ScriptBridge-assigned instance ID (0 = not registered)
     ccstd::string _scriptClassPath;
     ccstd::string _serializedProps;
 

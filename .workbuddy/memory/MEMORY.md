@@ -4,153 +4,96 @@
 - **引擎版本**: Cocos Creator v3.8.8 (MIT 许可证)
 - **分支**: v3.8.8_custome
 - **工作目录**: d:\cocos_custome\cocos-engine
+- **构建**: VS 2022 x64, CMake, build/ 目录
 - **架构文档**: AI/CocosCreator-v3.8.8-Architecture.md
 
 ## 关键架构知识
-- 入口: predefine.ts → cocos/core/global-exports.ts → cclegacy 命名空间
-- 构建核心配置: cc.config.json (852行, features/modules/constants/moduleOverrides)
-- 双实现机制: .ts (Web) vs .jsb.ts (原生JSB)
-- PAL 平台抽象: pal/ 目录, 通过虚拟模块映射实现跨平台
-- 渲染双管线: custom-pipeline (WebPipeline) vs legacy-pipeline
-- 物理策略模式: Cannon/PhysX/Ammo/Builtin 通过 framework 层切换
-- 初始化四阶段: Base → Infrastructure → Subsystem → Project
-- 核心3类: Game(主循环), Director(场景调度), Root(渲染管理)
-- Node 是引擎最核心类 (3014行), 继承自 CCObject
+- 入口: predefine.ts → global-exports.ts → cclegacy 命名空间
+- 双实现: .ts (Web) vs .jsb.ts (原生JSB), 54个双实现文件
+- PAL 平台抽象: pal/ 虚拟模块映射
+- 核心3类: Game(主循环) → Director(场景调度) → Root(渲染管理)
+- Node 最核心类 (~3014行), 继承 CCObject
+- GFX 抽象层: gfx-base 接口 → 各后端实现 (GLES3/Vulkan/Metal/D3D12)
+- 技术栈: TypeScript 4.9.5, @cocos/ccbuild, C++17
 
-## 技术栈
-- TypeScript 4.9.5, ES6 + CommonJS
-- @cocos/ccbuild 构建工具
-- @cocos/box2d (2D物理), @cocos/cannon (3D物理)
-
-## JSB/Native 分析结论 (2026-04-24)
-- 共 54 个 .jsb.ts 双实现文件，覆盖 7 大模块组
-- JSB 5 种补丁模式: 直接替换类/Prototype猴子补丁/_ctor构造钩子/属性桥接/Decorator补丁
-- `_tempFloatArray` 是核心跨层数据传递通道 (Float32Array共享内存)
-- 全局桥接对象: jsb(核心类), nr(渲染管线), n2d(2D渲染), gfx(GFX), render(自定义管线)
-- native-binding/decorators.ts (1611行) 是自动生成的元数据补丁文件
-- **核心结论**: Windows/Android 无法完全脱离 TS，因组件系统/用户脚本/序列化依赖 JS 引擎
-- 可优化方向: 减少 JS↔C++ 桥接次数、消除 _tempFloatArray、热路径 Native 化
-- 详细对比文档: AI/TS-vs-Native-Comparison.md
-
-## C++ 化设计结论 (2026-04-25, v2.0 统一修订)
+## C++ 迁移 (M1-M10) 状态汇总
+- **权威设计文档**: AI/design-cpp-master-spec.md v2.0
 - **核心策略**: 双轨制 — 编辑器JS_ONLY + 运行时NATIVE_FAST
-- **用户脚本不可C++化**: 只优化桥接/调度，不改变JS执行本质
-- **引用计数统一**: C++ AssetRefManager 为权威源，JS通过桥接同步
-- **双层调度**: 内置组件 ThreeBucketArray + 用户脚本 ScriptBridge 批量调用
-- **二进制序列化**: 构建时 .scene JSON → .scene.bin，C++零反射解析
-- **Prefab预编译**: BinaryTemplate + instantiateFromBinary 替代JS JIT编译
-- **内置组件C++化优先级**: Camera/MeshRenderer/Light > Animation/Sprite
-- **Native已有基础**: Asset/Scene/Node/SceneGlobals/Texture2D/Mesh/Material已有C++实现
-- **Native关键缺失**: AssetManager/Pipeline/ReleaseManager/Prefab/序列化 (Director 已有最小实现)
-- **统一 TypeRegistry**: 合并组件注册表与序列化注册表为单一注册表 (I-1)
-- **统一 ScriptComponent**: 合并生命周期代理与反序列化占位 (I-3)
-- **常驻节点归 Director**: Scene 不持有 _persistRootNodes (I-4)
-- **统一时间线**: 26周6阶段 (Phase 0-5) (I-5)
-- **线程模型**: 单线程主循环，C++对象无需锁 (G-5)
-- **GC协议**: ScriptComponent._jsObject 弱引用，safeCallJS 检查 isDead() (G-8)
-- **回滚策略**: 每个C++化功能都有JS降级路径 (G-14)
-- **统一注册宏**: CC_REGISTER_BUILTIN 替代各文档独立宏
-- **生命周期检测**: hasUpdateMethod/hasStartMethod 虚函数替代函数指针
-- **权威文档**: AI/design-cpp-master-spec.md v2.0 (948行)
-- **子设计文档**: AI/design-cpp-{component,scene,asset,script}-system.md v2.0
-- **分析文档**: AI/analysis-*.md (4份深度分析)
-- 总体时间线: ~6个月 (Phase 0-5, 26周)
+- **线程模型**: 单线程主循环，C++对象无需锁
+- **引用计数**: IntrusivePtr + ReleaseManager, C++ 为权威源
+- **统一注册**: TypeRegistry 合并组件注册+序列化注册
+- **已完成模块**:
+  - M1: TypeRegistry, PipelineStateManager, 基准测试框架
+  - M2: 无 (合并到其他阶段)
+  - M3: Director 最小实现, NodeActivator, Prefab C++ 类
+  - M4: 二进制序列化 (BinarySceneFormat + BinaryDeserializer)
+  - M5: Director 完整实现 (tick/loadScene/runScene/Scheduler/ComponentScheduler)
+  - M6: ScriptBridge 核心实现
+  - M7: NativePipeline 接口定义
+  - M8: AssetManager + ReleaseManager
+  - M9: CameraComponent C++ (编译通过, JSB待启用)
+  - M10: JSB 注册整合 (jsb_module_register.cpp)
+- **已知问题**: Engine::tick 与 Director::tick 重复调用 update
+- **全量编译**: Debug/Release 均通过
+- **Phase A4 ✅**: Director::tick 职责明确文档化（ComponentScheduler + deferredDestroy）
+- **Phase C1 ✅**: ScriptComponent-ScripBridge 双向 ID 同步（_compId + auto-unregister）
+- **Phase C2 ✅**: ScriptBridge 批量调用已有 callJSBatchMethod + fallback
+- **Phase C3 ✅**: collectAssetRefs + collectAssetRefsBatch 实现（JS 回调 + getPrivateData）
+- **Phase D1 ✅**: ReleaseManager 为统一引用计数入口
+- **Phase D2 ✅**: destroyOldScene walk收集资产引用 → decRef → autoRelease
+- **Phase D3 ✅**: cacheAsset=registerAsset+addRef, removeCachedAsset=decRef, clearCache=批量decRef
 
-## JSB 绑定生成机制 (2026-04-25 实施)
-- **SWIG 自动生成**: CMake configure 阶段调用自定义 SWIG，从 `.i` 文件生成 `jsb_*_auto.cpp/h`
-- **核心配置**: `native/tools/swig-config/scene.i`，通过 `%ignore` 排除方法，`%attribute` 定义属性
-- **排除方法**: 在 `%include` 之前添加 `%ignore cc::Node::xxx;` 即可阻止 SWIG 绑定
-- **se::Value API**: 无 `isFunction()`，需用 `fn.isObject() && fn.toObject()->isFunction()` 组合判断
-- **se::Object::call()**: 签名 `bool call(const ValueArray &args, Object *thisObject, Value *rval = nullptr)`
-- **CMake 生成函数**: `cc_gen_swig_files()` 在 `native/cmake/predefine.cmake` 第269行
-- **Node 组件方法**: 需在 scene.i 中 %ignore，因为 Component 类型未注册到 JSB 绑定系统
+## Phase E: Builtin Component JSB 绑定
+- **Phase E1 ✅**: CameraComponent JSB 手动绑定 (projection/near/far/fov + setViewport + getRenderCamera)
+- **Phase E2 ✅**: MeshRendererComponent C++ 类 (onLoad/onDestroy/update + mesh/material/shadow)
+- **Phase E3 ✅**: LightComponent C++ 类 (5子类: Directional/Sphere/Spot/Point/RangedDirectional)
+- **Phase E4 ✅**: MeshRendererComponent JSB 手动绑定 (shadowCastingMode/receiveShadow + setMesh/getMaterial + getRenderModel)
+- **Phase E5 ✅**: LightComponent JSB 手动绑定 (5个灯光类各自的属性: color/illuminance/range/size/luminance/spotAngle/shadow*)
+- **Phase E6 ✅**: 所有 JSB 注册整合到 jsb_module_register.cpp
+- **Phase E7 ✅**: Debug + Release 全量编译通过，零错误
+- **新增文件**: jsb_camera_component_manual.h/.cpp, jsb_mesh_renderer_manual.h/.cpp, jsb_light_component_manual.h/.cpp
+- **BuiltinTypeIds**: 新增 BUILTIN_DIRECTIONAL_LIGHT(19) ~ BUILTIN_RANGED_DIRECTIONAL_LIGHT(23), COUNT=24
+- **待后续**: MeshRendererComponent.syncToRenderModel() 完整 submodel 设置
 
-## 手动 JSB 绑定模式 (2026-04-25 M1-S2)
-- **PipelineStateManager 模式**: 在 `jsb` 命名空间下创建 `se::Class::create()` 对象，绑定静态方法+实例方法
-- **C++ 回调→JS**: lambda 捕获 `se::Value jsFunc`，`jsThis.toObject()->attachObject(jsFunc.toObject())` 防 GC
-- **Asset* 参数**: 使用 `sevalue_to_native(args[i], &asset, s.thisObject())` 从 JS Asset 对象提取 C++ 指针
-- **注册流程**: `jsb_module_register.cpp` 中 `se->addRegisterCallback(register_all_XXX)` 添加到注册链
-- **TS 声明**: 在 `@types/jsb.d.ts` 的 `declare namespace jsb { }` 内添加 class 声明
+## JSB 绑定经验
+- SWIG 自动生成: scene.i 配置, `%ignore` 排除方法
+- 手动绑定: `jsb` 命名空间, `se::Class::create()`, attachObject 防 GC
+- se::Value 无 `isFunction()`, 用 `fn.isObject() && fn.toObject()->isFunction()`
+- se::Value 无 `NullObject()`, 用 `se::Value::Null` 静态成员
+- HandleObject 无 `isValid()`, 用 `!isEmpty()`
+- sevalue_to_native 提取 C++ 指针
+- **关键教训**: JSB 注册函数必须声明在全局命名空间（不能放在 namespace cc），因为 jsb_module_register.cpp 不在任何命名空间内
+- **关键教训**: native_ptr_to_seval<T> 需要类型 T 有完整定义（不能是前向声明），因为它内部调用 typeid
+- **关键教训**: 提取 JS 对象中的原生指针时，若 T 未注册 is_jsb_object，直接用 `static_cast<T*>(args[0].toObject()->getPrivateData())` 比 sevalue_to_native 更可靠
+- **Vec3 转换**: 使用 `jsb_conversions_spec.h` 中的 `Vec3_to_seval` 和 `sevalue_to_native(Vec3*,...)`, 不要自定义
 
-## 基准测试框架 (2026-04-25 M1-S3)
-- **测试目录**: `native/tests/benchmarks/`
-- **bench_type_registry**: 链接 cocos_engine，测试 registerType/getTypeInfo/hasClass/getClassIdByName/registerScriptType/create
-- **bench_ref_manager**: 自包含 mock，隔离测试管理器层开销（不链接引擎）
-- **门控**: getTypeInfo 查询 < 1μs/op (实测 ~115ns/op)
-- **结果归档**: `native/tests/benchmarks/bench-results/native-fast.json`
-- **CI 回归阈值**: 10% (G-15)
-
-## Director 最小实现 (2026-04-25 M3-S1b)
-- **Director.h/cpp**: 单例，持有 NodeActivator，提供 `getNodeActivator()` 访问
-- **NodeActivator 增强**: 递归激活/停用子节点 + 设置 `_activeInHierarchy` + emit `ActiveInHierarchyChanged`
-- **递归激活**: activateNodeRecursively — 设置 activeInHierarchy → 激活组件 → 递归子节点
-- **递归停用**: deactivateNodeRecursively — 设置 Deactivating 标记 → 清 activeInHierarchy → 先递归子节点 → 逆序停用组件 → 清标记
-- **Scene::activate()**: 接入 `Director::getInstance()->getNodeActivator()->activateNode(this, active)`
-- **Node::setActive/onHierarchyChangedBase**: 替换 `emit<ActiveNode>` 为 `Director::getInstance()->getNodeActivator()->activateNode()`
-- **Node::addComponent**: 对 active 节点立即调用 `activateComponent(comp, true)`
-- **NodeActivator::activateComponent**: 公共接口，委托给私有 activateComp
-- **C++ emit 事件类型**: 外部调用 Node emit 时需完整限定名 `node->emit<Node::ActiveInHierarchyChanged>()`
-
-## 第二批并行任务 (2026-04-25 M3-S2/M4/M5-S1/M6-S1/M7-S0)
-
-### M3-S2: Prefab C++ 类
-- **新建**: Prefab.h/cpp, PrefabInfo.h, PrefabUtils.h/cpp
-- **Prefab**: 继承 Asset，OptimizationPolicy(AUTO/SINGLE/MULTI)，BinaryTemplate 结构，initFromBinary/instantiate
-- **PrefabUtils**: expandNestedPrefabInstanceNode/applyTargetOverrides 当前 stub (等 M4 完整实现)
-- **Scene.cpp**: 替换注释为 `PrefabUtils::expandNestedPrefabInstanceNode(this)` / `PrefabUtils::applyTargetOverrides(this)`
-
-### M4-S0+S1: 二进制序列化
-- **新建**: BinarySceneFormat.h (格式规范: Header/StringTable/InstanceTable/NodeEntry/ComponentEntry/AssetRefEntry/Footer)
-- **新建**: BinaryDeserializer.h/cpp
-- **static_assert**: BinarySceneHeader 32B, BinarySceneFooter 32B
-- **BinaryDeserializer::deserialize**: validateHeader → parseStringTable → createScene → createNodeTree → resolveReferences
-- **IntrusivePtr<Asset> 析构问题**: 头文件中使用 IntrusivePtr<Asset> 时必须 include Asset.h，前向声明不够
-
-### M5-S1: Director 完整实现
-- **扩展 Director.h/cpp**: tick/loadScene/runScene/runSceneImmediate/addPersistRootNode/removePersistRootNode/isPersistRootNode
-- **tick**: Scheduler::update → ComponentScheduler::invokeStart/Update/LateUpdate
-- **runSceneImmediate**: onBeforeLoadScene → scene->load → handlePersistRootNodes → destroyOldScene → setScene → scene->activate → onLaunched
-- **常驻节点**: _persistRootNodes (uuid → Node*)，addPersistRootNode 设置 DONT_DESTROY 标志
-- **Scheduler**: 懒初始化 getScheduler()，类在 base/Scheduler.h
-
-### M6-S1: ScriptBridge 核心实现
-- **新建**: scripting/ScriptBridge.h/cpp
-- **接口**: invokeStartBatch/UpdateBatch/LateUpdateBatch (批量), invokeOnDestroy/OnEnable/OnDisable/OnLoad (单个)
-- **注册**: registerScriptClass (调用 TypeRegistry), registerScriptInstance/unregisterScriptInstance (compId → ScriptInstanceInfo)
-- **ScriptInstanceInfo**: se::Object* jsObject, ScriptComponent* scriptComp, typeId, className
-- **collectAssetRefs/isInstanceOf**: 与 JS 侧交互
-
-### M7-S0: NativePipeline 接口定义
-- **新建**: assets/NativePipeline.h (纯头文件，无 cpp)
-- **PipelineTask**: taskId/path/uuid/data/output/isComplete/hasError
-- **PipelineHandler**: 虚函数 handle(PipelineTask&)
-- **NativePipeline**: insert/removeHandler/executeSync/executeAsync/Mode(JS_ONLY/NATIVE_FAST)
-- **门控**: 编译通过
-
-## Prefab C++ 实现 (2026-04-25 M3-S2)
-- **Prefab.h/.cpp**: 继承 Asset，含 OptimizationPolicy 枚举(AUTO/SINGLE/MULTI)、BinaryTemplate 结构体
-- **Prefab::initFromBinary()**: stub，存储原始二进制数据，TODO(M4) 等待 BinaryDeserializer
-- **Prefab::instantiate()**: 根据 OptimizationPolicy 选择路径，有二进制模板走 instantiateFromBinary()
-- **Prefab::instantiateFromBinary()**: stub，返回 nullptr，TODO(M4)
-- **PrefabInfo.h**: 结构体 (asset/fileId/infoId/root/isDeleted)
-- **PrefabUtils.h/.cpp**: 静态工具类，expandNestedPrefabInstanceNode/applyTargetOverrides stub 实现
-- **Scene::load() 修改**: 注释替换为 `PrefabUtils::expandNestedPrefabInstanceNode(this)` / `PrefabUtils::applyTargetOverrides(this)`
-- **CMakeLists.txt**: 添加 Prefab.cpp/h, PrefabInfo.h, PrefabUtils.cpp/h 到 cocos_source_files
-
-## 第四批并行任务 (2026-04-25 M8-S1/S2)
-
-### M8-S1: AssetManager C++ 核心实现
-- **新建**: `native/cocos/core/assets/AssetManager.h/cpp`
-- **功能**: 单例模式，支持同步/异步加载、Bundle 管理、缓存管理、预加载、双模式检测
-- **loadSync 查找顺序**: 缓存 → Bundle → nullptr (远程加载未实现)
-- **异步加载**: 当前同步执行后回调，TODO 未来接入线程池
-- **Bundle 集成**: 通过 NativeBundle::get() / getUuidByPath() 查找资源
-- **CMakeLists.txt**: 已添加 AssetManager.cpp/h
-
-### M8-S2: ReleaseManager C++ 核心实现
-- **新建**: `native/cocos/core/assets/ReleaseManager.h/cpp`
-- **功能**: 资源引用计数管理、自动释放、依赖管理
-- **核心机制**: registerAsset → addRef/decRef → autoRelease → releaseAsset (递归 decRef dependencies)
-- **Asset 生命周期**: 由 IntrusivePtr 管理，ReleaseManager 只维护引用计数，不直接 delete
-- **风险**: 依赖图存在环时可能导致同一资源被多次 decRef，需后续增加环检测
-- **CMakeLists.txt**: 已添加 ReleaseManager.cpp/h
+## D3D12 GFX 后端 PoC (2026-04-25 启动)
+- **目录**: native/cocos/renderer/gfx-d3d12/
+- **架构**: pImpl 模式隔离 D3D12/Win32 头文件
+- **已完成 (REAL)**: Device (609行), Swapchain (296行), Buffer (200行), Texture (242行)
+- **Agent A 已完成 (2026-04-26)**: DescriptorSetLayout, DescriptorSet (CPU staging heap), PipelineLayout (RootSignature), DescriptorHeapPool (工具类)
+- **Agent B 已完成 (2026-04-26)**: Shader (字节码存储), RenderPass (格式映射), Framebuffer (RTV/DSV), PipelineState (PSO)
+- **Agent C 已完成 (2026-04-26)**: InputAssembler (顶点布局), CommandBuffer (核心命令记录), Queue (命令提交), Device重构 (DescriptorHeapPool集成)
+- **Device 重构**: 2个 GPU-visible DescriptorHeapPool (CBV_SRV_UAV 4096 + SAMPLER 2048), 帧循环自动 reset
+- **QueryPool 已实现 (2026-04-26)**: CreateQueryHeap + readback buffer + ResolveQueryData + begin/end/fetchResults
+- **全部真实实现，无 stub**: 16 个 D3D12 GFX 类全部真实代码
+- **端到端渲染管线打通**: PSO自动创建空RootSignature + 运行时D3DCompile内置三角形着色器
+- **总产出**: +2800 行 D3D12 代码, Debug/Release 编译通过
+- **Gate 2 ✅ 通过 (2026-04-26)**: WebGPUDemo 15秒稳定运行，零 D3D12 错误
+- **Swapchain 纹理修复 (2026-04-26)**:
+  - D3D12Texture: swapchain颜色纹理动态返回getCurrentBackBufferHandle(), 深度纹理创建真实资源
+  - D3D12Framebuffer: 检测swapchain纹理, getRTVHandle()动态返回swapchain RTV
+  - D3D12CommandBuffer: beginRenderPass/endRenderPass添加PRESENT↔RENDER_TARGET资源屏障
+  - 修复后进程稳定运行85秒+，之前5秒即退出(exit code 2173)
+- **DEVICE_HUNG 修复**: copyBuffersToTexture upload 资源生命周期 bug（ComPtr 作用域问题），用 vector<ComPtr> 保持到 waitForGpu 后释放
+- **Debug Layer**: Release 构建禁用(#if !defined(NDEBUG))，避免 AMD 驱动不稳定
+- **PSO 黑屏修复 (2026-04-29)**:
+  - 首次 PSO 创建因 InputLayout(引擎顶点属性) 与 fallback shader(SV_VertexID) 不匹配 → E_INVALIDARG
+  - 第二次 fallback 被 `if (!compiledVS || !compiledPS)` 阻止（首次 fallback 已编译过）
+  - 修复: 始终在首次失败时清除 InputLayout 并重试，PSO 创建成功，draw call 正常
+- **纯 C++ 路径安全降级 (2026-04-29)**:
+  - PipelineSceneData::initDebugRenderer: effect 未加载时 passes 为空，添加空检查
+  - DebugRenderer::activate: 内置字体返回 nullptr，getFontPath 返回空串跳过
+  - Node::onBatchCreated: 补全 C++ 实现 (invalidateChildren + siblingIndex + 递归)
+- **外部测试项目**: D:\Work\CocosProjects\WebGPUDemo\ (COCOS_X_PATH 指向引擎源码)
+- **进度文档**: AI/D3D12-Subagent-Progress-Log.md, AI/D3D12-GFX-PoC-Checklist.md

@@ -43,6 +43,15 @@ enum class ShowOption : uint32_t {
     ALL = CORE_STATS | MEMORY_STATS | OBJECT_STATS | PERFORMANCE_STATS,
 };
 
+struct ScriptBridgeStats {
+    uint32_t totalBatchCalls{0U};
+    uint32_t totalComponents{0U};
+    uint64_t totalDurationUs{0U};
+    uint32_t startCalls{0U};
+    uint32_t updateCalls{0U};
+    uint32_t lateUpdateCalls{0U};
+};
+
 /**
  * Profiler
  */
@@ -63,10 +72,12 @@ public:
     void beginFrame();
     void endFrame();
     void update();
+    void recordScriptBridgeBatch(const std::string_view &method, uint32_t componentCount, uint64_t durationUs);
 
     inline bool isMainThread() const { return _mainThreadId == std::this_thread::get_id(); }
     inline MemoryStats &getMemoryStats() { return _memoryStats; }
     inline ObjectStats &getObjectStats() { return _objectStats; }
+    inline const ScriptBridgeStats &getScriptBridgeStats() const { return _scriptBridgeStats; }
 
 private:
     static void doFrameUpdate();
@@ -84,6 +95,7 @@ private:
     CoreStats _coreStats;
     MemoryStats _memoryStats;
     ObjectStats _objectStats;
+    ScriptBridgeStats _scriptBridgeStats;
     ProfilerBlock *_root{nullptr};
     ProfilerBlock *_current{nullptr};
     std::thread::id _mainThreadId;

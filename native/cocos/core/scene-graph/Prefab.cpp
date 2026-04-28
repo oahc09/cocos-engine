@@ -24,27 +24,26 @@
 
 #include "core/scene-graph/Prefab.h"
 #include "core/scene-graph/Node.h"
+#include "core/scene-graph/Scene.h"
 #include "core/platform/Debug.h"
+#include "core/serialization/BinaryDeserializer.h"
 
 namespace cc {
 
 Prefab::~Prefab() = default;
 
 bool Prefab::initFromBinary(const uint8_t *data, uint32_t size) {
-    // TODO(M4): Full binary deserialization of Prefab template.
-    // Currently stub — will be implemented by M4-S1 BinaryDeserializer.
     // The binary format is defined in AI/design-cpp-scene-system.md §4.2.
     if (data == nullptr || size == 0) {
         CC_LOG_WARNING("Prefab::initFromBinary: invalid data or size is 0");
         return false;
     }
 
-    // Stub: store raw binary data for later processing
     _binaryTemplate.data.assign(data, data + size);
     _binaryTemplate.nodeCount = 0;
     _binaryTemplate.componentCount = 0;
 
-    CC_LOG_DEBUG("Prefab::initFromBinary: stub — stored %u bytes, awaiting M4 deserializer", size);
+    CC_LOG_DEBUG("Prefab::initFromBinary: stored %u bytes for binary instantiation", size);
     return true;
 }
 
@@ -78,11 +77,29 @@ Node *Prefab::instantiate() {
 }
 
 Node *Prefab::instantiateFromBinary() {
-    // TODO(M4): Full binary template instantiation.
-    // Will use BinaryDeserializer to create node tree from _binaryTemplate.data.
-    // Currently stub — returns nullptr.
-    CC_LOG_DEBUG("Prefab::instantiateFromBinary: stub — awaiting M4 BinaryDeserializer");
-    return nullptr;
+    if (_binaryTemplate.data.empty()) {
+        CC_LOG_WARNING("Prefab::instantiateFromBinary: binary template is empty");
+        return nullptr;
+    }
+
+    const auto result = BinaryDeserializer::deserialize(_binaryTemplate.data.data(),
+                                                        static_cast<uint32_t>(_binaryTemplate.data.size()));
+    if (!result.success || result.scene == nullptr) {
+        CC_LOG_WARNING("Prefab::instantiateFromBinary: deserialize failed: %s", result.errorMessage.c_str());
+        return nullptr;
+    }
+
+    const auto &children = result.scene->getChildren();
+    if (children.size() != 1U || children.front() == nullptr) {
+        CC_LOG_WARNING("Prefab::instantiateFromBinary: expected exactly one root child, got %u",
+                       static_cast<uint32_t>(children.size()));
+        return nullptr;
+    }
+
+    Node *instance = children.front();
+    instance->addRef();
+    instance->removeFromParent();
+    return instance;
 }
 
 void Prefab::setData(Node *data) {

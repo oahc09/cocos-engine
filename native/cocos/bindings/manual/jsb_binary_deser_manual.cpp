@@ -73,7 +73,7 @@ static bool js_BinaryDeserializer_deserialize(se::State &s) { // NOLINT(readabil
 
     // Build the return object: { scene, assets, success, errorMessage }
     se::HandleObject retObj(se::Object::createPlainObject());
-    SE_PRECONDITION2(retObj.isValid(), false, "Failed to create return object");
+    SE_PRECONDITION2(!retObj.isEmpty(), false, "Failed to create return object");
 
     // scene: Scene | null
     if (result.scene != nullptr) {
@@ -82,7 +82,7 @@ static bool js_BinaryDeserializer_deserialize(se::State &s) { // NOLINT(readabil
         SE_PRECONDITION2(ok, false, "Failed to convert Scene* to JS object");
         retObj->setProperty("scene", sceneVal);
     } else {
-        retObj->setProperty("scene", se::Value(se::NullObject()));
+        retObj->setProperty("scene", se::Value::Null);
     }
 
     // assets: Asset[]

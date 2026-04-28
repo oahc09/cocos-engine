@@ -56,6 +56,13 @@ struct BinarySceneHeader {
 };
 static_assert(sizeof(BinarySceneHeader) == 32, "BinarySceneHeader must be 32 bytes");
 
+struct SceneEntry {
+    uint32_t nameStringIndex;     // Index into string table for scene name
+    uint8_t autoReleaseAssets;    // 0 or 1
+    uint8_t reserved[3];
+};
+static_assert(sizeof(SceneEntry) == 8, "SceneEntry must be 8 bytes");
+
 struct StringTableEntry {
     uint32_t offset; // Offset from start of string data section
     uint32_t length; // String length in bytes (not including null terminator)

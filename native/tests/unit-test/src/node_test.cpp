@@ -23,7 +23,7 @@
  THE SOFTWARE.
  ****************************************************************************/
 
-//#include "core/Director.h"
+#include "core/Director.h"
 #include "core/Root.h"
 #include "core/scene-graph/Node.h"
 //#include "core/platform/event-manager/Events.h"
@@ -38,6 +38,24 @@ using namespace cc::event;
 using namespace cc::gfx;
 
 namespace {
+
+class RemoveComponentTestComponent final : public Component {
+public:
+    int enableCalls{0};
+    int disableCalls{0};
+    int updateCalls{0};
+
+    void onEnable() override { ++enableCalls; }
+    void onDisable() override { ++disableCalls; }
+    void update(float) override { ++updateCalls; }
+    bool hasUpdateMethod() const override { return true; }
+};
+
+void resetDirectorState() {
+    auto *director = Director::getInstance();
+    director->getCompScheduler()->clear();
+    director->setScene(nullptr);
+}
 
 /*
 
@@ -223,6 +241,33 @@ TEST(NodeTest, setWorldScale0yz_and_rotation) {
         0.40141131793955337, -0.3420201433256687, 1.9292203542855129, 0,
         0, 0, 0, 1
     )));
+}
+
+TEST(NodeTest, removeComponentDeactivatesAndDetachesComponent) {
+    resetDirectorState();
+
+    auto *director = Director::getInstance();
+    auto *root = new Node("root");
+    auto *child = new Node("child");
+    auto *comp = new RemoveComponentTestComponent();
+
+    director->getNodeActivator()->activateNode(root, true);
+    child->setParent(root);
+    child->addComponent(comp);
+
+    director->tick(1.0F / 60.0F);
+    EXPECT_EQ(comp->enableCalls, 1);
+    EXPECT_EQ(comp->updateCalls, 1);
+    EXPECT_EQ(child->getComponents().size(), 1);
+    EXPECT_EQ(comp->getNode(), child);
+
+    child->removeComponent(comp);
+    EXPECT_EQ(comp->disableCalls, 1);
+    EXPECT_EQ(child->getComponents().size(), 0);
+    EXPECT_EQ(comp->getNode(), nullptr);
+
+    director->tick(1.0F / 60.0F);
+    EXPECT_EQ(comp->updateCalls, 1);
 }
 
 } // namespace

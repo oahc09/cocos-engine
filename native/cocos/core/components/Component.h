@@ -105,6 +105,9 @@ protected:
     bool _enabled{true};
     bool _enabledInHierarchy{false};
     bool _fallbackToJS{false};
+    bool _preloaded{false};
+    bool _loaded{false};
+    bool _started{false};
 
     // Scheduler registration state
     bool _registeredToScheduler{false};

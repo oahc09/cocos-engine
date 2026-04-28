@@ -25,12 +25,16 @@
 #pragma once
 
 #include "gfx-base/GFXQueue.h"
+#include <memory>
 
 namespace cc {
 namespace gfx {
 
 class CC_DLL CCD3D12Queue final : public Queue {
 public:
+    CCD3D12Queue();
+    ~CCD3D12Queue() override;
+
     using Queue::submit;
 
     void submit(CommandBuffer *const *cmdBuffs, uint32_t count) override;
@@ -38,6 +42,10 @@ public:
 protected:
     void doInit(const QueueInfo &info) override;
     void doDestroy() override;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> _impl;
 };
 
 } // namespace gfx

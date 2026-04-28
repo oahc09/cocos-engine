@@ -68,13 +68,13 @@ void Scene::activate(bool active /* = true */) {
     this->notifyEditorAttached(active);
 #endif
     Director::getInstance()->getNodeActivator()->activateNode(this, active);
-    // The test environment does not currently support the renderer
-    //        if (!TEST) {
-    _globals->activate(this);
-    if (_renderScene) {
-        _renderScene->activate();
+    auto *root = Root::getInstance();
+    if (root != nullptr && root->getPipeline() != nullptr) {
+        _globals->activate(this);
+        if (_renderScene) {
+            _renderScene->activate();
+        }
     }
-    //        }
 }
 
 void Scene::onBatchCreated(bool dontSyncChildPrefab) {

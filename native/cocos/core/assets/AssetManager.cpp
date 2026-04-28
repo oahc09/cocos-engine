@@ -26,6 +26,8 @@
 #include "core/assets/Asset.h"
 #include "core/assets/NativeBundle.h"
 #include "core/assets/NativePipeline.h"
+#include "core/assets/ReleaseManager.h"
+#include "core/assets/SceneAsset.h"
 #include "base/Log.h"
 
 namespace cc {
@@ -58,6 +60,17 @@ IntrusivePtr<Asset> AssetManager::loadSync(const AssetLoadRequest &request) {
                     cacheAsset(request.uuid, asset);
                 }
                 return IntrusivePtr<Asset>(asset);
+            }
+
+            auto sceneInfo = bundle->getSceneInfo(request.uuid);
+            if (!sceneInfo.uuid.empty()) {
+                Asset *sceneAsset = getCachedAsset(sceneInfo.uuid);
+                if (sceneAsset != nullptr) {
+                    if (request.cache) {
+                        cacheAsset(request.uuid, sceneAsset);
+                    }
+                    return IntrusivePtr<Asset>(sceneAsset);
+                }
             }
         }
     }
@@ -102,6 +115,10 @@ void AssetManager::cacheAsset(const ccstd::string &uuid, Asset *asset) {
     if (uuid.empty() || asset == nullptr) {
         return;
     }
+    // D3: register + addRef — the cache holds a logical reference.
+    // This ensures ReleaseManager tracks the asset's lifecycle correctly.
+    ReleaseManager::getInstance().registerAsset(asset);
+    ReleaseManager::getInstance().addRef(uuid);
     _cache[uuid] = IntrusivePtr<Asset>(asset);
 }
 
@@ -114,10 +131,23 @@ Asset *AssetManager::getCachedAsset(const ccstd::string &uuid) {
 }
 
 void AssetManager::removeCachedAsset(const ccstd::string &uuid) {
+    auto it = _cache.find(uuid);
+    if (it != _cache.end()) {
+        // D3: Release the cache's logical ref. If ref count drops to 0,
+        // flush the pending release immediately so stale records do not linger.
+        ReleaseManager::getInstance().decRef(uuid);
+        ReleaseManager::getInstance().autoRelease();
+    }
     _cache.erase(uuid);
 }
 
 void AssetManager::clearCache() {
+    // D3: Release logical refs for all cached assets before clearing.
+    // Flush the pending release queue immediately so cached-only records do not linger.
+    for (const auto &pair : _cache) {
+        ReleaseManager::getInstance().decRef(pair.first);
+    }
+    ReleaseManager::getInstance().autoRelease();
     _cache.clear();
 }
 
@@ -151,6 +181,52 @@ void AssetManager::preload(const ccstd::vector<AssetLoadRequest> &requests, cons
 
 bool AssetManager::isNativeFastMode() const {
     return (_pipeline != nullptr) && (_pipeline->getMode() == NativePipeline::Mode::NATIVE_FAST);
+}
+
+IntrusivePtr<SceneAsset> AssetManager::loadSceneAsset(const ccstd::string &sceneName) {
+    if (sceneName.empty()) {
+        return nullptr;
+    }
+
+    if (auto *cached = dynamic_cast<SceneAsset *>(getCachedAsset(sceneName)); cached != nullptr) {
+        return IntrusivePtr<SceneAsset>(cached);
+    }
+
+    AssetLoadRequest directRequest;
+    directRequest.uuid = sceneName;
+    if (auto loaded = loadSync(directRequest)) {
+        if (auto *sceneAsset = dynamic_cast<SceneAsset *>(loaded.get()); sceneAsset != nullptr) {
+            return IntrusivePtr<SceneAsset>(sceneAsset);
+        }
+    }
+
+    for (const auto &pair : _bundles) {
+        NativeBundle *bundle = pair.second;
+        if (bundle == nullptr) {
+            continue;
+        }
+        auto sceneInfo = bundle->getSceneInfo(sceneName);
+        if (sceneInfo.uuid.empty()) {
+            continue;
+        }
+
+        if (auto *cached = dynamic_cast<SceneAsset *>(getCachedAsset(sceneInfo.uuid)); cached != nullptr) {
+            cacheAsset(sceneName, cached);
+            return IntrusivePtr<SceneAsset>(cached);
+        }
+
+        AssetLoadRequest bundleRequest;
+        bundleRequest.uuid = sceneInfo.uuid;
+        bundleRequest.bundleName = bundle->getName();
+        if (auto loaded = loadSync(bundleRequest)) {
+            if (auto *sceneAsset = dynamic_cast<SceneAsset *>(loaded.get()); sceneAsset != nullptr) {
+                cacheAsset(sceneName, sceneAsset);
+                return IntrusivePtr<SceneAsset>(sceneAsset);
+            }
+        }
+    }
+
+    return nullptr;
 }
 
 } // namespace cc

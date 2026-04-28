@@ -57,9 +57,11 @@ public:
 private:
     BinaryDeserializer() = delete;
 
-    static bool validateHeader(const BinarySceneHeader &header);
+    static bool validateHeader(const BinarySceneHeader &header, uint32_t size, ccstd::string &errorMessage);
 
-    static ccstd::vector<ccstd::string> parseStringTable(const uint8_t *data, uint32_t offset, uint32_t count);
+    static bool parseStringTable(const uint8_t *data, uint32_t size, uint32_t offset,
+                                 ccstd::vector<ccstd::string> &strings,
+                                 ccstd::string &errorMessage);
 
     static Scene *createScene(const uint8_t *data, uint32_t size, const BinarySceneHeader &header,
                               const ccstd::vector<ccstd::string> &strings);
@@ -67,11 +69,15 @@ private:
     static Node *createNodeTree(const uint8_t *data, uint32_t offset,
                                 const BinarySceneHeader &header,
                                 const ccstd::vector<ccstd::string> &strings,
-                                ccstd::vector<CCObject *> &instances);
+                                ccstd::vector<CCObject *> &instances,
+                                ccstd::string &errorMessage);
 
-    static void resolveReferences(const ccstd::vector<CCObject *> &instances,
-                                  const uint8_t *data, uint32_t assetRefOffset, uint32_t assetRefCount,
-                                  const ccstd::vector<ccstd::string> &strings);
+    static bool resolveReferences(const ccstd::vector<CCObject *> &instances,
+                                  const uint8_t *data, uint32_t size,
+                                  uint32_t assetRefOffset, uint32_t assetRefCount,
+                                  const ccstd::vector<ccstd::string> &strings,
+                                  ccstd::vector<IntrusivePtr<Asset>> &assets,
+                                  ccstd::string &errorMessage);
 };
 
 } // namespace cc

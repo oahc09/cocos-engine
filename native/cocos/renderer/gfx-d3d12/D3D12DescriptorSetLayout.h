@@ -5,8 +5,8 @@
 
  Permission is hereby granted, free of charge, to any person obtaining a copy
  of this software and associated documentation files (the "Software"), to deal
- in the Software without restriction, including without limitation the rights to
- use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+ in the Software without restriction, including without limitation the rights
+ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
  of the Software, and to permit persons to whom the Software is furnished to do so,
  subject to the following conditions:
 
@@ -25,15 +25,31 @@
 #pragma once
 
 #include "gfx-base/GFXDescriptorSetLayout.h"
+#include <memory>
 
 namespace cc {
 namespace gfx {
 
 class CC_DLL CCD3D12DescriptorSetLayout final : public DescriptorSetLayout {
 public:
+    CCD3D12DescriptorSetLayout();
+    ~CCD3D12DescriptorSetLayout() override;
+
+    uint32_t getSamplerCount() const;
+    uint32_t getTextureCount() const;
+    uint32_t getBufferCount() const;
+    uint32_t getStorageImageCount() const;
+    uint32_t getInputAttachmentCount() const;
+
+    uint32_t getDescriptorCountByType(DescriptorType type) const;
+
 protected:
     void doInit(const DescriptorSetLayoutInfo &info) override;
     void doDestroy() override;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> _impl;
 };
 
 } // namespace gfx

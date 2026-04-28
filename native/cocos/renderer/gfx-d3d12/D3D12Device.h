@@ -30,6 +30,8 @@
 namespace cc {
 namespace gfx {
 
+class D3D12DescriptorHeapPool;
+
 class CCD3D12Swapchain;
 
 class CC_DLL CCD3D12Device final : public Device {
@@ -64,6 +66,12 @@ public:
 
     void *getD3D12DeviceHandle() const;
     void *getGraphicsQueueHandle() const;
+    void *getDXGIFactoryHandle() const;
+
+    // GPU-visible descriptor heap pool for CBV/SRV/UAV (used by CommandBuffer::bindDescriptorSet)
+    D3D12DescriptorHeapPool *getGPUDescriptorHeapPool() const;
+    // GPU-visible sampler heap pool
+    D3D12DescriptorHeapPool *getSamplerDescriptorHeapPool() const;
 
 protected:
     static CCD3D12Device *instance;
@@ -92,6 +100,8 @@ protected:
     void getQueryPoolResults(QueryPool *queryPool) override;
 
     bool initializeD3D12Context();
+    void initFormatFeatures();
+    void initCapabilities();
     void waitForGpu();
 
     struct Impl;

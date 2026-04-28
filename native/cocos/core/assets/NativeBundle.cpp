@@ -24,6 +24,7 @@
 
 #include "core/assets/NativeBundle.h"
 #include "core/assets/Asset.h"
+#include "core/assets/AssetManager.h"
 #include "base/Macros.h"
 #include "base/Log.h"
 
@@ -103,9 +104,20 @@ bool NativeBundle::init(const ccstd::string &configJson) {
     return true;
 }
 
-Asset *NativeBundle::get(const ccstd::string & /*path*/) const {
-    // Stub: AssetManager integration will resolve path → loaded Asset*.
-    return nullptr;
+Asset *NativeBundle::get(const ccstd::string &path) const {
+    if (path.empty()) {
+        return nullptr;
+    }
+
+    const auto *uuid = &path;
+    auto pathIt = _pathToUuid.find(path);
+    if (pathIt != _pathToUuid.end()) {
+        uuid = &pathIt->second;
+    } else if (_configs.find(path) == _configs.end()) {
+        return nullptr;
+    }
+
+    return AssetManager::getInstance().getCachedAsset(*uuid);
 }
 
 NativeBundle::SceneInfo NativeBundle::getSceneInfo(const ccstd::string &sceneName) const {

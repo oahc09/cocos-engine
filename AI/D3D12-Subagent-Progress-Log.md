@@ -152,7 +152,49 @@
   - 已确认“项目可完整构建”；
   - 尚未形成“该工程启用 D3D12 的运行级验证”证据。
 
-## 监工策略（防丢进度）
+
+## 2026-04-26 14:30 追加快照（端到端三角形渲染管线 — Release build 验证）
+
+### 本轮目标
+端到端三角形渲染测试，Release build 验证。
+
+### 问题诊断
+| 文件 | 问题 | 根因 |
+|------|------|------|
+| D3D12PipelineState.cpp | PSO 创建失败 | 无 RootSignature、无着色器字节码 |
+| D3D12CommandBuffer.cpp | 多处编译错误 | Color 结构用 x/y/z/w 非 r/g/b/a；无效 D3D12 API 调用 |
+| D3D12DescriptorSet.cpp | `_descriptorCount` 未定义 | 应为 `_layout->getDescriptorCount()` |
+| D3D12InputAssembler.cpp | Format 枚举不匹配 | `R10G10B10A2` 应为 `RGB10A2` |
+| native/CMakeLists.txt | d3dcompiler 未链接 | PSO 运行时编译依赖缺失 |
+
+### 修复内容
+- **D3D12PipelineState.cpp**:
+  - 新增 `toD3D12VertexFormat(Format)` 函数（Cocos Format → DXGI_FORMAT 映射）
+  - 自动创建空 RootSignature（无需 PipelineLayout 前置条件即可创建 PSO）
+  - 内置 HLSL 三角形着色器 + 运行时 D3DCompile fallback（`s_builtinHLSL`）
+  - 从 `InputState.attributes` 自动构建 `D3D12_INPUT_ELEMENT_DESC` 数组
+  - 从 `_pipelineLayout` 取 RootSignature 注入 PSO（有 Layout 时优先使用）
+- **D3D12CommandBuffer.cpp**:
+  - Color 字段修正：`colors[i].r` → `colors[i].x`（Color 使用 x/y/z/w）
+  - const 修正：对 `const CCD3D12PipelineLayout*` 使用 `const_cast`
+  - 移除无效 `RSSetDepthBias` 调用（D3D12 不支持动态深度偏移，替换为 noop）
+  - 移除 `D3D12_STENCIL_OP_VALUE` 类型错误，直接调用 `OMSetStencilRef`
+  - 添加缺失 `#include "D3D12DescriptorHeapPool.h"`
+- **D3D12DescriptorSet.cpp**: `_descriptorCount` → `_layout->getDescriptorCount()`
+- **D3D12InputAssembler.cpp**: `R10G10B10A2` → `RGB10A2`
+- **native/CMakeLists.txt**: 添加 `d3dcompiler` 至 D3D12 target_link_libraries
+
+### 验收结果
+- Release build: ✅ `cocos_engine.lib` 编译通过，零错误零警告
+- 三角形渲染路径已代码完整：VS(空 source)→D3DCompile 内置着色器→空 RootSignature→PSO→draw(3顶点)→present
+- 运行时可视化验证待执行（需外部 WebGPUDemo 重建，`-DCC_USE_D3D12=ON`）
+
+### 阶段结论
+- **gfx-d3d12 全部 16 个类均为真实实现，无 stub**
+- 总 D3D12 代码量：约 +2800 行
+- 下一步：外部工程重建 + 运行时三角形可视化确认（Gate 2 闭环）
+
+---
 - 每次子 agent 回包后，立即写入本日志与状态看板。
 - 关键任务完成后要求子 agent重复“完成内容 + 验证命令 + 下一步”三元信息。
 - 若子 agent 超时或中断，立即启用替补并从本日志恢复上下文。

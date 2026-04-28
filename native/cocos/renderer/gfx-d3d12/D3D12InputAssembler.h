@@ -25,15 +25,39 @@
 #pragma once
 
 #include "gfx-base/GFXInputAssembler.h"
+#include <memory>
 
 namespace cc {
 namespace gfx {
 
 class CC_DLL CCD3D12InputAssembler final : public InputAssembler {
 public:
+    CCD3D12InputAssembler();
+    ~CCD3D12InputAssembler() override;
+
+    // Returns the D3D12_INPUT_ELEMENT_DESC array as void* (caller casts to D3D12_INPUT_ELEMENT_DESC*)
+    void *getInputElementDescs() const;
+    uint32_t getInputElementDescCount() const;
+
+    // Returns D3D12_VERTEX_BUFFER_VIEW info as flat arrays
+    // gpuAddresses/sizeInBytes/strideInBytes arrays, count = num vertex buffers
+    uint32_t getVertexBufferCount() const;
+    void fillVertexBufferViews(void *views) const; // fills D3D12_VERTEX_BUFFER_VIEW array
+
+    // Returns index buffer view info (or nullptr if no index buffer)
+    bool hasIndexBuffer() const;
+    void fillIndexBufferView(void *view) const; // fills D3D12_INDEX_BUFFER_VIEW
+
+    // Returns DXGI_FORMAT for the index buffer
+    uint32_t getIndexFormat() const;
+
 protected:
     void doInit(const InputAssemblerInfo &info) override;
     void doDestroy() override;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> _impl;
 };
 
 } // namespace gfx

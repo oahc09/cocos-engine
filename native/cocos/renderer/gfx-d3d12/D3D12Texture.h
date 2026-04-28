@@ -30,12 +30,20 @@
 namespace cc {
 namespace gfx {
 
+class Swapchain;
+
 class CC_DLL CCD3D12Texture final : public Texture {
 public:
     CCD3D12Texture();
     ~CCD3D12Texture() override;
 
     void *getD3D12ResourceHandle() const;
+
+    // Returns true if this texture wraps a swapchain back buffer (color attachment)
+    bool isSwapchainColorTexture() const;
+
+    // Returns the parent swapchain for swapchain textures, nullptr otherwise
+    Swapchain *getSwapchain() const { return _swapchain; }
 
 protected:
     void doInit(const TextureInfo &info) override;

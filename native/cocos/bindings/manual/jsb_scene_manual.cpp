@@ -596,6 +596,47 @@ static bool js_scene_Node_setRTS(void *s) // NOLINT(readability-identifier-namin
 }
 SE_BIND_FUNC_FAST(js_scene_Node_setRTS)
 
+static bool js_scene_Node_setRTSForJS(se::State &s) // NOLINT(readability-identifier-naming)
+{
+    auto *cobj = SE_THIS_OBJECT<cc::Node>(s);
+    SE_PRECONDITION2(cobj, false, "Invalid Native Object");
+
+    const auto &args = s.args();
+    if (args.size() != 3) {
+        SE_REPORT_ERROR("wrong number of arguments: %d, was expecting %d", static_cast<int>(args.size()), 3);
+        return false;
+    }
+
+    cc::Quaternion rotation;
+    cc::Vec3 position;
+    cc::Vec3 scale;
+    cc::Quaternion *rotationPtr = nullptr;
+    cc::Vec3 *positionPtr = nullptr;
+    cc::Vec3 *scalePtr = nullptr;
+
+    if (!args[0].isNullOrUndefined()) {
+        bool ok = sevalue_to_native(args[0], &rotation, s.thisObject());
+        SE_PRECONDITION2(ok, false, "Error processing rotation argument");
+        rotationPtr = &rotation;
+    }
+
+    if (!args[1].isNullOrUndefined()) {
+        bool ok = sevalue_to_native(args[1], &position, s.thisObject());
+        SE_PRECONDITION2(ok, false, "Error processing position argument");
+        positionPtr = &position;
+    }
+
+    if (!args[2].isNullOrUndefined()) {
+        bool ok = sevalue_to_native(args[2], &scale, s.thisObject());
+        SE_PRECONDITION2(ok, false, "Error processing scale argument");
+        scalePtr = &scale;
+    }
+
+    cobj->setRTSInternal(rotationPtr, positionPtr, scalePtr, true);
+    return true;
+}
+SE_BIND_FUNC(js_scene_Node_setRTSForJS)
+
 static bool js_scene_Node_rotateForJS(void *s) // NOLINT(readability-identifier-naming)
 {
     auto *cobj = reinterpret_cast<cc::Node *>(s);
@@ -612,6 +653,34 @@ static bool js_scene_Node_rotateForJS(void *s) // NOLINT(readability-identifier-
     return true;
 }
 SE_BIND_FUNC_FAST(js_scene_Node_rotateForJS)
+
+static bool js_scene_Node_rotateForJS2(se::State &s) // NOLINT(readability-identifier-naming)
+{
+    auto *cobj = SE_THIS_OBJECT<cc::Node>(s);
+    SE_PRECONDITION2(cobj, false, "Invalid Native Object");
+
+    const auto &args = s.args();
+    if (args.empty() || args.size() > 2) {
+        SE_REPORT_ERROR("wrong number of arguments: %d, was expecting 1~2", static_cast<int>(args.size()));
+        return false;
+    }
+
+    cc::Quaternion rotation;
+    bool ok = sevalue_to_native(args[0], &rotation, s.thisObject());
+    SE_PRECONDITION2(ok, false, "Error processing rotation argument");
+
+    cc::NodeSpace ns = cc::NodeSpace::LOCAL;
+    if (args.size() == 2 && !args[1].isNullOrUndefined()) {
+        int nsValue = static_cast<int>(cc::NodeSpace::LOCAL);
+        ok = sevalue_to_native(args[1], &nsValue, s.thisObject());
+        SE_PRECONDITION2(ok, false, "Error processing node space argument");
+        ns = static_cast<cc::NodeSpace>(nsValue);
+    }
+
+    cobj->rotateForJS(rotation.x, rotation.y, rotation.z, rotation.w, ns);
+    return true;
+}
+SE_BIND_FUNC(js_scene_Node_rotateForJS2)
 
 static bool js_scene_Node_inverseTransformPoint(void *nativeObject) // NOLINT(readability-identifier-naming)
 {
@@ -864,6 +933,7 @@ bool register_all_scene_manual(se::Object *obj) // NOLINT(readability-identifier
     __jsb_cc_Node_proto->defineFunction("_setRotation", _SE(js_scene_Node_setRotation));
     __jsb_cc_Node_proto->defineFunction("_setRotationFromEuler", _SE(js_scene_Node_setRotationFromEuler));
     __jsb_cc_Node_proto->defineFunction("_rotateForJS", _SE(js_scene_Node_rotateForJS));
+    __jsb_cc_Node_proto->defineFunction("rotateForJS2", _SE(js_scene_Node_rotateForJS2));
 
     __jsb_cc_Node_proto->defineFunction("_getEulerAngles", _SE(js_scene_Node_getEulerAngles));
     __jsb_cc_Node_proto->defineFunction("_getForward", _SE(js_scene_Node_getForward));
@@ -879,6 +949,7 @@ bool register_all_scene_manual(se::Object *obj) // NOLINT(readability-identifier
     __jsb_cc_Node_proto->defineFunction("_getWorldRT", _SE(js_scene_Node_getWorldRT));
 
     __jsb_cc_Node_proto->defineFunction("_setRTS", _SE(js_scene_Node_setRTS));
+    __jsb_cc_Node_proto->defineFunction("setRTSForJS", _SE(js_scene_Node_setRTSForJS));
     __jsb_cc_Node_proto->defineFunction("_inverseTransformPoint", _SE(js_scene_Node_inverseTransformPoint));
     __jsb_cc_Node_proto->defineFunction("_set2DTransform", _SE(js_scene_Node_set2DTransform));
 

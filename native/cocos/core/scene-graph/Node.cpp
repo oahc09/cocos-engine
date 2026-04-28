@@ -88,9 +88,12 @@ Node::~Node() {
 }
 
 void Node::onBatchCreated(bool dontChildPrefab) {
-    // onBatchCreated was implemented in TS, so code should never go here.
-    CC_ABORT();
-    emit<BatchCreated>(dontChildPrefab);
+    invalidateChildren(TransformBit::TRS);
+    auto len = static_cast<int32_t>(_children.size());
+    for (int32_t i = 0; i < len; ++i) {
+        _children[i]->_siblingIndex = i;
+        _children[i]->onBatchCreated(dontChildPrefab);
+    }
 }
 
 Node *Node::instantiate(Node *cloned, bool isSyncedNode) {
@@ -234,6 +237,13 @@ void Node::walk(const WalkCallback &preFunc, const WalkCallback &postFunc) { // 
 }
 
 Component *Node::addComponent(Component *comp) {
+    if (!comp) {
+        return nullptr;
+    }
+    if (comp->_node == this &&
+        std::find(_components.begin(), _components.end(), comp) != _components.end()) {
+        return comp;
+    }
     comp->_node = this;
     _components.emplace_back(comp);
 
@@ -246,9 +256,16 @@ Component *Node::addComponent(Component *comp) {
 }
 
 void Node::removeComponent(Component *comp) {
+    if (!comp) {
+        return;
+    }
     auto iteComp = std::find(_components.begin(), _components.end(), comp);
     if (iteComp != _components.end()) {
+        if (comp->_enabledInHierarchy) {
+            Director::getInstance()->getNodeActivator()->activateComponent(comp, false);
+        }
         _components.erase(iteComp);
+        comp->_node = nullptr;
     }
 }
 

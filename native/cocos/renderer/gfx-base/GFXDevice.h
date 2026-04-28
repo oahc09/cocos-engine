@@ -39,6 +39,7 @@
 #include "GFXShader.h"
 #include "GFXSwapchain.h"
 #include "GFXTexture.h"
+#include "base/Log.h"
 #include "base/RefCounted.h"
 #include "base/std/container/array.h"
 #include "states/GFXBufferBarrier.h"
@@ -236,9 +237,11 @@ QueryPool *Device::createQueryPool(const QueryPoolInfo &info) {
 }
 
 Swapchain *Device::createSwapchain(const SwapchainInfo &info) {
+    CC_LOG_INFO("[DIAG] Device::createSwapchain(info) called: %ux%u", info.width, info.height);
     Swapchain *res = createSwapchain();
     res->initialize(info);
     _swapchains.push_back(res);
+    CC_LOG_INFO("[DIAG] Device::createSwapchain(info) complete.");
     return res;
 }
 

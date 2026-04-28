@@ -31,12 +31,17 @@ import { MobilityMode, NodeSpace, TransformBit } from './node-enum';
 import { IVec2Like, Mat4, Quat, Vec3 } from '../core/math';
 import { Layers } from './layers';
 import { editorExtrasTag, SerializationContext, SerializationOutput, serializeTag } from '../core/data';
-import { _tempFloatArray, fillMat4WithTempFloatArray } from './utils.jsb';
+import { BUILTIN_CLASSID_RE } from '../core/utils/misc';
+import { _tempFloatArray, fillMat4WithTempFloatArray, resolveNodeQuatArgs, resolveNodeRTSArgs, resolveNodeVec3Args } from './utils.jsb';
 import { getClassByName, isChildClassOf } from '../core/utils/js-typed';
 import { syncNodeValues } from "../core/utils/jsb-utils";
 import { nodePolyfill } from './node-dev';
 import * as js from '../core/utils/js';
 import { patch_cc_Node } from '../native-binding/decorators';
+import {
+    registerScriptInstance as registerScriptBridgeHelperInstance,
+    unregisterScriptInstance as unregisterScriptBridgeHelperInstance,
+} from '../core/scripting/batch-executor';
 import type { Node as JsbNode } from './node';
 import { DispatcherEventType, NodeEventProcessor } from './node-event-processor';
 
@@ -83,9 +88,18 @@ NodeCls.TransformBit = TransformBit;
 const TRANSFORMBIT_TRS = TransformBit.TRS;
 
 const nodeProto: any = jsb.Node.prototype;
+const nativeSetRotationFromEuler = nodeProto.setRotationFromEuler;
+const nativeSetRTSForJS = nodeProto.setRTSForJS;
+const nativeRotateForJS2 = nodeProto.rotateForJS2;
 export const TRANSFORM_ON = 1 << 0;
 const ACTIVE_ON = 1 << 1;
 const Destroying = CCObjectFlags.Destroying;
+const scriptBridgeCompIdTag = Symbol('ScriptBridgeCompId');
+let nextScriptBridgeCompId = 1;
+
+type ScriptBridgeTrackedComponent = Component & {
+    [scriptBridgeCompIdTag]?: number;
+};
 
 // TODO: `_setTempFloatArray` is only implemented on Native platforms. @dumganhar
 // issue: https://github.com/cocos/cocos-engine/issues/14644
@@ -100,6 +114,45 @@ function getConstructor<T>(typeOrClassName) {
     }
 
     return typeOrClassName;
+}
+
+function isUserScriptComponent (constructor: typeof Component): boolean {
+    const classId = js.getClassId(constructor);
+    return !!classId && !BUILTIN_CLASSID_RE.test(classId);
+}
+
+function registerScriptBridgeComponent (component: Component): void {
+    const constructor = component.constructor as typeof Component;
+    if (!isUserScriptComponent(constructor)) {
+        return;
+    }
+
+    const className = js.getClassName(constructor);
+    const scriptBridge = jsb.ScriptBridge?.getInstance?.();
+    if (!className || !scriptBridge?.registerScriptInstance) {
+        return;
+    }
+
+    const requestedCompId = nextScriptBridgeCompId++;
+    const registeredCompId = scriptBridge.registerScriptInstance(component, requestedCompId, className);
+    const compId = typeof registeredCompId === 'number' && registeredCompId > 0 ? registeredCompId : requestedCompId;
+    if (compId > 0) {
+        (component as ScriptBridgeTrackedComponent)[scriptBridgeCompIdTag] = compId;
+        registerScriptBridgeHelperInstance(component, compId, className);
+    }
+}
+
+function unregisterScriptBridgeComponent (component: Component): void {
+    const trackedComponent = component as ScriptBridgeTrackedComponent;
+    const compId = trackedComponent[scriptBridgeCompIdTag];
+    if (!compId) {
+        return;
+    }
+
+    const scriptBridge = jsb.ScriptBridge?.getInstance?.();
+    scriptBridge?.unregisterScriptInstance?.(compId);
+    unregisterScriptBridgeHelperInstance(compId);
+    delete trackedComponent[scriptBridgeCompIdTag];
 }
 
 /**
@@ -216,6 +269,7 @@ nodeProto.addComponent = function (typeOrClassName) {
 
     const component = new constructor();
     component.node = (this as unknown as Node); // TODO: HACK here
+    registerScriptBridgeComponent(component);
     this._components.push(component);
     if (EDITOR && EditorExtends.Node && EditorExtends.Component) {
         const node = EditorExtends.Node.getNode(this._id);
@@ -248,6 +302,12 @@ nodeProto.removeComponent = function (component) {
     if (componentInstance) {
         componentInstance.destroy();
     }
+};
+
+const oldComponentPreDestroy = Component.prototype._onPreDestroy;
+Component.prototype._onPreDestroy = function _onPreDestroy() {
+    oldComponentPreDestroy.call(this);
+    unregisterScriptBridgeComponent(this);
 };
 
 const REGISTERED_EVENT_MASK_TRANSFORM_CHANGED = (1 << 0);
@@ -627,38 +687,46 @@ NodeCls.isNode = function (obj: unknown): obj is jsb.Node {
 
 let _tempQuat = new Quat();
 nodeProto.setRTS = function setRTS(rot?: Quat | Vec3, pos?: Vec3, scale?: Vec3) {
-    if (rot) {
-        let val = _tempQuat;
-        if (rot instanceof Quat) {
-            val = rot as Quat;
-        } else {
-            Quat.fromEuler(val, rot.x, rot.y, rot.z);
-        }
+    const resolved = resolveNodeRTSArgs(rot, pos, scale);
+    if (resolved.rotation) {
+        this._lrot.set(resolved.rotation.x, resolved.rotation.y, resolved.rotation.z, resolved.rotation.w);
+    }
+    if (resolved.position) {
+        this._lpos.set(resolved.position.x, resolved.position.y, resolved.position.z);
+    }
+    if (resolved.scale) {
+        this._lscale.set(resolved.scale.x, resolved.scale.y, resolved.scale.z);
+    }
+
+    if (nativeSetRTSForJS) {
+        nativeSetRTSForJS.call(this, resolved.rotation, resolved.position, resolved.scale);
+        return;
+    }
+
+    if (resolved.rotation) {
+        const val = resolved.rotation;
         _tempFloatArray[0] = 4;
         _tempFloatArray[1] = val.x;
         _tempFloatArray[2] = val.y;
         _tempFloatArray[3] = val.z;
         _tempFloatArray[4] = val.w;
-        this._lrot.set(val.x, val.y, val.z, val.w);
     } else {
         _tempFloatArray[0] = 0;
     }
 
-    if (pos) {
+    if (resolved.position) {
         _tempFloatArray[5] = 3;
-        _tempFloatArray[6] = pos.x;
-        _tempFloatArray[7] = pos.y;
-        _tempFloatArray[8] = pos.z;
-        this._lpos.set(pos.x, pos.y, pos.z);
+        _tempFloatArray[6] = resolved.position.x;
+        _tempFloatArray[7] = resolved.position.y;
+        _tempFloatArray[8] = resolved.position.z;
     } else {
         _tempFloatArray[5] = 0;
     }
-    if (scale) {
+    if (resolved.scale) {
         _tempFloatArray[9] = 3;
-        _tempFloatArray[10] = scale.x;
-        _tempFloatArray[11] = scale.y;
-        _tempFloatArray[12] = scale.z;
-        this._lscale.set(scale.x, scale.y, scale.z);
+        _tempFloatArray[10] = resolved.scale.x;
+        _tempFloatArray[11] = resolved.scale.y;
+        _tempFloatArray[12] = resolved.scale.z;
     } else {
         _tempFloatArray[9] = 0;
     }
@@ -673,23 +741,11 @@ nodeProto.getPosition = function getPosition(out?: Vec3): Vec3 {
 };
 
 nodeProto.setPosition = function setPosition(val: Readonly<Vec3> | number, y?: number, z?: number) {
-    if (y === undefined && z === undefined) {
-        _tempFloatArray[0] = 3;
-        const pos = val as Vec3;
-        this._lpos.x = _tempFloatArray[1] = pos.x;
-        this._lpos.y = _tempFloatArray[2] = pos.y;
-        this._lpos.z = _tempFloatArray[3] = pos.z;
-    } else if (z === undefined) {
-        _tempFloatArray[0] = 2;
-        this._lpos.x = _tempFloatArray[1] = val as number;
-        this._lpos.y = _tempFloatArray[2] = y as number;
-    } else {
-        _tempFloatArray[0] = 3;
-        this._lpos.x = _tempFloatArray[1] = val as number;
-        this._lpos.y = _tempFloatArray[2] = y as number;
-        this._lpos.z = _tempFloatArray[3] = z as number;
-    }
-    this._setPosition();
+    const resolved = resolveNodeVec3Args(val, y, z, this._lpos.z);
+    this._lpos.x = resolved.x;
+    this._lpos.y = resolved.y;
+    this._lpos.z = resolved.z;
+    this.setPositionInternal(resolved.x, resolved.y, resolved.z, true);
 };
 
 nodeProto.getRotation = function getRotation(out?: Quat): Quat {
@@ -701,37 +757,17 @@ nodeProto.getRotation = function getRotation(out?: Quat): Quat {
 };
 
 nodeProto.setRotation = function setRotation(val: Readonly<Quat> | number, y?: number, z?: number, w?: number): void {
-    if (y === undefined || z === undefined || w === undefined) {
-        const rot = val as Readonly<Quat>;
-        this._lrot.x = _tempFloatArray[0] = rot.x;
-        this._lrot.y = _tempFloatArray[1] = rot.y;
-        this._lrot.z = _tempFloatArray[2] = rot.z;
-        this._lrot.w = _tempFloatArray[3] = rot.w;
-    } else {
-        this._lrot.x = _tempFloatArray[0] = val as number;
-        this._lrot.y = _tempFloatArray[1] = y;
-        this._lrot.z = _tempFloatArray[2] = z;
-        this._lrot.w = _tempFloatArray[3] = w;
-    }
-
-    this._setRotation();
+    const resolved = resolveNodeQuatArgs(val, y, z, w, this._lrot.w);
+    this._lrot.set(resolved.x, resolved.y, resolved.z, resolved.w);
+    this.setRotationInternal(resolved.x, resolved.y, resolved.z, resolved.w, true);
 };
 
 nodeProto.setRotationFromEuler = function setRotationFromEuler(val: Vec3 | number, y?: number, zOpt?: number): void {
-    const z = zOpt === undefined ? this._euler.z : zOpt;
-
-    if (y === undefined) {
-        const euler = (val as Vec3);
-        this._euler.x = _tempFloatArray[0] = euler.x;
-        this._euler.y = _tempFloatArray[1] = euler.y;
-        this._euler.z = _tempFloatArray[2] = euler.z;
-    } else {
-        this._euler.x = _tempFloatArray[0] = val as number;
-        this._euler.y = _tempFloatArray[1] = y;
-        this._euler.z = _tempFloatArray[2] = z;
-    }
-
-    this._setRotationFromEuler();
+    const resolved = resolveNodeVec3Args(val, y, zOpt, this._euler.z);
+    this._euler.x = resolved.x;
+    this._euler.y = resolved.y;
+    this._euler.z = resolved.z;
+    nativeSetRotationFromEuler.call(this, resolved.x, resolved.y, resolved.z);
 };
 
 nodeProto.getScale = function getScale(out?: Vec3): Vec3 {
@@ -749,23 +785,11 @@ nodeProto.set2DTransform = function set2DTransform(x: number, y: number, angle: 
 }
 
 nodeProto.setScale = function setScale(val: Readonly<Vec3> | number, y?: number, z?: number) {
-    if (y === undefined && z === undefined) {
-        _tempFloatArray[0] = 3;
-        const scale = val as Vec3;
-        this._lscale.x = _tempFloatArray[1] = scale.x;
-        this._lscale.y = _tempFloatArray[2] = scale.y;
-        this._lscale.z = _tempFloatArray[3] = scale.z;
-    } else if (z === undefined) {
-        _tempFloatArray[0] = 2;
-        this._lscale.x = _tempFloatArray[1] = val as number;
-        this._lscale.y = _tempFloatArray[2] = y as number;
-    } else {
-        _tempFloatArray[0] = 3;
-        this._lscale.x = _tempFloatArray[1] = val as number;
-        this._lscale.y = _tempFloatArray[2] = y as number;
-        this._lscale.z = _tempFloatArray[3] = z;
-    }
-    this._setScale();
+    const resolved = resolveNodeVec3Args(val, y, z, this._lscale.z);
+    this._lscale.x = resolved.x;
+    this._lscale.y = resolved.y;
+    this._lscale.z = resolved.z;
+    this.setScaleInternal(resolved.x, resolved.y, resolved.z, true);
 };
 
 nodeProto.getWorldPosition = function getWorldPosition(out?: Vec3): Vec3 {
@@ -1308,6 +1332,11 @@ Object.defineProperty(nodeProto, 'id', {
 });
 
 nodeProto.rotate = function (rot: Quat, ns?: NodeSpace): void {
+    if (nativeRotateForJS2) {
+        nativeRotateForJS2.call(this, rot, ns);
+        return;
+    }
+
     _tempFloatArray[1] = rot.x;
     _tempFloatArray[2] = rot.y;
     _tempFloatArray[3] = rot.z;

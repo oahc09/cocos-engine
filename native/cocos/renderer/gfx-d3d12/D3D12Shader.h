@@ -5,8 +5,8 @@
 
  Permission is hereby granted, free of charge, to any person obtaining a copy
  of this software and associated documentation files (the "Software"), to deal
- in the Software without restriction, including without limitation the rights to
- use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+ in the Software without restriction, including without limitation the rights
+ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
  of the Software, and to permit persons to whom the Software is furnished to do so,
  subject to the following conditions:
 
@@ -25,15 +25,42 @@
 #pragma once
 
 #include "gfx-base/GFXShader.h"
+#include <memory>
 
 namespace cc {
 namespace gfx {
 
 class CC_DLL CCD3D12Shader final : public Shader {
 public:
+    CCD3D12Shader();
+    ~CCD3D12Shader() override;
+
+    struct BytecodeBlob {
+        const void *data{nullptr};
+        size_t size{0};
+    };
+
+    BytecodeBlob getVertexBytecode() const;
+    BytecodeBlob getFragmentBytecode() const;
+    BytecodeBlob getGeometryBytecode() const;
+    BytecodeBlob getComputeBytecode() const;
+    BytecodeBlob getHullBytecode() const;
+    BytecodeBlob getDomainBytecode() const;
+
+    const ccstd::string &getVertexEntry() const;
+    const ccstd::string &getFragmentEntry() const;
+
+    bool hasBytecode(ShaderStageFlagBit stage) const;
+
 protected:
     void doInit(const ShaderInfo &info) override;
     void doDestroy() override;
+
+private:
+    BytecodeBlob getStageBytecode(ShaderStageFlagBit stage) const;
+
+    struct Impl;
+    std::unique_ptr<Impl> _impl;
 };
 
 } // namespace gfx

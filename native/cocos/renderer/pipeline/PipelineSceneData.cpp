@@ -144,8 +144,14 @@ void PipelineSceneData::initDebugRenderer() {
         IMaterialInfo info;
         info.effectName = "internal/builtin-debug-renderer";
         _debugRendererMaterial->initialize(info);
-        _debugRendererPass = (*_debugRendererMaterial->getPasses())[0];
-        _debugRendererShader = _debugRendererPass->getShaderVariant();
+        const auto &passes = _debugRendererMaterial->getPasses();
+        if (passes && !passes->empty()) {
+            _debugRendererPass = (*passes)[0];
+            _debugRendererShader = _debugRendererPass->getShaderVariant();
+        } else {
+            CC_LOG_WARNING("PipelineSceneData::initDebugRenderer: effect 'internal/builtin-debug-renderer' not loaded, debug renderer disabled.");
+            _debugRendererMaterial.reset();
+        }
     }
 }
 

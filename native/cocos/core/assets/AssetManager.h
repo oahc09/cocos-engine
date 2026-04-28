@@ -36,6 +36,7 @@
 namespace cc {
 
 class Asset;
+class SceneAsset;
 class NativeBundle;
 class NativePipeline;
 
@@ -133,6 +134,10 @@ public:
     // === Runtime mode ===
 
     bool isNativeFastMode() const;
+
+    // === Scene lookup ===
+
+    IntrusivePtr<SceneAsset> loadSceneAsset(const ccstd::string &sceneName);
 
 private:
     AssetManager() = default;

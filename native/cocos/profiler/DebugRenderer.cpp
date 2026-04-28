@@ -72,6 +72,10 @@ inline ccstd::string getFontPath(uint32_t index) {
     };
 
     auto *asset = BuiltinResMgr::getInstance()->getAsset(UUIDS[index]);
+    if (asset == nullptr) {
+        CC_LOG_WARNING("getFontPath: builtin font asset '%s' not loaded.", UUIDS[index].c_str());
+        return {};
+    }
 
     return asset->getNativeUrl();
 }
@@ -234,7 +238,12 @@ void DebugRenderer::activate(gfx::Device *device, const DebugRendererInfo &info)
     fontSize = fontSize < 10U ? 10U : (fontSize > 20U ? 20U : fontSize);
 
     for (auto i = 0U; i < _fonts.size(); i++) {
-        _fonts[i].font = ccnew FreeTypeFont(getFontPath(i));
+        auto fontPath = getFontPath(i);
+        if (fontPath.empty()) {
+            CC_LOG_WARNING("DebugRenderer::activate: font %u not available, skipping.", i);
+            continue;
+        }
+        _fonts[i].font = ccnew FreeTypeFont(std::move(fontPath));
         _fonts[i].face = _fonts[i].font->createFace(FontFaceInfo(fontSize));
         _fonts[i].invTextureSize = {1.0F / _fonts[i].face->getTextureWidth(), 1.0F / _fonts[i].face->getTextureHeight()};
     }

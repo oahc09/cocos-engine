@@ -23,17 +23,28 @@
 ****************************************************************************/
 
 #include "core/components/Component.h"
+#include "base/Scheduler.h"
+#include "core/Director.h"
 #include "core/scene-graph/Node.h"
 
 namespace cc {
+namespace {
+
+ccstd::string makeComponentScheduleKey(const std::function<void(float)> &callback) {
+    return ccstd::string("Component::schedule:") +
+           std::to_string(reinterpret_cast<uintptr_t>(&callback));
+}
+
+} // namespace
 
 Component::~Component() = default;
 
 void Component::setEnabled(bool value) {
     if (_enabled == value) return;
     _enabled = value;
-    // Node activator will handle onEnable/onDisable and scheduler registration
-    // This will be wired up in M3 (NodeActivator)
+    if (_node && _node->isActiveInHierarchy()) {
+        Director::getInstance()->getNodeActivator()->activateComponent(this, value);
+    }
 }
 
 void Component::__preload() {}
@@ -55,17 +66,18 @@ ccstd::vector<Asset *> Component::getAssetProperties() {
 
 void Component::schedule(const std::function<void(float)> &callback, float interval,
                           unsigned int repeat, float delay, bool paused) {
-    // TODO: Wire to Director::getInstance()->getScheduler() in M5
+    Director::getInstance()->getScheduler()->schedule(
+        callback, this, interval, repeat, delay, paused, makeComponentScheduleKey(callback));
 }
 
 void Component::unschedule(const std::function<void(float)> &callback) {
-    // TODO: Wire to Director::getInstance()->getScheduler() in M5
+    Director::getInstance()->getScheduler()->unschedule(makeComponentScheduleKey(callback), this);
 }
 
 bool Component::destroy() {
     if (!isValid()) return false;
     if (_node) {
-        // TODO: _node->removeComponent(this) in M3
+        _node->removeComponent(this);
     }
     return Super::destroy();
 }

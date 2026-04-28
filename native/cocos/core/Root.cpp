@@ -76,6 +76,11 @@ Root::~Root() {
 }
 
 void Root::initialize(gfx::Swapchain * /*swapchain*/) {
+    // File diagnostic
+    {
+        FILE *f = fopen("C:\\temp\\d3d12-render-diag.log", "a");
+        if (f) { fprintf(f, "[ROOT] Root::initialize ENTER, device=%p\n", (void*)gfx::Device::getInstance()); fflush(f); fclose(f); }
+    }
     auto *windowMgr = CC_GET_PLATFORM_INTERFACE(ISystemWindowManager);
     const auto &windows = windowMgr->getWindows();
     for (const auto &pair : windows) {
@@ -88,14 +93,27 @@ void Root::initialize(gfx::Swapchain * /*swapchain*/) {
     _curRenderWindow = _mainRenderWindow;
     _xr = CC_GET_XR_INTERFACE();
     addWindowEventListener();
-    // TODO(minggo):
-    // return Promise.resolve(builtinResMgr.initBuiltinRes(this._device));
+
+    {
+        FILE *f = fopen("C:\\temp\\d3d12-render-diag.log", "a");
+        if (f) {
+            auto &caps = _device->getCapabilities();
+            fprintf(f, "[ROOT] Before maxJoints calc: maxVertexUniformVectors=%u\n", caps.maxVertexUniformVectors);
+            fflush(f); fclose(f);
+        }
+    }
+
     const uint32_t usedUBOVectorCount = (pipeline::UBOGlobal::COUNT + pipeline::UBOCamera::COUNT + pipeline::UBOShadow::COUNT + pipeline::UBOLocal::COUNT + pipeline::UBOWorldBound::COUNT) / 4;
     uint32_t maxJoints = (_device->getCapabilities().maxVertexUniformVectors - usedUBOVectorCount) / 3;
     maxJoints = maxJoints < 256 ? maxJoints : 256;
     pipeline::localDescriptorSetLayoutResizeMaxJoints(maxJoints);
 
     _debugView = std::make_unique<pipeline::DebugView>();
+
+    {
+        FILE *f = fopen("C:\\temp\\d3d12-render-diag.log", "a");
+        if (f) { fprintf(f, "[ROOT] Root::initialize COMPLETE\n"); fflush(f); fclose(f); }
+    }
 }
 
 render::Pipeline *Root::getCustomPipeline() const {

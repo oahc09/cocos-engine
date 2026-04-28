@@ -5,8 +5,8 @@
 
  Permission is hereby granted, free of charge, to any person obtaining a copy
  of this software and associated documentation files (the "Software"), to deal
- in the Software without restriction, including without limitation the rights to
- use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+ in the Software without restriction, including without limitation the rights
+ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
  of the Software, and to permit persons to whom the Software is furnished to do so,
  subject to the following conditions:
 
@@ -23,14 +23,200 @@
 ****************************************************************************/
 
 #include "D3D12Framebuffer.h"
+#include "D3D12Device.h"
+#include "D3D12Swapchain.h"
+#include "D3D12Texture.h"
+#include "D3D12RenderPass.h"
+#include "base/Log.h"
+
+#if defined(_WIN32)
+    #ifndef NOMINMAX
+        #define NOMINMAX
+    #endif
+    #include <d3d12.h>
+    #include <dxgiformat.h>
+    #include <wrl/client.h>
+#endif
 
 namespace cc {
 namespace gfx {
 
+struct CCD3D12Framebuffer::Impl {
+#if defined(_WIN32)
+    // RTV descriptor heap (one heap for all render targets)
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> rtvHeap;
+    // DSV descriptor heap
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> dsvHeap;
+
+    // Store CPU descriptor handles
+    ccstd::vector<D3D12_CPU_DESCRIPTOR_HANDLE> rtvHandles;
+    D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle{};
+#endif
+
+    uint32_t width{0};
+    uint32_t height{0};
+    uint32_t rtvDescriptorSize{0};
+};
+
+CCD3D12Framebuffer::CCD3D12Framebuffer() {
+    _impl = std::make_unique<Impl>();
+}
+
+CCD3D12Framebuffer::~CCD3D12Framebuffer() {
+    destroy();
+}
+
 void CCD3D12Framebuffer::doInit(const FramebufferInfo &info) {
+    (void)info;
+    if (!_impl) return;
+
+#if defined(_WIN32)
+    auto *device = CCD3D12Device::getInstance();
+    auto *d3dDevice = static_cast<ID3D12Device *>(device ? device->getD3D12DeviceHandle() : nullptr);
+    if (!d3dDevice) {
+        CC_LOG_ERROR("D3D12Framebuffer: device unavailable.");
+        return;
+    }
+
+    const uint32_t colorCount = static_cast<uint32_t>(_colorTextures.size());
+
+    // Determine dimensions from first color texture or depth texture
+    Texture *sizeRef = colorCount > 0 ? _colorTextures[0] : _depthStencilTexture;
+    if (sizeRef) {
+        _impl->width = sizeRef->getWidth();
+        _impl->height = sizeRef->getHeight();
+    }
+
+    // Create RTV descriptor heap and render target views
+    if (colorCount > 0) {
+        D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc{};
+        rtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+        rtvHeapDesc.NumDescriptors = colorCount;
+        rtvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+        rtvHeapDesc.NodeMask = 0;
+
+        HRESULT hr = d3dDevice->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(&_impl->rtvHeap));
+        if (FAILED(hr)) {
+            CC_LOG_ERROR("D3D12Framebuffer: CreateDescriptorHeap(RTV) failed. HRESULT=0x%08x",
+                         static_cast<unsigned>(hr));
+            return;
+        }
+
+        _impl->rtvDescriptorSize = d3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        _impl->rtvHandles.resize(colorCount);
+
+        D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = _impl->rtvHeap->GetCPUDescriptorHandleForHeapStart();
+        for (uint32_t i = 0; i < colorCount; ++i) {
+            auto *texture = static_cast<CCD3D12Texture *>(_colorTextures[i]);
+            if (!texture) continue;
+
+            // Detect swapchain color textures — their RTVs are managed by the swapchain
+            if (texture->isSwapchainColorTexture()) {
+                _swapchain = static_cast<CCD3D12Swapchain *>(texture->getSwapchain());
+                // Leave placeholder handle; getRTVHandle() returns swapchain's RTV dynamically
+                _impl->rtvHandles[i] = D3D12_CPU_DESCRIPTOR_HANDLE{};
+                rtvHandle.ptr += _impl->rtvDescriptorSize;
+                continue;
+            }
+
+            auto *resource = static_cast<ID3D12Resource *>(texture->getD3D12ResourceHandle());
+            if (!resource) {
+                CC_LOG_WARNING("D3D12Framebuffer: color texture %u has no D3D12 resource.", i);
+                rtvHandle.ptr += _impl->rtvDescriptorSize;
+                continue;
+            }
+
+            d3dDevice->CreateRenderTargetView(resource, nullptr, rtvHandle);
+            _impl->rtvHandles[i] = rtvHandle;
+
+            rtvHandle.ptr += _impl->rtvDescriptorSize;
+        }
+    }
+
+    // Create DSV descriptor heap and depth-stencil view
+    if (_depthStencilTexture) {
+        D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDesc{};
+        dsvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+        dsvHeapDesc.NumDescriptors = 1;
+        dsvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+        dsvHeapDesc.NodeMask = 0;
+
+        HRESULT hr = d3dDevice->CreateDescriptorHeap(&dsvHeapDesc, IID_PPV_ARGS(&_impl->dsvHeap));
+        if (FAILED(hr)) {
+            CC_LOG_ERROR("D3D12Framebuffer: CreateDescriptorHeap(DSV) failed. HRESULT=0x%08x",
+                         static_cast<unsigned>(hr));
+            return;
+        }
+
+        auto *depthTexture = static_cast<CCD3D12Texture *>(_depthStencilTexture);
+        if (depthTexture) {
+            auto *resource = static_cast<ID3D12Resource *>(depthTexture->getD3D12ResourceHandle());
+            if (resource) {
+                _impl->dsvHandle = _impl->dsvHeap->GetCPUDescriptorHandleForHeapStart();
+                d3dDevice->CreateDepthStencilView(resource, nullptr, _impl->dsvHandle);
+            } else {
+                CC_LOG_WARNING("D3D12Framebuffer: depth texture has no D3D12 resource.");
+            }
+        }
+    }
+
+    CC_LOG_INFO("D3D12Framebuffer initialized: %u color attachments, size=%ux%u, swapchain=%s",
+                colorCount, _impl->width, _impl->height, _swapchain ? "yes" : "no");
+#endif
 }
 
 void CCD3D12Framebuffer::doDestroy() {
+#if defined(_WIN32)
+    if (_impl) {
+        _impl->rtvHeap.Reset();
+        _impl->dsvHeap.Reset();
+        _impl->rtvHandles.clear();
+        _impl->dsvHandle = D3D12_CPU_DESCRIPTOR_HANDLE{};
+        _impl->width = 0;
+        _impl->height = 0;
+        _impl->rtvDescriptorSize = 0;
+    }
+#endif
+}
+
+CCD3D12Framebuffer::DescriptorPair CCD3D12Framebuffer::getRTVHandle(uint32_t index) const {
+    if (!_impl) return {};
+#if defined(_WIN32)
+    if (index >= _impl->rtvHandles.size()) return {};
+
+    // For swapchain textures, dynamically return the swapchain's current RTV
+    if (_swapchain) {
+        uintptr_t rtvPtr = _swapchain->getCurrentRTVHandle();
+        return {static_cast<uint64_t>(rtvPtr), 0};
+    }
+
+    const auto &handle = _impl->rtvHandles[index];
+    return {static_cast<uint64_t>(handle.ptr), 0};
+#else
+    (void)index;
+    return {};
+#endif
+}
+
+CCD3D12Framebuffer::DescriptorPair CCD3D12Framebuffer::getDSVHandle() const {
+    if (!_impl) return {};
+#if defined(_WIN32)
+    return {static_cast<uint64_t>(_impl->dsvHandle.ptr), 0};
+#else
+    return {};
+#endif
+}
+
+uint32_t CCD3D12Framebuffer::getWidth() const {
+    return _impl ? _impl->width : 0;
+}
+
+uint32_t CCD3D12Framebuffer::getHeight() const {
+    return _impl ? _impl->height : 0;
+}
+
+CCD3D12Swapchain *CCD3D12Framebuffer::getSwapchain() const {
+    return _swapchain;
 }
 
 } // namespace gfx
