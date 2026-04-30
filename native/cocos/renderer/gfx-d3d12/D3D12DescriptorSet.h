@@ -37,6 +37,11 @@ public:
 
     void update() override;
     void forceUpdate() override;
+    void *getCbvSrvUavDescriptorHeap() const;
+    void *getSamplerDescriptorHeap() const;
+    uint32_t getCbvSrvUavDescriptorCount() const;
+    uint32_t getSamplerDescriptorCount() const;
+    void applyDynamicOffsets(uint32_t dynamicOffsetCount, const uint32_t *dynamicOffsets);
 
 protected:
     void doInit(const DescriptorSetInfo &info) override;

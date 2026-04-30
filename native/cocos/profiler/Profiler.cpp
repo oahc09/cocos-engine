@@ -271,9 +271,20 @@ void Profiler::printStats() {
             _coreStats.shadowMap ? "On" : "Off",
             _coreStats.screenWidth,
             _coreStats.screenHeight);
+        const auto scriptBridgeStats = StringUtil::format(
+            "ScriptBridge: batches=%u comps=%u total=%.3fms start=%u update=%u late=%u",
+            _scriptBridgeStats.totalBatchCalls,
+            _scriptBridgeStats.totalComponents,
+            static_cast<double>(_scriptBridgeStats.totalDurationUs) / 1000.0,
+            _scriptBridgeStats.startCalls,
+            _scriptBridgeStats.updateCalls,
+            _scriptBridgeStats.lateUpdateCalls);
 
         renderer->addText(StringUtil::format("CoreStats"), {leftOffset, lineHeight * lines}, coreInfo);
         renderer->addText(coreStats, {coreOffset, lineHeight * lines}, coreInfo);
+        lines++;
+        renderer->addText(StringUtil::format("ScriptBridgeStats"), {leftOffset, lineHeight * lines}, coreInfo);
+        renderer->addText(scriptBridgeStats, {coreOffset, lineHeight * lines}, coreInfo);
         lines++;
 
         lines += 0.5F;

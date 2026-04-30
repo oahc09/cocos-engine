@@ -41,6 +41,15 @@ public:
     // Returns the D3D12_PRIMITIVE_TOPOLOGY for command list IA setup
     uint32_t getD3D12PrimitiveTopology() const;
 
+    // Returns the actual root signature used to create this PSO.
+    void *getID3D12RootSignature() const;
+
+    // True when the PSO root signature matches the PipelineLayout root signature.
+    bool usesPipelineLayoutRootSignature() const;
+
+    // True when this PSO is using the built-in diagnostic fallback shader.
+    bool isDiagnosticFallback() const;
+
 protected:
     void doInit(const PipelineStateInfo &info) override;
     void doDestroy() override;

@@ -36,6 +36,7 @@
 namespace cc {
 
 class Node;
+class AssetRefManager;
 
 class Asset : public CCObject {
 public:
@@ -153,7 +154,11 @@ protected:
     bool _loaded{true};
     bool _isDefault{false};
 
+    void addAssetRefInternal();
+    void decAssetRefInternal();
+
     CC_DISALLOW_COPY_MOVE_ASSIGN(Asset);
+    friend class AssetRefManager;
 };
 
 } // namespace cc

@@ -26,11 +26,12 @@
 
 #include "gfx-base/GFXShader.h"
 #include <memory>
+#include <vector>
 
 namespace cc {
 namespace gfx {
 
-class CC_DLL CCD3D12Shader final : public Shader {
+class CCD3D12Shader final : public Shader {
 public:
     CCD3D12Shader();
     ~CCD3D12Shader() override;
@@ -58,6 +59,11 @@ protected:
 
 private:
     BytecodeBlob getStageBytecode(ShaderStageFlagBit stage) const;
+
+    // Compile GLSL4 source -> SPIR-V -> HLSL -> DXBC
+    bool compileGLSLToDXBC(ShaderStageFlagBit stage, const ccstd::string &glslSource,
+                           const ccstd::string &entryName,
+                           std::vector<uint8_t> &outDXBC);
 
     struct Impl;
     std::unique_ptr<Impl> _impl;

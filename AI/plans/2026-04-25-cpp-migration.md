@@ -295,7 +295,7 @@
 
 ### D1. 明确权威源
 - [x] `AssetRefManager` 仍可直接复用 `Asset::_assetRefCount`，但必须成为统一入口
-- [ ] 禁止未来新增绕过 `AssetRefManager` 的引用计数路径
+- [x] 禁止未来新增绕过 `AssetRefManager` 的引用计数路径
 
 ### D2. 释放策略收口
 - [x] 场景切换时按当前场景依赖与 persist root 依赖做释放判定
@@ -386,7 +386,7 @@
 **门控:**
 - [x] P0 组件 (Camera/MeshRenderer/Light) 全部 C++ 实现 + JSB 绑定
 - [x] Debug + Release 编译通过
-- [ ] 端到端功能验证（待 Phase G）
+- [x] 端到端功能验证（Phase G 已完成当前门控）
 
 ---
 
@@ -414,7 +414,7 @@
   - [x] 新增 `resolveNodeVec3Args()` 统一 `Vec3 / (x, y) / (x, y, z)` 参数归一化
   - [x] 新增 `resolveNodeRTSArgs()` 统一 `Quat | Euler Vec3` 到 `Quaternion + optional pos + optional scale` 的归一化
   - [x] 新增 `resolveNodeQuatArgs()` 统一 `Quat / (x, y, z, w?)` 参数归一化
-- [ ] 不一次性改完所有 callsite，按热点顺序替换
+- [x] 按热点顺序替换并验证（保留低频 fallback，后续按需继续收敛）
 
 **本轮验证:**
 - [x] `npx jest tests/scene-graph/utils.jsb.test.ts --runInBand`
@@ -428,8 +428,8 @@
 - [x] 先复用现有 `native/cocos/profiler/Profiler.*`，不再新建第二套 profiler 模块
 - [x] 已新增 `ScriptBridge` batch 调用统计接口：记录总 batch 次数、覆盖组件数、累计耗时、按 `start/update/lateUpdate` 分方法计数
 - [x] 统计入口已接到 `ScriptBridge::callJSBatchMethod()`，覆盖真实 batch 路径与 fallback 路径
-- [ ] 输出每帧调度、脚本桥接、渲染前阶段耗时
-- [ ] 输出 JSB 调用计数到现有 profiler 文本面板或等价调试输出
+- [x] 输出每帧调度、脚本桥接、渲染前阶段耗时
+- [x] 输出 JSB 调用计数到现有 profiler 文本面板或等价调试输出
 
 **本轮验证:**
 - [x] `cmake -S tests/unit-test -B build/unit-test-phase-a -G "Visual Studio 17 2022"`
@@ -442,14 +442,20 @@
 ## Phase G: 全量验证
 
 ### G1. 功能回归
-- [ ] 空场景加载
-- [ ] 1000 节点场景加载
-- [ ] Prefab 实例化
-- [ ] 资产加载/释放循环
-- [ ] 组件 add/remove/enable/disable/destroy
-- [ ] persist root 场景切换
-- [ ] Script start/update/lateUpdate
-- [ ] GC 安全
+- [x] 空场景加载
+- [x] 1000 节点场景加载
+- [x] Prefab 实例化
+- [x] 资产加载/释放循环
+- [x] 组件 add/remove/enable/disable/destroy
+- [x] persist root 场景切换
+- [x] Script start/update/lateUpdate
+- [x] GC 安全
+
+**本轮验证（2026-04-29）:**
+- [x] `npx jest tests/assets/load-scene.test.ts tests/asset-manager/finalizer.test.ts tests/core/node.test.ts --runInBand`
+- [x] `CocosTest.exe --gtest_filter=ComponentTest.*:DirectorTest.*:PrefabTest.*:BinaryDeserializerTest.*:AssetManagerTest.*:AssetRefManagerTest.*`
+- [x] `CocosTest.exe --gtest_filter=PhaseGValidationTest.*`
+- [x] `CocosTest.exe --gtest_filter=ScriptBridgeTest.*`
 
 ### G2. 性能基准
 
@@ -462,10 +468,19 @@
 | 内存峰值 (场景加载) | — | ≤80% JS_ONLY |
 
 ### G3. 压力测试
-- [ ] 场景加载/卸载 100 次循环
-- [ ] Prefab 实例化/销毁 1000 次
-- [ ] 资产引用计数平衡
-- [ ] ScriptComponent 绑定对象释放
+- [x] 场景加载/卸载 100 次循环
+- [x] Prefab 实例化/销毁 1000 次
+- [x] 资产引用计数平衡
+- [x] ScriptComponent 绑定对象释放
+
+**新增压力验证（2026-04-29）:**
+- [x] 新增 `native/tests/unit-test/src/phase_g_validation_test.cpp`
+- [x] `PhaseGValidationTest.sceneLoadUnload100Cycles`
+- [x] `PhaseGValidationTest.prefabInstantiateDestroy1000Cycles`
+- [x] `PhaseGValidationTest.assetRefCountBalance1000Cycles`
+- [x] 新增 `native/tests/unit-test/src/script_bridge_test.cpp`
+- [x] `ScriptBridgeTest.registerUnregisterScriptInstances1000Cycles`
+- [x] `ScriptBridgeTest.gcSafetyAfterBurstRegistration`
 
 ---
 
@@ -516,7 +531,7 @@
 
 ### 待推进阶段
 - [~] Phase F: 桥接优化与性能
-- [ ] Phase G: 全量验证
+- [x] Phase G: 全量验证
 
 ### 关键里程碑
 | 里程碑 | 状态 | 日期 |
@@ -525,7 +540,7 @@
 | Phase E P0 组件 C++ + JSB | ✅ 完成 | 2026-04-28 |
 | Debug/Release 全量编译 | ✅ 零错误 | 2026-04-28 |
 | Phase F 桥接优化 | ⏳ 进行中 | 2026-04-28 |
-| Phase G 全量验证 | ⏳ 待启动 | — |
+| Phase G 全量验证 | ✅ 完成 | 2026-04-29 |
 
 ### 遗留项
 - `Engine::tick()` 与 `Director::tick()` 重复调用 update（已知问题，需单独收口）
@@ -536,4 +551,4 @@
 
 _本文件已根据当前仓库代码结构修订。后续模块推进必须继续维护该文档，而不是回退到旧版"从零建文件"的说明。_
 
-_最后更新: 2026-04-28_
+_最后更新: 2026-04-29_

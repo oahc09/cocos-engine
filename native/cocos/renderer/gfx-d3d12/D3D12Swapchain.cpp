@@ -211,12 +211,23 @@ uintptr_t CCD3D12Swapchain::getCurrentRTVHandle() const {
     return handle.ptr;
 }
 
+uint32_t CCD3D12Swapchain::getCurrentBackBufferIndex() const {
+#if defined(_WIN32)
+    return _impl ? _impl->currentBackBufferIndex : 0;
+#else
+    return 0;
+#endif
+}
+
 bool CCD3D12Swapchain::present() {
     if (!_impl || !_impl->ready || !_impl->swapChain) {
         return false;
     }
 
-    const UINT syncInterval = (_vsyncMode == VsyncMode::OFF) ? 0 : 1;
+    // NOTE: syncInterval must be 0 (immediate) because Queue::submit is already
+    // synchronous (fence wait). Using syncInterval=1 with FLIP_DISCARD + sync submit
+    // causes the window to display black on some drivers (AMD Radeon).
+    const UINT syncInterval = 0;
     HRESULT hr = _impl->swapChain->Present(syncInterval, 0);
     if (FAILED(hr)) {
         CC_LOG_ERROR("IDXGISwapChain::Present failed. HRESULT=0x%08x", static_cast<unsigned>(hr));

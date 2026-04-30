@@ -36,6 +36,8 @@ public:
     ~CCD3D12PipelineLayout() override;
 
     void *getID3D12RootSignature() const;
+    int32_t getCbvSrvUavRootParameterIndex(uint32_t set) const;
+    int32_t getSamplerRootParameterIndex(uint32_t set) const;
 
 protected:
     void doInit(const PipelineLayoutInfo &info) override;

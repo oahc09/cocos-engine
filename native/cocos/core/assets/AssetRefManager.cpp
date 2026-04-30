@@ -38,7 +38,7 @@ void AssetRefManager::addRef(Asset *asset) {
     ReleaseManager::getInstance().registerAsset(asset);
     ReleaseManager::getInstance().addRef(asset->getUuid());
     uint32_t oldCount = asset->getAssetRefCount();
-    asset->addAssetRef();
+    asset->addAssetRefInternal();
     uint32_t newCount = asset->getAssetRefCount();
     if (_callback) _callback(asset, oldCount, newCount);
 }
@@ -48,7 +48,7 @@ void AssetRefManager::decRef(Asset *asset, bool autoRelease) {
     uint32_t oldCount = asset->getAssetRefCount();
     if (oldCount == 0) return;
     ReleaseManager::getInstance().registerAsset(asset);
-    asset->decAssetRef(autoRelease);
+    asset->decAssetRefInternal();
     ReleaseManager::getInstance().decRef(asset->getUuid());
     if (autoRelease) {
         ReleaseManager::getInstance().autoRelease();

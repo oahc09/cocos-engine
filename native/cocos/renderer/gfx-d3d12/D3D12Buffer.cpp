@@ -112,6 +112,14 @@ void CCD3D12Buffer::update(const void *buffer, uint32_t size) {
     auto *dst = static_cast<uint8_t *>(mappedData) + _impl->resourceOffset;
     std::memcpy(dst, buffer, copySize);
 
+    static uint32_t s_diagBufferUpdateCount = 0;
+    if (s_diagBufferUpdateCount < 48 && copySize >= sizeof(float) * 4 && _size <= 256) {
+        const auto *floats = static_cast<const float *>(buffer);
+        CC_LOG_INFO("[D3D12-BUF] size=%u copy=%u f0=%.3f f1=%.3f f2=%.3f f3=%.3f",
+                    _size, copySize, floats[0], floats[1], floats[2], floats[3]);
+        ++s_diagBufferUpdateCount;
+    }
+
     D3D12_RANGE writeRange{_impl->resourceOffset, _impl->resourceOffset + copySize};
     _impl->resource->Unmap(0, &writeRange);
 #endif
@@ -163,7 +171,7 @@ bool CCD3D12Buffer::createResource(uint32_t size) {
     D3D12_RESOURCE_DESC resourceDesc{};
     resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
     resourceDesc.Alignment = 0;
-    resourceDesc.Width = size;
+    resourceDesc.Width = static_cast<UINT64>((size + 255U) & ~255U);
     resourceDesc.Height = 1;
     resourceDesc.DepthOrArraySize = 1;
     resourceDesc.MipLevels = 1;

@@ -35,6 +35,42 @@
     #include <wrl/client.h>
 #endif
 
+namespace {
+#if defined(_WIN32)
+void dumpQueueDebugMessages(ID3D12Device *device, const char *checkpoint) {
+    if (!device) {
+        return;
+    }
+    Microsoft::WRL::ComPtr<ID3D12InfoQueue> infoQueue;
+    if (FAILED(device->QueryInterface(IID_PPV_ARGS(&infoQueue)))) {
+        return;
+    }
+    const UINT64 msgCount = infoQueue->GetNumStoredMessages();
+    if (msgCount == 0) {
+        return;
+    }
+    CC_LOG_INFO("[QUEUE-DIAG] %s: %llu pending messages", checkpoint, static_cast<unsigned long long>(msgCount));
+    for (UINT64 i = 0; i < msgCount; ++i) {
+        SIZE_T msgSize = 0;
+        infoQueue->GetMessage(i, nullptr, &msgSize);
+        if (msgSize == 0) {
+            continue;
+        }
+        ccstd::vector<uint8_t> storage(msgSize);
+        auto *msg = reinterpret_cast<D3D12_MESSAGE *>(storage.data());
+        if (SUCCEEDED(infoQueue->GetMessage(i, msg, &msgSize))) {
+            CC_LOG_INFO("[QUEUE-DIAG]   ID=%u severity=%d: %.*s",
+                        static_cast<unsigned>(msg->ID),
+                        static_cast<int>(msg->Severity),
+                        static_cast<int>(msg->DescriptionByteLength),
+                        msg->pDescription);
+        }
+    }
+    infoQueue->ClearStoredMessages();
+}
+#endif
+} // namespace
+
 namespace cc {
 namespace gfx {
 
@@ -104,6 +140,7 @@ void CCD3D12Queue::submit(CommandBuffer *const *cmdBuffs, uint32_t count) {
     }
 
     auto *graphicsQueue = static_cast<ID3D12CommandQueue *>(device->getGraphicsQueueHandle());
+    auto *d3dDevice = static_cast<ID3D12Device *>(device->getD3D12DeviceHandle());
     if (!graphicsQueue) {
         CC_LOG_ERROR("D3D12Queue::submit - graphics queue is null.");
         return;
@@ -128,6 +165,7 @@ void CCD3D12Queue::submit(CommandBuffer *const *cmdBuffs, uint32_t count) {
 
     // Execute command lists
     graphicsQueue->ExecuteCommandLists(static_cast<UINT>(commandLists.size()), commandLists.data());
+    dumpQueueDebugMessages(d3dDevice, "after-execute");
 
     // Signal fence and wait (synchronous submit for PoC)
     if (_impl->fence && _impl->fenceEvent) {
@@ -144,6 +182,7 @@ void CCD3D12Queue::submit(CommandBuffer *const *cmdBuffs, uint32_t count) {
                 WaitForSingleObject(_impl->fenceEvent, INFINITE);
             }
         }
+        dumpQueueDebugMessages(d3dDevice, "after-fence-wait");
     }
 #else
     (void)cmdBuffs;

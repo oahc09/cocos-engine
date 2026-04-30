@@ -91,6 +91,7 @@ public:
 
     // === instanceof check ===
     bool isInstanceOf(uint32_t compId, const ccstd::string &className);
+    uint32_t getInstanceCount() const { return static_cast<uint32_t>(_instances.size()); }
 
 private:
     ScriptBridge() = default;

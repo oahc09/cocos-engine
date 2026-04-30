@@ -25,6 +25,7 @@
 #include "core/assets/Asset.h"
 #include "base/DeferredReleasePool.h"
 #include "base/Macros.h"
+#include "core/assets/AssetRefManager.h"
 #include "core/utils/Path.h"
 
 namespace cc {
@@ -75,16 +76,20 @@ void Asset::setRawAsset(const ccstd::string &filename, bool inLibrary /* = true*
 }
 
 void Asset::addAssetRef() {
-    ++_assetRefCount;
+    AssetRefManager::getInstance().addRef(this);
 }
 
 void Asset::decAssetRef(bool autoRelease /* = true*/) {
+    AssetRefManager::getInstance().decRef(this, autoRelease);
+}
+
+void Asset::addAssetRefInternal() {
+    ++_assetRefCount;
+}
+
+void Asset::decAssetRefInternal() {
     if (_assetRefCount > 0) {
         --_assetRefCount;
-    }
-
-    if (autoRelease) {
-        //cjh TODO:
     }
 }
 

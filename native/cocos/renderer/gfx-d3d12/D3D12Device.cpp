@@ -284,6 +284,7 @@ bool CCD3D12Device::doInit(const DeviceInfo &info) {
                 _caps.maxVertexUniformVectors, _caps.maxFragmentUniformVectors, _caps.maxTextureSize);
     dumpD3D12DebugMessages(_impl->d3dDevice.Get(), "doInit-complete");
     diagLog("[DOINIT] COMPLETE! D3D12 device fully initialized.\n");
+
     return true;
 }
 
@@ -343,6 +344,139 @@ void CCD3D12Device::present() {
         auto *d3d12Swapchain = static_cast<CCD3D12Swapchain *>(swapchain);
         if (!d3d12Swapchain || !d3d12Swapchain->isReady()) {
             continue;
+        }
+
+        // --- DIAG: Read back buffer pixels before Present ---
+        // Read center 8x1 pixels from the back buffer to verify rendering content
+        if (s_presentCount <= 5 || s_presentCount == 60 || s_presentCount == 300) {
+            auto *backBuffer = static_cast<ID3D12Resource *>(d3d12Swapchain->getCurrentBackBufferHandle());
+            if (backBuffer && _impl->d3dDevice) {
+                auto desc = backBuffer->GetDesc();
+                CC_LOG_INFO("[PIXEL-READBACK] Frame %u: backBuffer=%p size=%llux%u format=%u currentIdx=%u",
+                            s_presentCount, backBuffer,
+                            static_cast<unsigned long long>(desc.Width),
+                            static_cast<unsigned>(desc.Height),
+                            static_cast<unsigned>(desc.Format),
+                            d3d12Swapchain->getCurrentBackBufferIndex());
+                diagLog("[PIXEL-READBACK] Frame %u: backBuffer=%p size=%llux%u format=%u currentIdx=%u\n",
+                        s_presentCount, backBuffer,
+                        static_cast<unsigned long long>(desc.Width),
+                        static_cast<unsigned>(desc.Height),
+                        static_cast<unsigned>(desc.Format),
+                        d3d12Swapchain->getCurrentBackBufferIndex());
+
+                // Create a readback buffer for 8 pixels (RGBA8 = 4 bytes each)
+                const UINT pixelRowCount = 8;
+                const UINT bytesPerPixel = 4;
+                const UINT rowPitch = (pixelRowCount * bytesPerPixel + 255) & ~255; // 256-aligned
+
+                D3D12_RESOURCE_DESC readbackDesc{};
+                readbackDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+                readbackDesc.Alignment = 0;
+                readbackDesc.Width = rowPitch; // 256-aligned size
+                readbackDesc.Height = 1;
+                readbackDesc.DepthOrArraySize = 1;
+                readbackDesc.MipLevels = 1;
+                readbackDesc.Format = DXGI_FORMAT_UNKNOWN;
+                readbackDesc.SampleDesc.Count = 1;
+                readbackDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+                readbackDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+                D3D12_HEAP_PROPERTIES heapProps{};
+                heapProps.Type = D3D12_HEAP_TYPE_READBACK;
+                heapProps.CreationNodeMask = 1;
+                heapProps.VisibleNodeMask = 1;
+
+                Microsoft::WRL::ComPtr<ID3D12Resource> readbackBuffer;
+                HRESULT hr = _impl->d3dDevice->CreateCommittedResource(
+                    &heapProps, D3D12_HEAP_FLAG_NONE, &readbackDesc,
+                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                    IID_PPV_ARGS(&readbackBuffer));
+                if (SUCCEEDED(hr)) {
+                    // Use device's command allocator/list for readback
+                    _impl->commandAllocator->Reset();
+                    _impl->commandList->Reset(_impl->commandAllocator.Get(), nullptr);
+
+                    // Transition back buffer: PRESENT → COPY_SOURCE
+                    // (endRenderPass set it to PRESENT, Queue::submit already executed)
+                    D3D12_RESOURCE_BARRIER barrier{};
+                    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                    barrier.Transition.pResource = backBuffer;
+                    barrier.Transition.Subresource = 0;
+                    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+                    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+                    _impl->commandList->ResourceBarrier(1, &barrier);
+
+                    // Copy center row of 8 pixels
+                    D3D12_TEXTURE_COPY_LOCATION src{};
+                    src.pResource = backBuffer;
+                    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                    src.SubresourceIndex = 0;
+
+                    UINT centerX = static_cast<UINT>(desc.Width / 2) - 4;
+                    UINT centerY = (desc.Height / 2);
+
+                    D3D12_TEXTURE_COPY_LOCATION dst{};
+                    dst.pResource = readbackBuffer.Get();
+                    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                    dst.PlacedFootprint.Offset = 0;
+                    dst.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+                    dst.PlacedFootprint.Footprint.Width = pixelRowCount;
+                    dst.PlacedFootprint.Footprint.Height = 1;
+                    dst.PlacedFootprint.Footprint.Depth = 1;
+                    dst.PlacedFootprint.Footprint.RowPitch = rowPitch;
+
+                    D3D12_BOX srcBox{};
+                    srcBox.left = centerX;
+                    srcBox.top = centerY;
+                    srcBox.front = 0;
+                    srcBox.right = centerX + pixelRowCount;
+                    srcBox.bottom = centerY + 1;
+                    srcBox.back = 1;
+
+                    _impl->commandList->CopyTextureRegion(&dst, 0, 0, 0, &src, &srcBox);
+
+                    // Transition back: COPY_DEST → PRESENT (restore for Present() call)
+                    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+                    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+                    _impl->commandList->ResourceBarrier(1, &barrier);
+
+                    _impl->commandList->Close();
+                    ID3D12CommandList *cmdLists[] = { _impl->commandList.Get() };
+                    _impl->graphicsQueue->ExecuteCommandLists(1, cmdLists);
+
+                    // Wait for copy to complete
+                    ++_impl->fenceValue;
+                    _impl->graphicsQueue->Signal(_impl->frameFence.Get(), _impl->fenceValue);
+                    if (_impl->frameFence->GetCompletedValue() < _impl->fenceValue) {
+                        _impl->frameFence->SetEventOnCompletion(_impl->fenceValue, _impl->fenceEvent);
+                        WaitForSingleObject(_impl->fenceEvent, INFINITE);
+                    }
+
+                    // Map and read pixels
+                    void *mappedData = nullptr;
+                    D3D12_RANGE readRange{0, rowPitch};
+                    if (SUCCEEDED(readbackBuffer->Map(0, &readRange, &mappedData)) && mappedData) {
+                        auto *pixels = static_cast<const uint8_t *>(mappedData);
+                        CC_LOG_INFO("[PIXEL-READBACK] Frame %u: center pixels at (%u,%u): "
+                                    "[%u,%u,%u,%u] [%u,%u,%u,%u] [%u,%u,%u,%u] [%u,%u,%u,%u]",
+                                    s_presentCount, centerX, centerY,
+                                    pixels[0], pixels[1], pixels[2], pixels[3],
+                                    pixels[4], pixels[5], pixels[6], pixels[7],
+                                    pixels[8], pixels[9], pixels[10], pixels[11],
+                                    pixels[12], pixels[13], pixels[14], pixels[15]);
+                        diagLog("[PIXEL-READBACK] Frame %u: center(%u,%u) 8px: "
+                                "[%u,%u,%u,%u] [%u,%u,%u,%u] [%u,%u,%u,%u] [%u,%u,%u,%u]\n",
+                                s_presentCount, centerX, centerY,
+                                pixels[0], pixels[1], pixels[2], pixels[3],
+                                pixels[4], pixels[5], pixels[6], pixels[7],
+                                pixels[8], pixels[9], pixels[10], pixels[11],
+                                pixels[12], pixels[13], pixels[14], pixels[15]);
+                        D3D12_RANGE writeRange{0, 0};
+                        readbackBuffer->Unmap(0, &writeRange);
+                    }
+                }
+            }
         }
 
         // The engine's rendering pipeline already handles resource barriers

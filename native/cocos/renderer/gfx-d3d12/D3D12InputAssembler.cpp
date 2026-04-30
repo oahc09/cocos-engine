@@ -221,7 +221,9 @@ void CCD3D12InputAssembler::doInit(const InputAssemblerInfo &info) {
     for (size_t i = 0; i < info.vertexBuffers.size(); ++i) {
         auto *d3d12Buffer = static_cast<CCD3D12Buffer *>(info.vertexBuffers[i]);
         if (d3d12Buffer) {
-            _impl->vbViews[i].BufferLocation = d3d12Buffer->getD3D12GPUVirtualAddress() + d3d12Buffer->getD3D12ResourceOffset();
+            // getD3D12GPUVirtualAddress() already includes resourceOffset internally,
+            // so we must NOT add getD3D12ResourceOffset() again.
+            _impl->vbViews[i].BufferLocation = d3d12Buffer->getD3D12GPUVirtualAddress();
             _impl->vbViews[i].SizeInBytes = d3d12Buffer->getSize();
             _impl->vbViews[i].StrideInBytes = d3d12Buffer->getStride();
         }
@@ -232,7 +234,8 @@ void CCD3D12InputAssembler::doInit(const InputAssemblerInfo &info) {
     if (_impl->hasIndexBuffer) {
         auto *d3d12Buffer = static_cast<CCD3D12Buffer *>(info.indexBuffer);
         if (d3d12Buffer) {
-            _impl->ibView.BufferLocation = d3d12Buffer->getD3D12GPUVirtualAddress() + d3d12Buffer->getD3D12ResourceOffset();
+            // getD3D12GPUVirtualAddress() already includes resourceOffset internally.
+            _impl->ibView.BufferLocation = d3d12Buffer->getD3D12GPUVirtualAddress();
             _impl->ibView.SizeInBytes = d3d12Buffer->getSize();
 
             // Determine index format from buffer stride

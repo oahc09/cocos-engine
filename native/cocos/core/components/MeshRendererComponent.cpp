@@ -27,6 +27,7 @@
 #include "3d/assets/Mesh.h"
 #include "core/Root.h"
 #include "core/assets/Material.h"
+#include "core/builtin/BuiltinResMgr.h"
 #include "core/scene-graph/Node.h"
 #include "core/scene-graph/Scene.h"
 #include "scene/Model.h"
@@ -141,13 +142,32 @@ void MeshRendererComponent::syncToRenderModel() {
         return;
     }
 
-    // Set the mesh on the model (creating submodels).
-    // NOTE: This is a simplified Phase E2 implementation. A full version would:
-    //   1. Get RenderingSubMeshes from the Mesh asset
-    //   2. Call _renderModel->initSubModel(i, subMesh, material) for each sub-mesh
-    //   3. Handle bounds creation via createBoundingShape()
-    // For now we only establish the basic reference.
-    // Detailed submodel setup will be implemented in a follow-up phase.
+    const auto &renderingSubMeshes = _mesh->getRenderingSubMeshes();
+    if (renderingSubMeshes.empty()) {
+        return;
+    }
+
+    Material *fallbackMaterial = nullptr;
+    if (!_materials.empty()) {
+        fallbackMaterial = _materials.front().get();
+    }
+
+    for (uint32_t i = 0; i < renderingSubMeshes.size(); ++i) {
+        Material *material = i < _materials.size() ? _materials[i].get() : nullptr;
+        if (!material) {
+            material = fallbackMaterial;
+        }
+        if (!material) {
+            continue;
+        }
+
+        _renderModel->initSubModel(i, renderingSubMeshes[i].get(), material);
+    }
+
+    _renderModel->createBoundingShape(_mesh->getStruct().minPosition, _mesh->getStruct().maxPosition);
+    _renderModel->updateTransform(0);
+    _renderModel->updateUBOs(0);
+    _renderModel->updateWorldBound();
 }
 
 void MeshRendererComponent::deserializeBinary(const uint8_t * /*data*/, uint32_t /*size*/) {

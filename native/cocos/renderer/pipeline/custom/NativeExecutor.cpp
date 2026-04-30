@@ -250,11 +250,15 @@ void updateGlobal(
 }
 
 void submitUICommands(
+    NativePipeline* ppl,
     gfx::RenderPass* renderPass,
     uint32_t phaseLayoutID,
     const scene::Camera* camera,
     gfx::CommandBuffer* cmdBuff) {
     const auto cameraVisFlags = camera->getVisibility();
+    cmdBuff->bindDescriptorSet(
+        static_cast<uint32_t>(pipeline::SetIndex::GLOBAL),
+        ppl->getDescriptorSet());
     const auto& batches = camera->getScene()->getBatches();
     for (auto* batch : batches) {
         if (!(cameraVisFlags & batch->getVisFlags())) {
@@ -753,7 +757,7 @@ struct RenderGraphVisitor : boost::dfs_visitor<> {
         const auto* camera = blit.camera;
         CC_EXPECTS(camera);
 
-        submitUICommands(ctx.currentPass, phaseLayoutID, camera, ctx.cmdBuff);
+        submitUICommands(ctx.ppl, ctx.currentPass, phaseLayoutID, camera, ctx.cmdBuff);
     }
 
     void drawBlit(const Blit& blit) const {

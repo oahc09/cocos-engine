@@ -239,6 +239,11 @@ CCD3D12Texture::~CCD3D12Texture() {
 void CCD3D12Texture::doInit(const TextureInfo &info) {
     (void)info;
     createResource(_info.width, _info.height);
+#if defined(_WIN32)
+    // createResource() uses CreateCommittedResource(..., D3D12_RESOURCE_STATE_COMMON, ...),
+    // so tracked state must start from COMMON until an explicit barrier changes it.
+    _currentState = D3D12_RESOURCE_STATE_COMMON;
+#endif
 }
 
 void CCD3D12Texture::doInit(const TextureViewInfo &info) {
@@ -248,15 +253,22 @@ void CCD3D12Texture::doInit(const TextureViewInfo &info) {
     }
 #if defined(_WIN32)
     _impl->resource = static_cast<ID3D12Resource *>(texture->getD3D12ResourceHandle());
+    _currentState = texture->getCurrentState();
 #endif
 }
 
 void CCD3D12Texture::doInit(const SwapchainTextureInfo &info) {
     (void)info;
-    // Swapchain depth-stencil textures need a real D3D12 resource
+#if defined(_WIN32)
     if (hasFlag(_info.usage, TextureUsageBit::DEPTH_STENCIL_ATTACHMENT)) {
         createResource(_info.width, _info.height);
+        // Depth resource is created in COMMON and transitioned on first use.
+        _currentState = D3D12_RESOURCE_STATE_COMMON;
+    } else if (hasFlag(_info.usage, TextureUsageBit::COLOR_ATTACHMENT)) {
+        // Swapchain color textures start as PRESENT, will be transitioned by beginRenderPass
+        _currentState = D3D12_RESOURCE_STATE_PRESENT;
     }
+#endif
     // Swapchain color textures wrap the swapchain's back buffers;
     // the resource is obtained dynamically via getD3D12ResourceHandle()
 }

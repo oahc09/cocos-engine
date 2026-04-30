@@ -95,5 +95,32 @@
   - PipelineSceneData::initDebugRenderer: effect 未加载时 passes 为空，添加空检查
   - DebugRenderer::activate: 内置字体返回 nullptr，getFontPath 返回空串跳过
   - Node::onBatchCreated: 补全 C++ 实现 (invalidateChildren + siblingIndex + 递归)
+- **🎉 三角形渲染成功 (2026-04-29)**: D3D12 端到端渲染管线完全打通，WebGPUDemo 看到三角形输出
+- **🎉 真实 Shader PSO 创建成功 (2026-04-30)**: 引擎 104 个 GLSL 着色器全部成功编译 (GLSL→SPIR-V→HLSL→DXBC), 3 个 PSO primary path 创建成功
 - **外部测试项目**: D:\Work\CocosProjects\WebGPUDemo\ (COCOS_X_PATH 指向引擎源码)
 - **进度文档**: AI/D3D12-Subagent-Progress-Log.md, AI/D3D12-GFX-PoC-Checklist.md
+
+## D3D12 材质支持 (2026-04-30)
+- **Shader 编译管线**: GLSL(#version 450) → glslang → SPIR-V → SPIRV-Cross → HLSL(SM 5.1) → D3DCompile → DXBC
+- **SPIRV-Cross HLSL 绑定修复**:
+  - `hlslBinding.stage` 必须设为对应 `spv::ExecutionModel`，否则 `remap_hlsl_resource_binding` 查找键不匹配
+  - `register_space` = descriptor set (set=N → space=N)，匹配 PipelineLayout 的 Root Signature
+  - 入口点统一用 `"main"`（不是 `vert_main`/`frag_main`，那些是无语义的内部函数）
+- **PSO 创建三个关键修复**:
+  1. SM 5.1 升级（支持 register(bN, spaceS) 语法）
+  2. HLSLResourceBinding.stage 映射到正确的 ExecutionModel
+  3. D3DCompile 入口点从 vert_main/frag_main 改为 main（根因：SV_Position 缺失）
+- **CommandBuffer 延迟描述符绑定**: bindDescriptorSet 只记录 pending, draw/dispatch 前统一 flush
+- **DescriptorSet 纹理格式**: SRV/UAV 使用实际格式和维度（不再硬编码）
+- **PipelineLayout visibility**: 使用 D3D12_SHADER_VISIBILITY_ALL
+## D3D12 黑屏排查与修复 (2026-04-30)
+- **PipelineBarrier 完整实现**: 替换空实现，AccessFlagBit→D3D12_RESOURCE_STATES 完整映射
+- **D3D12Texture 资源状态追踪**: 新增 getCurrentState()/setCurrentState(), 初始化/View/Swapchain 各设置正确初始状态
+- **beginRenderPass/endRenderPass 重构**: 附件状态转换+批量屏障提交
+- **copyBuffersToTexture 状态追踪**: 使用追踪状态+拷贝后恢复
+- **结果**: Debug Layer severity=1 错误清零, 稳定运行 1200+ 帧
+- **黑屏根因**: FLIP_DISCARD + syncInterval=1 + 同步Queue::submit 导致窗口全黑
+- **修复**: Present() syncInterval=0，因为Queue::submit已经是同步fence wait
+- **验证**: D3D12 API readback确认back buffer有渲染内容，截屏确认窗口正常显示(R=235)
+- **新增**: Device::present() back buffer像素readback诊断, Swapchain::getCurrentBackBufferIndex()
+- **🎉 黑屏已解决!** D3D12端到端渲染管线完全打通

@@ -93,6 +93,8 @@ struct CCD3D12PipelineLayout::Impl {
 #if defined(_WIN32)
     Microsoft::WRL::ComPtr<ID3D12RootSignature> rootSignature;
 #endif
+    ccstd::vector<int32_t> cbvSrvUavRootParameterIndices;
+    ccstd::vector<int32_t> samplerRootParameterIndices;
 };
 
 CCD3D12PipelineLayout::CCD3D12PipelineLayout()
@@ -105,6 +107,8 @@ CCD3D12PipelineLayout::~CCD3D12PipelineLayout() {
 
 void CCD3D12PipelineLayout::doInit(const PipelineLayoutInfo &info) {
     (void)info;
+    _impl->cbvSrvUavRootParameterIndices.assign(_setLayouts.size(), -1);
+    _impl->samplerRootParameterIndices.assign(_setLayouts.size(), -1);
 
 #if defined(_WIN32)
     auto *device = CCD3D12Device::getInstance();
@@ -175,11 +179,14 @@ void CCD3D12PipelineLayout::doInit(const PipelineLayoutInfo &info) {
             }
         }
 
-        // Create root parameters for this set: one for CBV/SRV/UAV and optionally one for Sampler
-        D3D12_SHADER_VISIBILITY visibility = toD3D12ShaderVisibility(
-            bindings.empty() ? ShaderStageFlagBit::ALL : bindings[0].stageFlags);
+        // Use ALL visibility for root parameters — D3D12 root signature must match
+        // shader resource declarations which may be used by any stage.
+        // Using per-binding visibility risks mismatches when the same descriptor
+        // set is accessed from multiple shader stages.
+        D3D12_SHADER_VISIBILITY visibility = D3D12_SHADER_VISIBILITY_ALL;
 
         if (!cbvSrvUavRanges.empty()) {
+            _impl->cbvSrvUavRootParameterIndices[setIndex] = static_cast<int32_t>(rootParameters.size());
             D3D12_ROOT_PARAMETER param{};
             param.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
             param.ShaderVisibility = visibility;
@@ -194,6 +201,7 @@ void CCD3D12PipelineLayout::doInit(const PipelineLayoutInfo &info) {
         }
 
         if (!samplerRanges.empty()) {
+            _impl->samplerRootParameterIndices[setIndex] = static_cast<int32_t>(rootParameters.size());
             D3D12_ROOT_PARAMETER param{};
             param.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
             param.ShaderVisibility = visibility;
@@ -263,6 +271,8 @@ void CCD3D12PipelineLayout::doDestroy() {
         _impl->rootSignature.Reset();
     }
 #endif
+    _impl->cbvSrvUavRootParameterIndices.clear();
+    _impl->samplerRootParameterIndices.clear();
 }
 
 void *CCD3D12PipelineLayout::getID3D12RootSignature() const {
@@ -271,6 +281,20 @@ void *CCD3D12PipelineLayout::getID3D12RootSignature() const {
 #else
     return nullptr;
 #endif
+}
+
+int32_t CCD3D12PipelineLayout::getCbvSrvUavRootParameterIndex(uint32_t set) const {
+    if (!_impl || set >= _impl->cbvSrvUavRootParameterIndices.size()) {
+        return -1;
+    }
+    return _impl->cbvSrvUavRootParameterIndices[set];
+}
+
+int32_t CCD3D12PipelineLayout::getSamplerRootParameterIndex(uint32_t set) const {
+    if (!_impl || set >= _impl->samplerRootParameterIndices.size()) {
+        return -1;
+    }
+    return _impl->samplerRootParameterIndices[set];
 }
 
 } // namespace gfx

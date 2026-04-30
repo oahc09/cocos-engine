@@ -70,6 +70,9 @@ public:
     // Returns the closed ID3D12GraphicsCommandList as void* for Queue::submit
     void *getD3D12CommandList() const;
 
+    // Flush pending descriptor set bindings to GPU (called internally before draw/dispatch)
+    void flushDescriptorSets();
+
 protected:
     void doInit(const CommandBufferInfo &info) override;
     void doDestroy() override;

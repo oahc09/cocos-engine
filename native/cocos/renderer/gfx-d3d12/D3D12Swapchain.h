@@ -41,6 +41,7 @@ public:
     bool isReady() const;
     void *getCurrentBackBufferHandle() const;
     uintptr_t getCurrentRTVHandle() const;
+    uint32_t getCurrentBackBufferIndex() const;
     bool present();
 
 protected:

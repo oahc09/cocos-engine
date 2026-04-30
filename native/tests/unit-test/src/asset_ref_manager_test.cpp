@@ -67,4 +67,20 @@ TEST(AssetRefManagerTest, autoReleaseClearsPendingReleaseQueue) {
     EXPECT_EQ(releaseManager.getRefCount("asset-auto-release"), 0U);
 }
 
+TEST(AssetRefManagerTest, directAssetRefApisRouteThroughUnifiedManager) {
+    auto &releaseManager = ReleaseManager::getInstance();
+    releaseManager.init();
+
+    auto *asset = new Asset();
+    asset->setUuid("asset-direct-api");
+
+    asset->addAssetRef();
+    EXPECT_EQ(asset->getAssetRefCount(), 1U);
+    EXPECT_EQ(releaseManager.getRefCount("asset-direct-api"), 1U);
+
+    asset->decAssetRef(true);
+    EXPECT_EQ(asset->getAssetRefCount(), 0U);
+    EXPECT_EQ(releaseManager.getRefCount("asset-direct-api"), 0U);
+}
+
 } // namespace
