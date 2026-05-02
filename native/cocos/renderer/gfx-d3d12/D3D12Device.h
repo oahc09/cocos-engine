@@ -73,6 +73,15 @@ public:
     // GPU-visible sampler heap pool
     D3D12DescriptorHeapPool *getSamplerDescriptorHeapPool() const;
 
+    // Dummy resources for null descriptor bindings (safe SRV/UAV fallback)
+    class CCD3D12Texture *getDummyTexture() const;
+    class CCD3D12Buffer *getDummyBuffer() const;
+
+    // Command signatures for ExecuteIndirect (indirect draw / dispatch)
+    void *getDrawIndirectSignature() const;
+    void *getDrawIndexedIndirectSignature() const;
+    void *getDispatchIndirectSignature() const;
+
 protected:
     static CCD3D12Device *instance;
 
@@ -98,6 +107,7 @@ protected:
     void copyBuffersToTexture(const uint8_t *const *buffers, Texture *dst, const BufferTextureCopy *regions, uint32_t count) override;
     void copyTextureToBuffers(Texture *src, uint8_t *const *buffers, const BufferTextureCopy *region, uint32_t count) override;
     void getQueryPoolResults(QueryPool *queryPool) override;
+    SampleCount getMaxSampleCount(Format format, TextureUsage usage, TextureFlags flags) const override;
 
     bool initializeD3D12Context();
     void initFormatFeatures();

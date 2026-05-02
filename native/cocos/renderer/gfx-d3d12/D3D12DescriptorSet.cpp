@@ -30,6 +30,24 @@
 #include "base/Log.h"
 #include "gfx-base/GFXDef.h"
 
+// File diagnostic for descriptor set binding
+#include <cstdio>
+#include <cstdarg>
+namespace {
+void dsDiagLog(const char *fmt, ...) {
+    static FILE *s_file = nullptr;
+    if (!s_file) {
+        s_file = fopen("C:\\temp\\d3d12-ds-diag.log", "a");
+        if (!s_file) return;
+    }
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(s_file, fmt, args);
+    fflush(s_file);
+    va_end(args);
+}
+} // anonymous namespace
+
 #if defined(_WIN32)
     #ifndef NOMINMAX
         #define NOMINMAX
@@ -269,6 +287,79 @@ void CCD3D12DescriptorSet::forceUpdate() {
     auto *d3dDevice = static_cast<ID3D12Device *>(device ? device->getD3D12DeviceHandle() : nullptr);
     if (!d3dDevice) return;
 
+    // Helper: write a dummy texture SRV to a heap slot (for null texture bindings)
+    auto writeDummyTextureSRV = [&](D3D12_CPU_DESCRIPTOR_HANDLE handle) {
+        auto *dummyTex = device->getDummyTexture();
+        if (dummyTex) {
+            auto *rawRes = static_cast<ID3D12Resource *>(dummyTex->getD3D12ResourceHandle());
+            if (rawRes) {
+                D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+                srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+                srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                srvDesc.Texture2D.MipLevels = 1;
+                srvDesc.Texture2D.MostDetailedMip = 0;
+                d3dDevice->CreateShaderResourceView(rawRes, &srvDesc, handle);
+                return;
+            }
+        }
+        // Fallback: null CBV descriptor (same slot size)
+        d3dDevice->CreateConstantBufferView(nullptr, handle);
+    };
+
+    // Helper: write a dummy buffer SRV to a heap slot (for null buffer SRV bindings)
+    auto writeDummyBufferSRV = [&](D3D12_CPU_DESCRIPTOR_HANDLE handle) {
+        auto *dummyBuf = device->getDummyBuffer();
+        if (dummyBuf) {
+            auto *rawRes = static_cast<ID3D12Resource *>(dummyBuf->getD3D12ResourceHandle());
+            if (rawRes) {
+                D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+                srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+                srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+                srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                srvDesc.Buffer.FirstElement = 0;
+                srvDesc.Buffer.NumElements = 1;
+                srvDesc.Buffer.StructureByteStride = 0;
+                srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+                d3dDevice->CreateShaderResourceView(rawRes, &srvDesc, handle);
+                return;
+            }
+        }
+        d3dDevice->CreateConstantBufferView(nullptr, handle);
+    };
+
+    // Helper: write a valid dummy CBV to a heap slot (for null/small buffer CBV bindings).
+    auto writeDummyCBV = [&](D3D12_CPU_DESCRIPTOR_HANDLE handle) {
+        auto *dummyBuf = device->getDummyBuffer();
+        if (dummyBuf) {
+            auto *rawRes = static_cast<ID3D12Resource *>(dummyBuf->getD3D12ResourceHandle());
+            if (rawRes) {
+                D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc{};
+                cbvDesc.BufferLocation = dummyBuf->getD3D12GPUVirtualAddress();
+                cbvDesc.SizeInBytes = 256U;
+                d3dDevice->CreateConstantBufferView(&cbvDesc, handle);
+                return;
+            }
+        }
+        d3dDevice->CreateConstantBufferView(nullptr, handle);
+    };
+
+    // Helper: write a dummy texture UAV to a heap slot (for null UAV bindings)
+    auto writeDummyTextureUAV = [&](D3D12_CPU_DESCRIPTOR_HANDLE handle) {
+        auto *dummyTex = device->getDummyTexture();
+        if (dummyTex) {
+            auto *rawRes = static_cast<ID3D12Resource *>(dummyTex->getD3D12ResourceHandle());
+            if (rawRes) {
+                D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+                uavDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+                uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+                d3dDevice->CreateUnorderedAccessView(rawRes, nullptr, &uavDesc, handle);
+                return;
+            }
+        }
+        d3dDevice->CreateConstantBufferView(nullptr, handle);
+    };
+
     // Walk through the base class _buffers/_textures/_samplers arrays
     // and write D3D12 descriptors to the CPU staging heap
     const auto &bindings = _layout->getBindings();
@@ -278,6 +369,17 @@ void CCD3D12DescriptorSet::forceUpdate() {
     uint32_t samplerOffset = 0;
     static uint32_t s_diagDescriptorSetLogCount = 0;
     const bool diagLog = s_diagDescriptorSetLogCount < 24 && _layout && _layout->getDescriptorCount() > 0;
+
+    // File diagnostic: keep a larger startup window so we can capture
+    // descriptor writes after splash-screen and into real scene draws.
+    static uint32_t s_fileDiagCount = 0;
+    const bool fileDiag = s_fileDiagCount < 2000;
+    if (fileDiag) {
+        dsDiagLog("[FORCE-UPDATE] #%u: set=%p layout=%p bindings=%zu cbvSrvUavCount=%u samplerCount=%u descriptorCount=%u\n",
+                  s_fileDiagCount, this, _layout, bindings.size(),
+                  _impl->cbvSrvUavDescriptorCount, _impl->samplerDescriptorCount,
+                  _layout->getDescriptorCount());
+    }
 
     for (const auto &binding : bindings) {
         const uint32_t baseDescIdx = descriptorIndices[binding.binding];
@@ -297,29 +399,38 @@ void CCD3D12DescriptorSet::forceUpdate() {
                             CC_LOG_INFO("[D3D12-SET]   CBV offset=%u gpuVA=0x%llx",
                                         d3d12Buffer->getD3D12ResourceOffset(),
                                         static_cast<unsigned long long>(d3d12Buffer->getD3D12GPUVirtualAddress()));
-                            auto *rawResource = static_cast<ID3D12Resource *>(d3d12Buffer->getD3D12ResourceHandle());
-                            if (rawResource) {
-                                void *mappedData = nullptr;
-                                D3D12_RANGE readRange{d3d12Buffer->getD3D12ResourceOffset(), d3d12Buffer->getD3D12ResourceOffset() + 16};
-                                if (SUCCEEDED(rawResource->Map(0, &readRange, &mappedData)) && mappedData) {
-                                    const auto *floats = reinterpret_cast<const float *>(
-                                        static_cast<const uint8_t *>(mappedData) + d3d12Buffer->getD3D12ResourceOffset());
-                                    CC_LOG_INFO("[D3D12-SET]   CBV data=%.3f %.3f %.3f %.3f",
-                                                floats[0], floats[1], floats[2], floats[3]);
-                                    rawResource->Unmap(0, nullptr);
-                                }
-                            }
                         }
+                    }
+                    if (fileDiag) {
+                        auto *d3d12Buf = gfxBuffer ? static_cast<CCD3D12Buffer *>(gfxBuffer) : nullptr;
+                        void *rawRes = d3d12Buf ? d3d12Buf->getD3D12ResourceHandle() : nullptr;
+                        uint64_t gpuVA = d3d12Buf ? d3d12Buf->getD3D12GPUVirtualAddress() : 0;
+                        dsDiagLog("  CBV binding=%u descIdx=%u hasBuf=%s rawRes=%p gpuVA=0x%llx heapOffset=%u\n",
+                                  binding.binding, descIdx, gfxBuffer ? "Y" : "N", rawRes,
+                                  static_cast<unsigned long long>(gpuVA), cbvSrvUavOffset);
                     }
                     if (gfxBuffer && cbvSrvUavOffset < _impl->cbvSrvUavDescriptorCount) {
                         auto *d3d12Buffer = static_cast<CCD3D12Buffer *>(gfxBuffer);
                         auto *rawResource = static_cast<ID3D12Resource *>(d3d12Buffer->getD3D12ResourceHandle());
                         if (rawResource) {
                             const UINT64 resourceWidth = rawResource->GetDesc().Width;
-                            const UINT64 requestedSize = static_cast<UINT64>((gfxBuffer->getSize() + 255U) & ~255U);
-                            const UINT64 cbvSize = resourceWidth < requestedSize ? resourceWidth : requestedSize;
-                            // D3D12 requires CBV SizeInBytes >= 256 and 256-byte aligned.
-                            // Buffer creation already aligns to 256, so resourceWidth >= 256.
+                            const UINT64 resourceOffset = static_cast<UINT64>(d3d12Buffer->getD3D12ResourceOffset());
+                            const UINT64 availableSize = (resourceWidth > resourceOffset) ? (resourceWidth - resourceOffset) : 0ULL;
+                            const UINT64 logicalAligned = static_cast<UINT64>(gfxBuffer->getSize()) & ~255ULL;
+                            // For CBV, prefer full available range in the underlying allocation
+                            // (bounded by D3D12's 64KB CBV limit) instead of gfxBuffer->getSize(),
+                            // which can be smaller than actual shader block usage in some paths.
+                            const UINT64 availableAligned = availableSize & ~255ULL;
+                            const UINT64 cbvSize = std::min<UINT64>(availableAligned, 64ULL * 1024ULL);
+                            if (logicalAligned >= 256ULL && availableAligned < logicalAligned) {
+                                CC_LOG_WARNING("[D3D12-CBV] available range smaller than logical buffer size: binding=%u descIdx=%u logical=%llu available=%llu rawWidth=%llu rawOffset=%llu",
+                                               binding.binding,
+                                               descIdx,
+                                               static_cast<unsigned long long>(logicalAligned),
+                                               static_cast<unsigned long long>(availableAligned),
+                                               static_cast<unsigned long long>(resourceWidth),
+                                               static_cast<unsigned long long>(resourceOffset));
+                            }
                             if (cbvSize >= 256U) {
                                 D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc{};
                                 cbvDesc.BufferLocation = d3d12Buffer->getD3D12GPUVirtualAddress();
@@ -328,18 +439,42 @@ void CCD3D12DescriptorSet::forceUpdate() {
                                 D3D12_CPU_DESCRIPTOR_HANDLE handle;
                                 handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
                                 d3dDevice->CreateConstantBufferView(&cbvDesc, handle);
+
+                                // Verify: read back the CBV desc we just wrote
+                                if (fileDiag && cbvSrvUavOffset < 4) {
+                                    D3D12_CONSTANT_BUFFER_VIEW_DESC verifyDesc{};
+                                    UINT verifySize = 0;
+                                    d3dDevice->CheckFeatureSupport(D3D12_FEATURE_ROOT_SIGNATURE, nullptr, 0); // no-op
+                                    // Just log what we wrote
+                                    dsDiagLog("    CBV WRITE: heapOffset=%u gpuVA=0x%llx sizeInBytes=%u avail=%llu handle=0x%llx\n",
+                                              cbvSrvUavOffset,
+                                              static_cast<unsigned long long>(cbvDesc.BufferLocation),
+                                              cbvDesc.SizeInBytes,
+                                              static_cast<unsigned long long>(availableAligned),
+                                              static_cast<unsigned long long>(handle.ptr));
+                                }
                             } else {
                                 // Buffer too small for CBV (shouldn't happen with 256-byte aligned creation).
                                 // Write a null descriptor to keep heap layout consistent.
                                 D3D12_CPU_DESCRIPTOR_HANDLE handle;
                                 handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
-                                d3dDevice->CreateConstantBufferView(nullptr, handle);
+                                writeDummyCBV(handle);
                             }
+                        } else {
+                            // Buffer exists but has no D3D12 resource -- write null CBV descriptor
+                            // to keep heap layout consistent and avoid "No Resource" in RenderDoc.
+                            D3D12_CPU_DESCRIPTOR_HANDLE handle;
+                            handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
+                            writeDummyCBV(handle);
                         }
+                    } else if (cbvSrvUavOffset < _impl->cbvSrvUavDescriptorCount) {
+                        // Null buffer binding: write a null CBV descriptor to keep heap slot valid.
+                        // Without this, the slot contains zeroed memory which D3D12 runtime interprets
+                        // as an invalid descriptor, causing "No Resource" in RenderDoc and GPU hangs.
+                        D3D12_CPU_DESCRIPTOR_HANDLE handle;
+                        handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
+                        writeDummyCBV(handle);
                     }
-                    // Null buffer/resource bindings: skip writing descriptor (offset still increments).
-                    // D3D12 null SRV/UAV descriptors require careful desc setup; leaving slot unwritten
-                    // is safer than writing potentially invalid null descriptors.
                     ++cbvSrvUavOffset;
                     break;
                 }
@@ -366,7 +501,17 @@ void CCD3D12DescriptorSet::forceUpdate() {
                             D3D12_CPU_DESCRIPTOR_HANDLE handle;
                             handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
                             d3dDevice->CreateShaderResourceView(rawResource, &srvDesc, handle);
+                        } else {
+                            // Buffer exists but has no D3D12 resource -- write null SRV descriptor.
+                            D3D12_CPU_DESCRIPTOR_HANDLE handle;
+                            handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
+                            writeDummyBufferSRV(handle);
                         }
+                    } else if (cbvSrvUavOffset < _impl->cbvSrvUavDescriptorCount) {
+                        // Null buffer binding: write null SRV descriptor to keep heap slot valid.
+                        D3D12_CPU_DESCRIPTOR_HANDLE handle;
+                        handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
+                        writeDummyBufferSRV(handle);
                     }
                     ++cbvSrvUavOffset;
                     break;
@@ -389,7 +534,6 @@ void CCD3D12DescriptorSet::forceUpdate() {
                             srvDesc.Format = toSRVFormat(texInfo.format);
                             srvDesc.ViewDimension = toSRVDimension(texInfo.type, texInfo.layerCount, texInfo.samples != SampleCount::X1);
                             srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-                            // Fill dimension-specific fields
                             if (srvDesc.ViewDimension == D3D12_SRV_DIMENSION_TEXTURE2D) {
                                 srvDesc.Texture2D.MipLevels = texInfo.levelCount;
                                 srvDesc.Texture2D.MostDetailedMip = 0;
@@ -409,7 +553,17 @@ void CCD3D12DescriptorSet::forceUpdate() {
                             D3D12_CPU_DESCRIPTOR_HANDLE handle;
                             handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
                             d3dDevice->CreateShaderResourceView(rawResource, &srvDesc, handle);
+                        } else {
+                            // Texture exists but has no D3D12 resource -- write null SRV descriptor.
+                            D3D12_CPU_DESCRIPTOR_HANDLE handle;
+                            handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
+                            writeDummyTextureSRV(handle);
                         }
+                    } else if (cbvSrvUavOffset < _impl->cbvSrvUavDescriptorCount) {
+                        // Null texture binding: write null SRV descriptor to keep heap slot valid.
+                        D3D12_CPU_DESCRIPTOR_HANDLE handle;
+                        handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
+                        writeDummyTextureSRV(handle);
                     }
                     ++cbvSrvUavOffset;
 
@@ -418,7 +572,6 @@ void CCD3D12DescriptorSet::forceUpdate() {
                         D3D12_SAMPLER_DESC samplerDesc{};
                         const auto &samplerInfo = gfxSampler->getInfo();
 
-                        // Filter
                         if (samplerInfo.minFilter == Filter::POINT) {
                             samplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
                         } else if (samplerInfo.minFilter == Filter::ANISOTROPIC) {
@@ -427,7 +580,6 @@ void CCD3D12DescriptorSet::forceUpdate() {
                             samplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
                         }
 
-                        // Address modes
                         samplerDesc.AddressU = toAddressMode(samplerInfo.addressU);
                         samplerDesc.AddressV = toAddressMode(samplerInfo.addressV);
                         samplerDesc.AddressW = toAddressMode(samplerInfo.addressW);
@@ -440,6 +592,20 @@ void CCD3D12DescriptorSet::forceUpdate() {
                         D3D12_CPU_DESCRIPTOR_HANDLE handle;
                         handle.ptr = _impl->samplerCpuStart.ptr + samplerOffset * _impl->samplerDescriptorSize;
                         d3dDevice->CreateSampler(&samplerDesc, handle);
+                    } else if (samplerOffset < _impl->samplerDescriptorCount) {
+                        // Null sampler binding: write default sampler to keep heap slot valid.
+                        D3D12_SAMPLER_DESC defaultSampler{};
+                        defaultSampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+                        defaultSampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+                        defaultSampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+                        defaultSampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+                        defaultSampler.MaxAnisotropy = 1;
+                        defaultSampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+                        defaultSampler.MinLOD = 0.0f;
+                        defaultSampler.MaxLOD = D3D12_FLOAT32_MAX;
+                        D3D12_CPU_DESCRIPTOR_HANDLE handle;
+                        handle.ptr = _impl->samplerCpuStart.ptr + samplerOffset * _impl->samplerDescriptorSize;
+                        d3dDevice->CreateSampler(&defaultSampler, handle);
                     }
                     ++samplerOffset;
                     break;
@@ -479,7 +645,17 @@ void CCD3D12DescriptorSet::forceUpdate() {
                             D3D12_CPU_DESCRIPTOR_HANDLE handle;
                             handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
                             d3dDevice->CreateShaderResourceView(rawResource, &srvDesc, handle);
+                        } else {
+                            // Texture exists but has no D3D12 resource -- write null SRV descriptor.
+                            D3D12_CPU_DESCRIPTOR_HANDLE handle;
+                            handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
+                            writeDummyTextureSRV(handle);
                         }
+                    } else if (cbvSrvUavOffset < _impl->cbvSrvUavDescriptorCount) {
+                        // Null texture binding: write null SRV descriptor to keep heap slot valid.
+                        D3D12_CPU_DESCRIPTOR_HANDLE handle;
+                        handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
+                        writeDummyTextureSRV(handle);
                     }
                     ++cbvSrvUavOffset;
                     break;
@@ -510,6 +686,20 @@ void CCD3D12DescriptorSet::forceUpdate() {
                         D3D12_CPU_DESCRIPTOR_HANDLE handle;
                         handle.ptr = _impl->samplerCpuStart.ptr + samplerOffset * _impl->samplerDescriptorSize;
                         d3dDevice->CreateSampler(&samplerDesc, handle);
+                    } else if (samplerOffset < _impl->samplerDescriptorCount) {
+                        // Null sampler binding: write default sampler to keep heap slot valid.
+                        D3D12_SAMPLER_DESC defaultSampler{};
+                        defaultSampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+                        defaultSampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+                        defaultSampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+                        defaultSampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+                        defaultSampler.MaxAnisotropy = 1;
+                        defaultSampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+                        defaultSampler.MinLOD = 0.0f;
+                        defaultSampler.MaxLOD = D3D12_FLOAT32_MAX;
+                        D3D12_CPU_DESCRIPTOR_HANDLE handle;
+                        handle.ptr = _impl->samplerCpuStart.ptr + samplerOffset * _impl->samplerDescriptorSize;
+                        d3dDevice->CreateSampler(&defaultSampler, handle);
                     }
                     ++samplerOffset;
                     break;
@@ -533,11 +723,14 @@ void CCD3D12DescriptorSet::forceUpdate() {
                                 uavDesc.Format = toSRVFormat(texInfo.format);
                                 uavDesc.ViewDimension = toUAVDimension(texInfo.type, texInfo.layerCount);
                                 d3dDevice->CreateUnorderedAccessView(rawResource, nullptr, &uavDesc, handle);
+                            } else {
+                                // Null resource: write null UAV descriptor to keep heap slot valid.
+                                writeDummyTextureUAV(handle);
                             }
-                            // Null resource — skip writing (descriptor heap slot remains undefined,
-                            // but shader should not access unbound UAV slots)
+                        } else {
+                            // Null texture binding: write null UAV descriptor to keep heap slot valid.
+                            writeDummyTextureUAV(handle);
                         }
-                        // Null texture binding — skip writing descriptor
                     }
                     ++cbvSrvUavOffset;
                     break;
@@ -566,7 +759,17 @@ void CCD3D12DescriptorSet::forceUpdate() {
                             D3D12_CPU_DESCRIPTOR_HANDLE handle;
                             handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
                             d3dDevice->CreateShaderResourceView(rawResource, &srvDesc, handle);
+                        } else {
+                            // Texture exists but has no D3D12 resource -- write null SRV descriptor.
+                            D3D12_CPU_DESCRIPTOR_HANDLE handle;
+                            handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
+                            writeDummyTextureSRV(handle);
                         }
+                    } else if (cbvSrvUavOffset < _impl->cbvSrvUavDescriptorCount) {
+                        // Null texture binding: write null SRV descriptor to keep heap slot valid.
+                        D3D12_CPU_DESCRIPTOR_HANDLE handle;
+                        handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
+                        writeDummyTextureSRV(handle);
                     }
                     ++cbvSrvUavOffset;
                     break;
@@ -580,6 +783,11 @@ void CCD3D12DescriptorSet::forceUpdate() {
 
     if (diagLog) {
         ++s_diagDescriptorSetLogCount;
+    }
+    if (fileDiag) {
+        dsDiagLog("[FORCE-UPDATE] #%u done: final cbvSrvUavOffset=%u samplerOffset=%u\n",
+                  s_fileDiagCount, cbvSrvUavOffset, samplerOffset);
+        ++s_fileDiagCount;
     }
     _isDirty = false;
 }
@@ -628,6 +836,21 @@ void CCD3D12DescriptorSet::applyDynamicOffsets(uint32_t dynamicOffsetCount, cons
         return;
     }
 
+    auto writeDummyCBV = [&](D3D12_CPU_DESCRIPTOR_HANDLE handle) {
+        auto *dummyBuf = device->getDummyBuffer();
+        if (dummyBuf) {
+            auto *rawRes = static_cast<ID3D12Resource *>(dummyBuf->getD3D12ResourceHandle());
+            if (rawRes) {
+                D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc{};
+                cbvDesc.BufferLocation = dummyBuf->getD3D12GPUVirtualAddress();
+                cbvDesc.SizeInBytes = 256U;
+                d3dDevice->CreateConstantBufferView(&cbvDesc, handle);
+                return;
+            }
+        }
+        d3dDevice->CreateConstantBufferView(nullptr, handle);
+    };
+
     const auto &bindings = _layout->getBindings();
     const auto &descriptorIndices = _layout->getDescriptorIndices();
 
@@ -647,14 +870,10 @@ void CCD3D12DescriptorSet::applyDynamicOffsets(uint32_t dynamicOffsetCount, cons
                 case DescriptorType::SAMPLER:
                 case DescriptorType::STORAGE_IMAGE:
                 case DescriptorType::INPUT_ATTACHMENT:
-                    if (binding.descriptorType != DescriptorType::SAMPLER &&
-                        binding.descriptorType != DescriptorType::SAMPLER_TEXTURE) {
+                    // Keep offset traversal consistent with forceUpdate():
+                    // SAMPLER has no CBV/SRV/UAV slot; others here consume one.
+                    if (binding.descriptorType != DescriptorType::SAMPLER) {
                         ++cbvSrvUavOffset;
-                    } else {
-                        ++cbvSrvUavOffset;
-                    }
-                    if (binding.descriptorType == DescriptorType::SAMPLER_TEXTURE) {
-                        // sampler part is stored in the separate sampler heap; no CBV/SRV/UAV rewrite needed here
                     }
                     break;
                 case DescriptorType::DYNAMIC_UNIFORM_BUFFER: {
@@ -666,22 +885,41 @@ void CCD3D12DescriptorSet::applyDynamicOffsets(uint32_t dynamicOffsetCount, cons
                             const uint32_t dynamicOffset = dynamicOffsetIndex < dynamicOffsetCount ? dynamicOffsets[dynamicOffsetIndex] : 0;
                             const uint64_t totalOffset = static_cast<uint64_t>(d3d12Buffer->getD3D12ResourceOffset()) + dynamicOffset;
                             const uint64_t resourceWidth = rawResource->GetDesc().Width;
-                            const uint64_t bufferSize = gfxBuffer->getSize();
-                            const uint64_t availableSize = (bufferSize > dynamicOffset) ? (bufferSize - dynamicOffset) : 0;
-                            const uint64_t cbvSize = (availableSize + 255ULL) & ~255ULL;
+                            const uint64_t availableSize = (resourceWidth > totalOffset) ? (resourceWidth - totalOffset) : 0ULL;
+                            const uint64_t logicalSize = gfxBuffer->getSize() > dynamicOffset ? static_cast<uint64_t>(gfxBuffer->getSize() - dynamicOffset) : 0ULL;
+                            const uint64_t logicalAligned = logicalSize & ~255ULL;
+                            const uint64_t cbvSize = std::min<uint64_t>(availableSize & ~255ULL, 64ULL * 1024ULL);
+                            if (logicalAligned >= 256ULL && cbvSize < logicalAligned) {
+                                CC_LOG_WARNING("[D3D12-CBV-DYN] available range smaller than logical dynamic buffer size: binding=%u descIdx=%u dynOffset=%u logical=%llu available=%llu rawWidth=%llu totalOffset=%llu",
+                                               binding.binding,
+                                               descIdx,
+                                               dynamicOffset,
+                                               static_cast<unsigned long long>(logicalAligned),
+                                               static_cast<unsigned long long>(cbvSize),
+                                               static_cast<unsigned long long>(resourceWidth),
+                                               static_cast<unsigned long long>(totalOffset));
+                            }
 
                             D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc{};
                             cbvDesc.BufferLocation = d3d12Buffer->getD3D12GPUVirtualAddress() + dynamicOffset;
-                            cbvDesc.SizeInBytes = static_cast<UINT>(std::min<uint64_t>(cbvSize, resourceWidth > totalOffset ? resourceWidth - totalOffset : 0));
+                            cbvDesc.SizeInBytes = static_cast<UINT>(cbvSize);
 
                             D3D12_CPU_DESCRIPTOR_HANDLE handle;
                             handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
                             if (cbvDesc.SizeInBytes >= 256U) {
                                 d3dDevice->CreateConstantBufferView(&cbvDesc, handle);
                             } else {
-                                d3dDevice->CreateConstantBufferView(nullptr, handle);
+                                writeDummyCBV(handle);
                             }
+                        } else {
+                            D3D12_CPU_DESCRIPTOR_HANDLE handle;
+                            handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
+                            writeDummyCBV(handle);
                         }
+                    } else if (cbvSrvUavOffset < _impl->cbvSrvUavDescriptorCount) {
+                        D3D12_CPU_DESCRIPTOR_HANDLE handle;
+                        handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
+                        writeDummyCBV(handle);
                     }
                     ++dynamicOffsetIndex;
                     ++cbvSrvUavOffset;

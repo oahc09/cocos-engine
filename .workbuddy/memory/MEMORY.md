@@ -12,115 +12,49 @@
 - 双实现: .ts (Web) vs .jsb.ts (原生JSB), 54个双实现文件
 - PAL 平台抽象: pal/ 虚拟模块映射
 - 核心3类: Game(主循环) → Director(场景调度) → Root(渲染管理)
-- Node 最核心类 (~3014行), 继承 CCObject
 - GFX 抽象层: gfx-base 接口 → 各后端实现 (GLES3/Vulkan/Metal/D3D12)
-- 技术栈: TypeScript 4.9.5, @cocos/ccbuild, C++17
 
-## C++ 迁移 (M1-M10) 状态汇总
-- **权威设计文档**: AI/design-cpp-master-spec.md v2.0
-- **核心策略**: 双轨制 — 编辑器JS_ONLY + 运行时NATIVE_FAST
-- **线程模型**: 单线程主循环，C++对象无需锁
-- **引用计数**: IntrusivePtr + ReleaseManager, C++ 为权威源
-- **统一注册**: TypeRegistry 合并组件注册+序列化注册
-- **已完成模块**:
-  - M1: TypeRegistry, PipelineStateManager, 基准测试框架
-  - M2: 无 (合并到其他阶段)
-  - M3: Director 最小实现, NodeActivator, Prefab C++ 类
-  - M4: 二进制序列化 (BinarySceneFormat + BinaryDeserializer)
-  - M5: Director 完整实现 (tick/loadScene/runScene/Scheduler/ComponentScheduler)
-  - M6: ScriptBridge 核心实现
-  - M7: NativePipeline 接口定义
-  - M8: AssetManager + ReleaseManager
-  - M9: CameraComponent C++ (编译通过, JSB待启用)
-  - M10: JSB 注册整合 (jsb_module_register.cpp)
-- **已知问题**: Engine::tick 与 Director::tick 重复调用 update
-- **全量编译**: Debug/Release 均通过
-- **Phase A4 ✅**: Director::tick 职责明确文档化（ComponentScheduler + deferredDestroy）
-- **Phase C1 ✅**: ScriptComponent-ScripBridge 双向 ID 同步（_compId + auto-unregister）
-- **Phase C2 ✅**: ScriptBridge 批量调用已有 callJSBatchMethod + fallback
-- **Phase C3 ✅**: collectAssetRefs + collectAssetRefsBatch 实现（JS 回调 + getPrivateData）
-- **Phase D1 ✅**: ReleaseManager 为统一引用计数入口
-- **Phase D2 ✅**: destroyOldScene walk收集资产引用 → decRef → autoRelease
-- **Phase D3 ✅**: cacheAsset=registerAsset+addRef, removeCachedAsset=decRef, clearCache=批量decRef
-
-## Phase E: Builtin Component JSB 绑定
-- **Phase E1 ✅**: CameraComponent JSB 手动绑定 (projection/near/far/fov + setViewport + getRenderCamera)
-- **Phase E2 ✅**: MeshRendererComponent C++ 类 (onLoad/onDestroy/update + mesh/material/shadow)
-- **Phase E3 ✅**: LightComponent C++ 类 (5子类: Directional/Sphere/Spot/Point/RangedDirectional)
-- **Phase E4 ✅**: MeshRendererComponent JSB 手动绑定 (shadowCastingMode/receiveShadow + setMesh/getMaterial + getRenderModel)
-- **Phase E5 ✅**: LightComponent JSB 手动绑定 (5个灯光类各自的属性: color/illuminance/range/size/luminance/spotAngle/shadow*)
-- **Phase E6 ✅**: 所有 JSB 注册整合到 jsb_module_register.cpp
-- **Phase E7 ✅**: Debug + Release 全量编译通过，零错误
-- **新增文件**: jsb_camera_component_manual.h/.cpp, jsb_mesh_renderer_manual.h/.cpp, jsb_light_component_manual.h/.cpp
-- **BuiltinTypeIds**: 新增 BUILTIN_DIRECTIONAL_LIGHT(19) ~ BUILTIN_RANGED_DIRECTIONAL_LIGHT(23), COUNT=24
-- **待后续**: MeshRendererComponent.syncToRenderModel() 完整 submodel 设置
+## C++ 迁移 (M1-M10) 已完成
+- TypeRegistry, Director, BinarySerialization, ScriptBridge, AssetManager, CameraComponent, MeshRenderer, Light JSB 绑定等
+- Debug/Release 全量编译通过
+- 详见 AI/design-cpp-master-spec.md v2.0
 
 ## JSB 绑定经验
-- SWIG 自动生成: scene.i 配置, `%ignore` 排除方法
-- 手动绑定: `jsb` 命名空间, `se::Class::create()`, attachObject 防 GC
-- se::Value 无 `isFunction()`, 用 `fn.isObject() && fn.toObject()->isFunction()`
-- se::Value 无 `NullObject()`, 用 `se::Value::Null` 静态成员
-- HandleObject 无 `isValid()`, 用 `!isEmpty()`
-- sevalue_to_native 提取 C++ 指针
-- **关键教训**: JSB 注册函数必须声明在全局命名空间（不能放在 namespace cc），因为 jsb_module_register.cpp 不在任何命名空间内
-- **关键教训**: native_ptr_to_seval<T> 需要类型 T 有完整定义（不能是前向声明），因为它内部调用 typeid
-- **关键教训**: 提取 JS 对象中的原生指针时，若 T 未注册 is_jsb_object，直接用 `static_cast<T*>(args[0].toObject()->getPrivateData())` 比 sevalue_to_native 更可靠
-- **Vec3 转换**: 使用 `jsb_conversions_spec.h` 中的 `Vec3_to_seval` 和 `sevalue_to_native(Vec3*,...)`, 不要自定义
+- JSB 注册函数必须在全局命名空间（不在 namespace cc 内）
+- native_ptr_to_seval<T> 需要类型 T 有完整定义（不能前向声明）
+- se::Value 无 isFunction()/NullObject()，用替代方案
+- Vec3 转换用 jsb_conversions_spec.h 中的标准函数
 
 ## D3D12 GFX 后端 PoC (2026-04-25 启动)
 - **目录**: native/cocos/renderer/gfx-d3d12/
 - **架构**: pImpl 模式隔离 D3D12/Win32 头文件
-- **已完成 (REAL)**: Device (609行), Swapchain (296行), Buffer (200行), Texture (242行)
-- **Agent A 已完成 (2026-04-26)**: DescriptorSetLayout, DescriptorSet (CPU staging heap), PipelineLayout (RootSignature), DescriptorHeapPool (工具类)
-- **Agent B 已完成 (2026-04-26)**: Shader (字节码存储), RenderPass (格式映射), Framebuffer (RTV/DSV), PipelineState (PSO)
-- **Agent C 已完成 (2026-04-26)**: InputAssembler (顶点布局), CommandBuffer (核心命令记录), Queue (命令提交), Device重构 (DescriptorHeapPool集成)
-- **Device 重构**: 2个 GPU-visible DescriptorHeapPool (CBV_SRV_UAV 4096 + SAMPLER 2048), 帧循环自动 reset
-- **QueryPool 已实现 (2026-04-26)**: CreateQueryHeap + readback buffer + ResolveQueryData + begin/end/fetchResults
-- **全部真实实现，无 stub**: 16 个 D3D12 GFX 类全部真实代码
-- **端到端渲染管线打通**: PSO自动创建空RootSignature + 运行时D3DCompile内置三角形着色器
-- **总产出**: +2800 行 D3D12 代码, Debug/Release 编译通过
-- **Gate 2 ✅ 通过 (2026-04-26)**: WebGPUDemo 15秒稳定运行，零 D3D12 错误
-- **Swapchain 纹理修复 (2026-04-26)**:
-  - D3D12Texture: swapchain颜色纹理动态返回getCurrentBackBufferHandle(), 深度纹理创建真实资源
-  - D3D12Framebuffer: 检测swapchain纹理, getRTVHandle()动态返回swapchain RTV
-  - D3D12CommandBuffer: beginRenderPass/endRenderPass添加PRESENT↔RENDER_TARGET资源屏障
-  - 修复后进程稳定运行85秒+，之前5秒即退出(exit code 2173)
-- **DEVICE_HUNG 修复**: copyBuffersToTexture upload 资源生命周期 bug（ComPtr 作用域问题），用 vector<ComPtr> 保持到 waitForGpu 后释放
-- **Debug Layer**: Release 构建禁用(#if !defined(NDEBUG))，避免 AMD 驱动不稳定
-- **PSO 黑屏修复 (2026-04-29)**:
-  - 首次 PSO 创建因 InputLayout(引擎顶点属性) 与 fallback shader(SV_VertexID) 不匹配 → E_INVALIDARG
-  - 第二次 fallback 被 `if (!compiledVS || !compiledPS)` 阻止（首次 fallback 已编译过）
-  - 修复: 始终在首次失败时清除 InputLayout 并重试，PSO 创建成功，draw call 正常
-- **纯 C++ 路径安全降级 (2026-04-29)**:
-  - PipelineSceneData::initDebugRenderer: effect 未加载时 passes 为空，添加空检查
-  - DebugRenderer::activate: 内置字体返回 nullptr，getFontPath 返回空串跳过
-  - Node::onBatchCreated: 补全 C++ 实现 (invalidateChildren + siblingIndex + 递归)
-- **🎉 三角形渲染成功 (2026-04-29)**: D3D12 端到端渲染管线完全打通，WebGPUDemo 看到三角形输出
-- **🎉 真实 Shader PSO 创建成功 (2026-04-30)**: 引擎 104 个 GLSL 着色器全部成功编译 (GLSL→SPIR-V→HLSL→DXBC), 3 个 PSO primary path 创建成功
-- **外部测试项目**: D:\Work\CocosProjects\WebGPUDemo\ (COCOS_X_PATH 指向引擎源码)
-- **进度文档**: AI/D3D12-Subagent-Progress-Log.md, AI/D3D12-GFX-PoC-Checklist.md
-
-## D3D12 材质支持 (2026-04-30)
+- **16 个 D3D12 GFX 类全部真实实现** (Device/Swapchain/Buffer/Texture/DescriptorSet*/PipelineLayout/Shader/RenderPass/Framebuffer/PipelineState/InputAssembler/CommandBuffer/Queue/QueryPool)
 - **Shader 编译管线**: GLSL(#version 450) → glslang → SPIR-V → SPIRV-Cross → HLSL(SM 5.1) → D3DCompile → DXBC
-- **SPIRV-Cross HLSL 绑定修复**:
-  - `hlslBinding.stage` 必须设为对应 `spv::ExecutionModel`，否则 `remap_hlsl_resource_binding` 查找键不匹配
-  - `register_space` = descriptor set (set=N → space=N)，匹配 PipelineLayout 的 Root Signature
-  - 入口点统一用 `"main"`（不是 `vert_main`/`frag_main`，那些是无语义的内部函数）
-- **PSO 创建三个关键修复**:
-  1. SM 5.1 升级（支持 register(bN, spaceS) 语法）
-  2. HLSLResourceBinding.stage 映射到正确的 ExecutionModel
-  3. D3DCompile 入口点从 vert_main/frag_main 改为 main（根因：SV_Position 缺失）
-- **CommandBuffer 延迟描述符绑定**: bindDescriptorSet 只记录 pending, draw/dispatch 前统一 flush
-- **DescriptorSet 纹理格式**: SRV/UAV 使用实际格式和维度（不再硬编码）
+- **端到端渲染已打通**: 三角形→真实着色器→PSO→draw call→像素输出
+- **外部测试项目**: D:\Work\CocosProjects\WebGPUDemo\
+
+### D3D12 关键修复历史
+- **Swapchain 纹理修复**: 动态返回 getCurrentBackBufferHandle()
+- **DEVICE_HUNG 修复**: copyBuffersToTexture upload 资源生命周期 bug（ComPtr 作用域）
+- **PSO 黑屏修复**: InputLayout 与 fallback shader 不匹配 → 清除 InputLayout 重试
+- **SPIRV-Cross HLSL 绑定**: hlslBinding.stage 映射、register_space=set、入口点统一 "main"
+- **黑屏根因**: beginRenderPass 无条件 ClearRenderTarget 忽略 loadOp → 修复后 loadOp=LOAD 不再 clear
+- **CommandBuffer 延迟描述符绑定**: bindDescriptorSet 只记录 pending, draw 前统一 flush
 - **PipelineLayout visibility**: 使用 D3D12_SHADER_VISIBILITY_ALL
-## D3D12 黑屏排查与修复 (2026-04-30)
-- **PipelineBarrier 完整实现**: 替换空实现，AccessFlagBit→D3D12_RESOURCE_STATES 完整映射
-- **D3D12Texture 资源状态追踪**: 新增 getCurrentState()/setCurrentState(), 初始化/View/Swapchain 各设置正确初始状态
-- **beginRenderPass/endRenderPass 重构**: 附件状态转换+批量屏障提交
-- **copyBuffersToTexture 状态追踪**: 使用追踪状态+拷贝后恢复
-- **结果**: Debug Layer severity=1 错误清零, 稳定运行 1200+ 帧
-- **黑屏根因**: FLIP_DISCARD + syncInterval=1 + 同步Queue::submit 导致窗口全黑
-- **修复**: Present() syncInterval=0，因为Queue::submit已经是同步fence wait
-- **验证**: D3D12 API readback确认back buffer有渲染内容，截屏确认窗口正常显示(R=235)
-- **新增**: Device::present() back buffer像素readback诊断, Swapchain::getCurrentBackBufferIndex()
-- **🎉 黑屏已解决!** D3D12端到端渲染管线完全打通
+- **Null 描述符修复**: forceUpdate() 中 null 绑定不再跳过，改为写入 dummy 资源描述符
+  - CBV: null CBV (CreateConstantBufferView(nullptr, handle))
+  - SRV/UAV: dummy 1x1 RGBA8 纹理或 256B buffer（不支持 null SRV/UAV 描述符的硬件会 DEVICE_REMOVED）
+  - Sampler: default point-clamp sampler
+  - D3D12Device 新增 getDummyTexture()/getDummyBuffer()
+
+### D3D12 当前问题 (2026-05-01)
+- **EID 410 "No Resource"**: 已修复 null 描述符写入机制
+  - 根因: forceUpdate() 中 null buffer → CBV 跳过写入 → 堆槽位零值
+  - 修复: null 绑定写入 null CBV / dummy SRV-UAV / default sampler
+  - 待验证: 重新抓 RenderDoc capture 确认 CBV 绑定正常
+- **RenderDoc capture**: C:\temp\d3d12_capture_capture.rdc
+
+### D3D12 代码审查 (14/17 完成)
+- copyTexture/blitTexture/resolveTexture 完整实现
+- getRTVHandle 按 texture 独立检查
+- pipelineBarrier 增加 inRenderPass 标志

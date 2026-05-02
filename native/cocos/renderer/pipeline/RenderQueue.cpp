@@ -27,7 +27,6 @@
 #include <utility>
 #include "PipelineSceneData.h"
 #include "PipelineStateManager.h"
-#include "PipelineUBO.h"
 #include "RenderPipeline.h"
 #include "gfx-base/GFXCommandBuffer.h"
 #include "gfx-base/GFXDevice.h"
@@ -80,9 +79,6 @@ void RenderQueue::sort() {
 
 void RenderQueue::recordCommandBuffer(gfx::Device * /*device*/, scene::Camera *camera, gfx::RenderPass *renderPass, gfx::CommandBuffer *cmdBuff, uint32_t subpassIndex) {
     PipelineSceneData *const sceneData = _pipeline->getPipelineSceneData();
-    const uint32_t globalOffset = _pipeline->getPipelineUBO()->getCurrentCameraUBOOffset();
-    cmdBuff->bindDescriptorSet(globalSet, _pipeline->getDescriptorSet(), 1, &globalOffset);
-
     bool enableOcclusionQuery = _pipeline->isOcclusionQueryEnabled() && _useOcclusionQuery;
     auto *queryPool = _pipeline->getQueryPools()[0];
     for (auto &i : _queue) {

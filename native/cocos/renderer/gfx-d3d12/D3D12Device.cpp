@@ -40,24 +40,6 @@
 #include "D3D12Texture.h"
 #include "base/Log.h"
 
-// File-based diagnostic logger for verifying D3D12 rendering pipeline
-// Writes to d3d12-render-diag.log in the current working directory
-#include <cstdio>
-#include <cstdarg>
-namespace {
-void diagLog(const char *fmt, ...) {
-    static FILE *s_diagFile = nullptr;
-    if (!s_diagFile) {
-        s_diagFile = fopen("C:\\temp\\d3d12-render-diag.log", "a");
-        if (!s_diagFile) return;
-    }
-    va_list args;
-    va_start(args, fmt);
-    vfprintf(s_diagFile, fmt, args);
-    fflush(s_diagFile);
-    va_end(args);
-}
-} // anonymous namespace
 
 #if defined(_WIN32)
     #ifndef NOMINMAX
@@ -91,46 +73,6 @@ D3D12_RESOURCE_BARRIER textureTransition(ID3D12Resource *resource, D3D12_RESOURC
     return barrier;
 }
 
-// Dump all pending ID3D12InfoQueue messages to the CC log.
-// This is the KEY missing diagnostic — D3D12 debug layer was enabled but messages
-// were silently discarded because we never set up InfoQueue message retrieval.
-void dumpD3D12DebugMessages(ID3D12Device *device, const char *checkpoint) {
-    Microsoft::WRL::ComPtr<ID3D12InfoQueue> infoQueue;
-    if (FAILED(device->QueryInterface(IID_PPV_ARGS(&infoQueue)))) {
-        return;
-    }
-    UINT64 msgCount = infoQueue->GetNumStoredMessages();
-    if (msgCount == 0) {
-        CC_LOG_INFO("[DIAG-INFOQUEUE] %s: no pending messages.", checkpoint);
-        return;
-    }
-    CC_LOG_INFO("[DIAG-INFOQUEUE] %s: %llu pending messages:", checkpoint, static_cast<unsigned long long>(msgCount));
-    for (UINT64 i = 0; i < msgCount; ++i) {
-        SIZE_T msgSize = 0;
-        infoQueue->GetMessage(i, nullptr, &msgSize);
-        if (msgSize == 0) continue;
-        auto *msgData = static_cast<D3D12_MESSAGE *>(malloc(msgSize));
-        if (!msgData) continue;
-        if (SUCCEEDED(infoQueue->GetMessage(i, msgData, &msgSize))) {
-            const char *severity = "UNKNOWN";
-            switch (msgData->Severity) {
-                case D3D12_MESSAGE_SEVERITY_CORRUPTION: severity = "CORRUPTION"; break;
-                case D3D12_MESSAGE_SEVERITY_ERROR:      severity = "ERROR"; break;
-                case D3D12_MESSAGE_SEVERITY_WARNING:    severity = "WARNING"; break;
-                case D3D12_MESSAGE_SEVERITY_INFO:       severity = "INFO"; break;
-                case D3D12_MESSAGE_SEVERITY_MESSAGE:    severity = "MESSAGE"; break;
-                default: break;
-            }
-            CC_LOG_INFO("[DIAG-INFOQUEUE]   [%s] ID=%u: %.*s",
-                         severity, static_cast<unsigned>(msgData->ID),
-                         static_cast<int>(msgData->DescriptionByteLength),
-                         msgData->pDescription);
-        }
-        free(msgData);
-    }
-    // Clear the queue after dumping so we only see new messages next time
-    infoQueue->ClearStoredMessages();
-}
 #endif
 }
 
@@ -151,6 +93,15 @@ struct CCD3D12Device::Impl {
     // GPU-visible descriptor heap pools for shader access
     std::unique_ptr<D3D12DescriptorHeapPool> gpuDescriptorHeapPool;    // CBV_SRV_UAV, shaderVisible
     std::unique_ptr<D3D12DescriptorHeapPool> samplerDescriptorHeapPool; // SAMPLER, shaderVisible
+
+    // Dummy resources for safe null descriptor bindings
+    IntrusivePtr<CCD3D12Texture> dummyTexture;
+    IntrusivePtr<CCD3D12Buffer>  dummyBuffer;
+
+    // Command signatures for ExecuteIndirect (indirect draw / dispatch)
+    Microsoft::WRL::ComPtr<ID3D12CommandSignature> drawIndirectSig;       // DrawInstanced
+    Microsoft::WRL::ComPtr<ID3D12CommandSignature> drawIndexedIndirectSig; // DrawIndexedInstanced
+    Microsoft::WRL::ComPtr<ID3D12CommandSignature> dispatchIndirectSig;   // Dispatch
 };
 
 CCD3D12Device *CCD3D12Device::getInstance() {
@@ -159,11 +110,6 @@ CCD3D12Device *CCD3D12Device::getInstance() {
 
 CCD3D12Device::CCD3D12Device()
 : _impl(std::make_unique<Impl>()) {
-    // Earliest possible diagnostic: was D3D12Device even constructed?
-    {
-        FILE *f = fopen("C:\\temp\\d3d12-render-diag.log", "a");
-        if (f) { fprintf(f, "[CTOR] CCD3D12Device constructor called!\n"); fflush(f); fclose(f); }
-    }
     CCD3D12Device::instance = this;
     _api = API::D3D12;
     _deviceName = "D3D12";
@@ -179,22 +125,11 @@ CCD3D12Device::~CCD3D12Device() {
 
 bool CCD3D12Device::doInit(const DeviceInfo &info) {
     (void)info;
-    diagLog("[DOINIT] CCD3D12Device::doInit called!\n");
 
 #if defined(_WIN32)
     if (!initializeD3D12Context()) {
         CC_LOG_ERROR("Failed to initialize D3D12 context.");
-        diagLog("[DOINIT] initializeD3D12Context FAILED! Returning false.\n");
         return false;
-    }
-    diagLog("[DOINIT] initializeD3D12Context succeeded.\n");
-
-    // --- DIAG: Checkpoint after D3D12 context init ---
-    {
-        HRESULT drr = _impl->d3dDevice->GetDeviceRemovedReason();
-        CC_LOG_INFO("[DIAG] After initializeD3D12Context: DeviceRemovedReason=0x%08x (%s)",
-                     static_cast<unsigned>(drr), SUCCEEDED(drr) ? "OK" : "HUNG!");
-        dumpD3D12DebugMessages(_impl->d3dDevice.Get(), "after-initContext");
     }
 
     // Initialize GPU-visible descriptor heap pools
@@ -202,88 +137,88 @@ bool CCD3D12Device::doInit(const DeviceInfo &info) {
     _impl->gpuDescriptorHeapPool->initialize(
         D3D12DescriptorHeapPool::HeapType::CBV_SRV_UAV, 4096, true);
 
-    {
-        HRESULT drr = _impl->d3dDevice->GetDeviceRemovedReason();
-        CC_LOG_INFO("[DIAG] After GPU desc heap pool init: DeviceRemovedReason=0x%08x (%s)",
-                     static_cast<unsigned>(drr), SUCCEEDED(drr) ? "OK" : "HUNG!");
-        dumpD3D12DebugMessages(_impl->d3dDevice.Get(), "after-gpuHeapPool");
-    }
-
     _impl->samplerDescriptorHeapPool = std::make_unique<D3D12DescriptorHeapPool>();
     _impl->samplerDescriptorHeapPool->initialize(
         D3D12DescriptorHeapPool::HeapType::SAMPLER, 2048, true);
 
-    {
-        HRESULT drr = _impl->d3dDevice->GetDeviceRemovedReason();
-        CC_LOG_INFO("[DIAG] After sampler desc heap pool init: DeviceRemovedReason=0x%08x (%s)",
-                     static_cast<unsigned>(drr), SUCCEEDED(drr) ? "OK" : "HUNG!");
-        dumpD3D12DebugMessages(_impl->d3dDevice.Get(), "after-samplerHeapPool");
-    }
-
     CC_LOG_INFO("D3D12 descriptor heap pools initialized.");
-    diagLog("[DOINIT] Descriptor heap pools initialized OK\n");
 #endif
 
     QueueInfo queueInfo;
     queueInfo.type = QueueType::GRAPHICS;
     _queue = createQueue(queueInfo);
-    diagLog("[DOINIT] createQueue done, ptr=%p\n", (void*)_queue);
-
-#if defined(_WIN32)
-    {
-        HRESULT drr = _impl->d3dDevice->GetDeviceRemovedReason();
-        CC_LOG_INFO("[DIAG] After Queue creation: DeviceRemovedReason=0x%08x (%s)",
-                     static_cast<unsigned>(drr), SUCCEEDED(drr) ? "OK" : "HUNG!");
-        dumpD3D12DebugMessages(_impl->d3dDevice.Get(), "after-queue");
-    }
-#endif
 
     QueryPoolInfo queryPoolInfo{QueryType::OCCLUSION, DEFAULT_MAX_QUERY_OBJECTS, true};
     _queryPool = createQueryPool(queryPoolInfo);
-    diagLog("[DOINIT] createQueryPool done, ptr=%p\n", (void*)_queryPool);
-
-#if defined(_WIN32)
-    {
-        HRESULT drr = _impl->d3dDevice->GetDeviceRemovedReason();
-        CC_LOG_INFO("[DIAG] After QueryPool creation: DeviceRemovedReason=0x%08x (%s)",
-                     static_cast<unsigned>(drr), SUCCEEDED(drr) ? "OK" : "HUNG!");
-        dumpD3D12DebugMessages(_impl->d3dDevice.Get(), "after-queryPool");
-    }
-#endif
 
     CommandBufferInfo cmdBuffInfo;
     cmdBuffInfo.type = CommandBufferType::PRIMARY;
     cmdBuffInfo.queue = _queue;
     _cmdBuff = createCommandBuffer(cmdBuffInfo);
-    diagLog("[DOINIT] createCommandBuffer done, ptr=%p\n", (void*)_cmdBuff);
-
-#if defined(_WIN32)
-    {
-        HRESULT drr = _impl->d3dDevice->GetDeviceRemovedReason();
-        CC_LOG_INFO("[DIAG] After CommandBuffer creation: DeviceRemovedReason=0x%08x (%s)",
-                     static_cast<unsigned>(drr), SUCCEEDED(drr) ? "OK" : "HUNG!");
-        dumpD3D12DebugMessages(_impl->d3dDevice.Get(), "after-cmdBuffer");
-    }
-#endif
 
     // Initialize format feature support table via D3D12 API
     initFormatFeatures();
-    diagLog("[DOINIT] initFormatFeatures done.\n");
 
     // Initialize device capabilities
     initCapabilities();
-    diagLog("[DOINIT] initCapabilities done (maxVertexUniformVectors=%u).\n", _caps.maxVertexUniformVectors);
 
     _renderer = "D3D12";
     _vendor = "Unknown";
+
+    // Create dummy resources for safe null descriptor bindings
+    {
+        gfx::TextureInfo texInfo{};
+        texInfo.usage = TextureUsageBit::SAMPLED | TextureUsageBit::STORAGE;
+        texInfo.format = Format::RGBA8;
+        texInfo.width = 1;
+        texInfo.height = 1;
+        texInfo.levelCount = 1;
+        texInfo.layerCount = 1;
+        texInfo.samples = SampleCount::X1;
+        texInfo.flags = TextureFlagBit::NONE;
+        _impl->dummyTexture = static_cast<CCD3D12Texture *>(createTexture(texInfo));
+
+        gfx::BufferInfo bufInfo{};
+        bufInfo.usage = BufferUsageBit::UNIFORM | BufferUsageBit::STORAGE;
+        bufInfo.memUsage = MemoryUsageBit::HOST | MemoryUsageBit::DEVICE;
+        bufInfo.size = 256;
+        bufInfo.flags = BufferFlagBit::NONE;
+        _impl->dummyBuffer = static_cast<CCD3D12Buffer *>(createBuffer(bufInfo));
+
+        if (_impl->dummyTexture && _impl->dummyBuffer) {
+            CC_LOG_INFO("[D3D12] Dummy resources created for null descriptor bindings");
+        } else {
+            CC_LOG_WARNING("[D3D12] Failed to create dummy resources; null descriptors will be skipped");
+        }
+    }
 
     CC_LOG_INFO("D3D12 device initialized.");
     CC_LOG_INFO("RENDERER: %s", _renderer.c_str());
     CC_LOG_INFO("VENDOR: %s", _vendor.c_str());
     CC_LOG_INFO("CAPS: maxVertexUniformVectors=%u, maxFragmentUniformVectors=%u, maxTextureSize=%u",
                 _caps.maxVertexUniformVectors, _caps.maxFragmentUniformVectors, _caps.maxTextureSize);
-    dumpD3D12DebugMessages(_impl->d3dDevice.Get(), "doInit-complete");
-    diagLog("[DOINIT] COMPLETE! D3D12 device fully initialized.\n");
+
+    // Create command signatures for indirect draw / dispatch
+    {
+        // DrawIndirect: matches D3D12_DRAW_ARGUMENTS { VertexCountPerInstance, InstanceCount, StartVertexLocation, StartInstanceLocation }
+        D3D12_COMMAND_SIGNATURE_DESC sigDesc{};
+        D3D12_INDIRECT_ARGUMENT_DESC argDesc{};
+        argDesc.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
+        sigDesc.pArgumentDescs = &argDesc;
+        sigDesc.NumArgumentDescs = 1;
+        sigDesc.ByteStride = sizeof(D3D12_DRAW_ARGUMENTS);
+        _impl->d3dDevice->CreateCommandSignature(&sigDesc, nullptr, IID_PPV_ARGS(&_impl->drawIndirectSig));
+
+        // DrawIndexedIndirect: matches D3D12_DRAW_INDEXED_ARGUMENTS { IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation, StartInstanceLocation }
+        argDesc.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;
+        sigDesc.ByteStride = sizeof(D3D12_DRAW_INDEXED_ARGUMENTS);
+        _impl->d3dDevice->CreateCommandSignature(&sigDesc, nullptr, IID_PPV_ARGS(&_impl->drawIndexedIndirectSig));
+
+        // DispatchIndirect: matches D3D12_DISPATCH_ARGUMENTS { ThreadGroupCountX, ThreadGroupCountY, ThreadGroupCountZ }
+        argDesc.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+        sigDesc.ByteStride = sizeof(D3D12_DISPATCH_ARGUMENTS);
+        _impl->d3dDevice->CreateCommandSignature(&sigDesc, nullptr, IID_PPV_ARGS(&_impl->dispatchIndirectSig));
+    }
 
     return true;
 }
@@ -291,6 +226,10 @@ bool CCD3D12Device::doInit(const DeviceInfo &info) {
 void CCD3D12Device::doDestroy() {
 #if defined(_WIN32)
     waitForGpu();
+
+    // Release dummy resources
+    _impl->dummyTexture = nullptr;
+    _impl->dummyBuffer = nullptr;
 
     // Shutdown descriptor heap pools first
     if (_impl->samplerDescriptorHeapPool) {
@@ -322,9 +261,48 @@ void CCD3D12Device::doDestroy() {
 void CCD3D12Device::acquire(Swapchain *const *swapchains, uint32_t count) {
     (void)swapchains;
     (void)count;
+
+    // Note: Back buffer index is already refreshed in Swapchain::present()
+    // via GetCurrentBackBufferIndex() after each Present() call. The engine
+    // frame loop is: acquire() → render → present(), so by the time acquire()
+    // runs, the index was set at the end of the previous frame's present().
+    // No additional index refresh is needed here.
+
     if (_onAcquire) {
         _onAcquire->execute();
     }
+}
+
+CCD3D12Texture *CCD3D12Device::getDummyTexture() const {
+    return _impl ? _impl->dummyTexture.get() : nullptr;
+}
+
+CCD3D12Buffer *CCD3D12Device::getDummyBuffer() const {
+    return _impl ? _impl->dummyBuffer.get() : nullptr;
+}
+
+void *CCD3D12Device::getDrawIndirectSignature() const {
+#if defined(_WIN32)
+    return _impl ? _impl->drawIndirectSig.Get() : nullptr;
+#else
+    return nullptr;
+#endif
+}
+
+void *CCD3D12Device::getDrawIndexedIndirectSignature() const {
+#if defined(_WIN32)
+    return _impl ? _impl->drawIndexedIndirectSig.Get() : nullptr;
+#else
+    return nullptr;
+#endif
+}
+
+void *CCD3D12Device::getDispatchIndirectSignature() const {
+#if defined(_WIN32)
+    return _impl ? _impl->dispatchIndirectSig.Get() : nullptr;
+#else
+    return nullptr;
+#endif
 }
 
 void CCD3D12Device::present() {
@@ -333,150 +311,11 @@ void CCD3D12Device::present() {
         return;
     }
 
-    static uint32_t s_presentCount = 0;
-    ++s_presentCount;
-    if (s_presentCount <= 5 || s_presentCount % 300 == 0) {
-        diagLog("[FRAME %u] Device::present() called\n", s_presentCount);
-    }
-
     const auto &swapchains = getSwapchains();
     for (auto *swapchain : swapchains) {
         auto *d3d12Swapchain = static_cast<CCD3D12Swapchain *>(swapchain);
         if (!d3d12Swapchain || !d3d12Swapchain->isReady()) {
             continue;
-        }
-
-        // --- DIAG: Read back buffer pixels before Present ---
-        // Read center 8x1 pixels from the back buffer to verify rendering content
-        if (s_presentCount <= 5 || s_presentCount == 60 || s_presentCount == 300) {
-            auto *backBuffer = static_cast<ID3D12Resource *>(d3d12Swapchain->getCurrentBackBufferHandle());
-            if (backBuffer && _impl->d3dDevice) {
-                auto desc = backBuffer->GetDesc();
-                CC_LOG_INFO("[PIXEL-READBACK] Frame %u: backBuffer=%p size=%llux%u format=%u currentIdx=%u",
-                            s_presentCount, backBuffer,
-                            static_cast<unsigned long long>(desc.Width),
-                            static_cast<unsigned>(desc.Height),
-                            static_cast<unsigned>(desc.Format),
-                            d3d12Swapchain->getCurrentBackBufferIndex());
-                diagLog("[PIXEL-READBACK] Frame %u: backBuffer=%p size=%llux%u format=%u currentIdx=%u\n",
-                        s_presentCount, backBuffer,
-                        static_cast<unsigned long long>(desc.Width),
-                        static_cast<unsigned>(desc.Height),
-                        static_cast<unsigned>(desc.Format),
-                        d3d12Swapchain->getCurrentBackBufferIndex());
-
-                // Create a readback buffer for 8 pixels (RGBA8 = 4 bytes each)
-                const UINT pixelRowCount = 8;
-                const UINT bytesPerPixel = 4;
-                const UINT rowPitch = (pixelRowCount * bytesPerPixel + 255) & ~255; // 256-aligned
-
-                D3D12_RESOURCE_DESC readbackDesc{};
-                readbackDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-                readbackDesc.Alignment = 0;
-                readbackDesc.Width = rowPitch; // 256-aligned size
-                readbackDesc.Height = 1;
-                readbackDesc.DepthOrArraySize = 1;
-                readbackDesc.MipLevels = 1;
-                readbackDesc.Format = DXGI_FORMAT_UNKNOWN;
-                readbackDesc.SampleDesc.Count = 1;
-                readbackDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-                readbackDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
-
-                D3D12_HEAP_PROPERTIES heapProps{};
-                heapProps.Type = D3D12_HEAP_TYPE_READBACK;
-                heapProps.CreationNodeMask = 1;
-                heapProps.VisibleNodeMask = 1;
-
-                Microsoft::WRL::ComPtr<ID3D12Resource> readbackBuffer;
-                HRESULT hr = _impl->d3dDevice->CreateCommittedResource(
-                    &heapProps, D3D12_HEAP_FLAG_NONE, &readbackDesc,
-                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                    IID_PPV_ARGS(&readbackBuffer));
-                if (SUCCEEDED(hr)) {
-                    // Use device's command allocator/list for readback
-                    _impl->commandAllocator->Reset();
-                    _impl->commandList->Reset(_impl->commandAllocator.Get(), nullptr);
-
-                    // Transition back buffer: PRESENT → COPY_SOURCE
-                    // (endRenderPass set it to PRESENT, Queue::submit already executed)
-                    D3D12_RESOURCE_BARRIER barrier{};
-                    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-                    barrier.Transition.pResource = backBuffer;
-                    barrier.Transition.Subresource = 0;
-                    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-                    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-                    _impl->commandList->ResourceBarrier(1, &barrier);
-
-                    // Copy center row of 8 pixels
-                    D3D12_TEXTURE_COPY_LOCATION src{};
-                    src.pResource = backBuffer;
-                    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-                    src.SubresourceIndex = 0;
-
-                    UINT centerX = static_cast<UINT>(desc.Width / 2) - 4;
-                    UINT centerY = (desc.Height / 2);
-
-                    D3D12_TEXTURE_COPY_LOCATION dst{};
-                    dst.pResource = readbackBuffer.Get();
-                    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-                    dst.PlacedFootprint.Offset = 0;
-                    dst.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-                    dst.PlacedFootprint.Footprint.Width = pixelRowCount;
-                    dst.PlacedFootprint.Footprint.Height = 1;
-                    dst.PlacedFootprint.Footprint.Depth = 1;
-                    dst.PlacedFootprint.Footprint.RowPitch = rowPitch;
-
-                    D3D12_BOX srcBox{};
-                    srcBox.left = centerX;
-                    srcBox.top = centerY;
-                    srcBox.front = 0;
-                    srcBox.right = centerX + pixelRowCount;
-                    srcBox.bottom = centerY + 1;
-                    srcBox.back = 1;
-
-                    _impl->commandList->CopyTextureRegion(&dst, 0, 0, 0, &src, &srcBox);
-
-                    // Transition back: COPY_DEST → PRESENT (restore for Present() call)
-                    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-                    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-                    _impl->commandList->ResourceBarrier(1, &barrier);
-
-                    _impl->commandList->Close();
-                    ID3D12CommandList *cmdLists[] = { _impl->commandList.Get() };
-                    _impl->graphicsQueue->ExecuteCommandLists(1, cmdLists);
-
-                    // Wait for copy to complete
-                    ++_impl->fenceValue;
-                    _impl->graphicsQueue->Signal(_impl->frameFence.Get(), _impl->fenceValue);
-                    if (_impl->frameFence->GetCompletedValue() < _impl->fenceValue) {
-                        _impl->frameFence->SetEventOnCompletion(_impl->fenceValue, _impl->fenceEvent);
-                        WaitForSingleObject(_impl->fenceEvent, INFINITE);
-                    }
-
-                    // Map and read pixels
-                    void *mappedData = nullptr;
-                    D3D12_RANGE readRange{0, rowPitch};
-                    if (SUCCEEDED(readbackBuffer->Map(0, &readRange, &mappedData)) && mappedData) {
-                        auto *pixels = static_cast<const uint8_t *>(mappedData);
-                        CC_LOG_INFO("[PIXEL-READBACK] Frame %u: center pixels at (%u,%u): "
-                                    "[%u,%u,%u,%u] [%u,%u,%u,%u] [%u,%u,%u,%u] [%u,%u,%u,%u]",
-                                    s_presentCount, centerX, centerY,
-                                    pixels[0], pixels[1], pixels[2], pixels[3],
-                                    pixels[4], pixels[5], pixels[6], pixels[7],
-                                    pixels[8], pixels[9], pixels[10], pixels[11],
-                                    pixels[12], pixels[13], pixels[14], pixels[15]);
-                        diagLog("[PIXEL-READBACK] Frame %u: center(%u,%u) 8px: "
-                                "[%u,%u,%u,%u] [%u,%u,%u,%u] [%u,%u,%u,%u] [%u,%u,%u,%u]\n",
-                                s_presentCount, centerX, centerY,
-                                pixels[0], pixels[1], pixels[2], pixels[3],
-                                pixels[4], pixels[5], pixels[6], pixels[7],
-                                pixels[8], pixels[9], pixels[10], pixels[11],
-                                pixels[12], pixels[13], pixels[14], pixels[15]);
-                        D3D12_RANGE writeRange{0, 0};
-                        readbackBuffer->Unmap(0, &writeRange);
-                    }
-                }
-            }
         }
 
         // The engine's rendering pipeline already handles resource barriers
@@ -503,13 +342,11 @@ void CCD3D12Device::present() {
         }
     }
 
-    // Reset GPU descriptor heap pools for the next frame
-    if (_impl->gpuDescriptorHeapPool) {
-        _impl->gpuDescriptorHeapPool->reset();
-    }
-    if (_impl->samplerDescriptorHeapPool) {
-        _impl->samplerDescriptorHeapPool->reset();
-    }
+    // Note: GPU descriptor heap pool reset is now handled exclusively in
+    // CommandBuffer::begin() to avoid double-reset if multiple command buffers
+    // exist. Previously this was redundantly called here AND in begin().
+#else
+    // D3D12 only supported on Windows
 #endif
 }
 
@@ -528,7 +365,6 @@ QueryPool *CCD3D12Device::createQueryPool() {
 }
 
 Swapchain *CCD3D12Device::createSwapchain() {
-    diagLog("[DEV_FACTORY] createSwapchain() called!\n");
     return ccnew CCD3D12Swapchain;
 }
 
@@ -764,6 +600,55 @@ void CCD3D12Device::getQueryPoolResults(QueryPool *queryPool) {
     d3d12Pool->fetchResults();
 }
 
+SampleCount CCD3D12Device::getMaxSampleCount(Format format, TextureUsage usage, TextureFlags flags) const {
+#if defined(_WIN32)
+    if (!_impl || !_impl->d3dDevice) return SampleCount::X1;
+
+    DXGI_FORMAT dxgiFormat = DXGI_FORMAT_UNKNOWN;
+    // Map common Cocos formats to DXGI formats — only need to handle renderable formats
+    switch (format) {
+        case Format::RGBA8:      dxgiFormat = DXGI_FORMAT_R8G8B8A8_UNORM; break;
+        case Format::BGRA8:      dxgiFormat = DXGI_FORMAT_B8G8R8A8_UNORM; break;
+        case Format::R8:         dxgiFormat = DXGI_FORMAT_R8_UNORM; break;
+        case Format::RG8:        dxgiFormat = DXGI_FORMAT_R8G8_UNORM; break;
+        case Format::RGBA4:      dxgiFormat = DXGI_FORMAT_B4G4R4A4_UNORM; break;
+        case Format::DEPTH:      dxgiFormat = DXGI_FORMAT_D24_UNORM_S8_UINT; break;
+        case Format::DEPTH_STENCIL: dxgiFormat = DXGI_FORMAT_D24_UNORM_S8_UINT; break;
+        case Format::R16F:       dxgiFormat = DXGI_FORMAT_R16_FLOAT; break;
+        case Format::RG16F:      dxgiFormat = DXGI_FORMAT_R16G16_FLOAT; break;
+        case Format::RGBA16F:    dxgiFormat = DXGI_FORMAT_R16G16B16A16_FLOAT; break;
+        case Format::R32F:       dxgiFormat = DXGI_FORMAT_R32_FLOAT; break;
+        case Format::RG32F:      dxgiFormat = DXGI_FORMAT_R32G32_FLOAT; break;
+        case Format::RGBA32F:    dxgiFormat = DXGI_FORMAT_R32G32B32A32_FLOAT; break;
+        case Format::R11G11B10F: dxgiFormat = DXGI_FORMAT_R11G11B10_FLOAT; break;
+        case Format::RGB10A2:    dxgiFormat = DXGI_FORMAT_R10G10B10A2_UNORM; break;
+        case Format::RGB9E5:     dxgiFormat = DXGI_FORMAT_R9G9B9E5_SHAREDEXP; break;
+        default:                 dxgiFormat = DXGI_FORMAT_R8G8B8A8_UNORM; break; // fallback
+    }
+
+    D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS qualityLevels{};
+    qualityLevels.Format = dxgiFormat;
+    qualityLevels.SampleCount = 1; // start checking
+    qualityLevels.Flags = D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE;
+
+    // Check sample counts from highest to lowest
+    for (uint32_t sampleCount = 32; sampleCount >= 2; sampleCount /= 2) {
+        qualityLevels.SampleCount = sampleCount;
+        if (SUCCEEDED(_impl->d3dDevice->CheckFeatureSupport(
+                D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS, &qualityLevels, sizeof(qualityLevels)))) {
+            if (qualityLevels.NumQualityLevels > 0) {
+                return static_cast<SampleCount>(sampleCount);
+            }
+        }
+    }
+#else
+    (void)format;
+    (void)usage;
+    (void)flags;
+#endif
+    return SampleCount::X1;
+}
+
 void CCD3D12Device::initFormatFeatures() {
     // Hardcoded format feature table for D3D12 FL11_0+ hardware.
     // Same approach as GLES3Device::initFormatFeature() — no runtime API calls needed.
@@ -911,9 +796,6 @@ void CCD3D12Device::initCapabilities() {
 
 #if defined(_WIN32)
 bool CCD3D12Device::initializeD3D12Context() {
-    CC_LOG_INFO("[DIAG] initializeD3D12Context: starting...");
-    diagLog("[INIT_CTX] Starting initializeD3D12Context\n");
-
     UINT dxgiFactoryFlags = 0;
 
     // Enable debug layer only in Debug builds; too heavy for Release and
@@ -924,9 +806,8 @@ bool CCD3D12Device::initializeD3D12Context() {
         if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController)))) {
             debugController->EnableDebugLayer();
             dxgiFactoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
-            CC_LOG_INFO("[DIAG] D3D12 debug layer ENABLED (Debug build).");
         } else {
-            CC_LOG_WARNING("[DIAG] Could not enable D3D12 debug layer.");
+            CC_LOG_WARNING("Could not enable D3D12 debug layer.");
         }
     }
 #endif
@@ -934,76 +815,46 @@ bool CCD3D12Device::initializeD3D12Context() {
     HRESULT hr = CreateDXGIFactory2(dxgiFactoryFlags, IID_PPV_ARGS(&_impl->dxgiFactory));
     if (FAILED(hr)) {
         CC_LOG_ERROR("CreateDXGIFactory2 failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
-        diagLog("[INIT_CTX] CreateDXGIFactory2 FAILED hr=0x%08x\n", static_cast<unsigned>(hr));
         return false;
     }
-    CC_LOG_INFO("[DIAG] CreateDXGIFactory2 OK.");
-    diagLog("[INIT_CTX] CreateDXGIFactory2 OK\n");
 
     Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
     for (UINT adapterIndex = 0; _impl->dxgiFactory->EnumAdapters1(adapterIndex, &adapter) != DXGI_ERROR_NOT_FOUND; ++adapterIndex) {
         DXGI_ADAPTER_DESC1 adapterDesc{};
         adapter->GetDesc1(&adapterDesc);
         if (adapterDesc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) {
-            CC_LOG_INFO("[DIAG] Adapter[%u]: software, skipping.", adapterIndex);
             continue;
         }
         char adapterName[128] = {};
         wcstombs(adapterName, adapterDesc.Description, sizeof(adapterName) - 1);
-        CC_LOG_INFO("[DIAG] Adapter[%u]: %s (VRAM=%llu MB, VendorID=0x%04x)",
+        CC_LOG_INFO("Adapter[%u]: %s (VRAM=%llu MB, VendorID=0x%04x)",
                      adapterIndex, adapterName,
                      static_cast<unsigned long long>(adapterDesc.DedicatedVideoMemory / (1024 * 1024)),
                      static_cast<unsigned>(adapterDesc.VendorId));
         if (SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&_impl->d3dDevice)))) {
-            CC_LOG_INFO("[DIAG] D3D12CreateDevice succeeded on adapter[%u].", adapterIndex);
-            diagLog("[INIT_CTX] D3D12CreateDevice OK on adapter[%u]: %s\n", adapterIndex, adapterName);
             break;
         }
-        CC_LOG_WARNING("[DIAG] D3D12CreateDevice FAILED on adapter[%u], trying next.", adapterIndex);
-        diagLog("[INIT_CTX] D3D12CreateDevice FAILED on adapter[%u]: %s\n", adapterIndex, adapterName);
+        adapter.Reset();
     }
 
     if (!_impl->d3dDevice) {
-        CC_LOG_WARNING("[DIAG] No adapter worked, trying WARP (default adapter)...");
-        diagLog("[INIT_CTX] No adapter worked, trying WARP\n");
+        CC_LOG_WARNING("No adapter worked, trying WARP (default adapter)...");
         hr = D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&_impl->d3dDevice));
         if (FAILED(hr)) {
             CC_LOG_ERROR("D3D12CreateDevice failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
-            diagLog("[INIT_CTX] D3D12CreateDevice WARP FAILED hr=0x%08x\n", static_cast<unsigned>(hr));
             return false;
         }
-        CC_LOG_INFO("[DIAG] D3D12CreateDevice (default) OK.");
-        diagLog("[INIT_CTX] D3D12CreateDevice WARP OK\n");
     }
 
     // Setup ID3D12InfoQueue to capture all D3D12 debug layer messages
     {
         Microsoft::WRL::ComPtr<ID3D12InfoQueue> infoQueue;
         if (SUCCEEDED(_impl->d3dDevice->QueryInterface(IID_PPV_ARGS(&infoQueue)))) {
-            // Capture everything — errors, warnings, info, messages
-            D3D12_MESSAGE_SEVERITY severities[] = {
-                D3D12_MESSAGE_SEVERITY_CORRUPTION,
-                D3D12_MESSAGE_SEVERITY_ERROR,
-                D3D12_MESSAGE_SEVERITY_WARNING,
-                D3D12_MESSAGE_SEVERITY_INFO,
-                D3D12_MESSAGE_SEVERITY_MESSAGE,
-            };
             D3D12_INFO_QUEUE_FILTER filter{};
             filter.DenyList.NumSeverities = 0;
             filter.DenyList.pSeverityList = nullptr; // allow all severities
             infoQueue->PushStorageFilter(&filter);
-
-            // Break on error — DISABLED because without a debugger attached,
-            // this causes the process to crash/terminate.
-            // infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, TRUE);
-            // infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, TRUE);
-
-            // Set max stored messages
             infoQueue->SetMessageCountLimit(4096);
-
-            CC_LOG_INFO("[DIAG] ID3D12InfoQueue configured. Will break on ERROR/CORRUPTION.");
-        } else {
-            CC_LOG_WARNING("[DIAG] Could not query ID3D12InfoQueue.");
         }
     }
 
@@ -1015,59 +866,41 @@ bool CCD3D12Device::initializeD3D12Context() {
     hr = _impl->d3dDevice->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&_impl->graphicsQueue));
     if (FAILED(hr)) {
         CC_LOG_ERROR("CreateCommandQueue failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
-        diagLog("[INIT_CTX] CreateCommandQueue FAILED hr=0x%08x\n", static_cast<unsigned>(hr));
         return false;
     }
-    CC_LOG_INFO("[DIAG] CreateCommandQueue OK.");
-    diagLog("[INIT_CTX] CreateCommandQueue OK\n");
 
     hr = _impl->d3dDevice->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&_impl->commandAllocator));
     if (FAILED(hr)) {
         CC_LOG_ERROR("CreateCommandAllocator failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
-        diagLog("[INIT_CTX] CreateCommandAllocator FAILED hr=0x%08x\n", static_cast<unsigned>(hr));
         return false;
     }
-    CC_LOG_INFO("[DIAG] CreateCommandAllocator OK.");
-    diagLog("[INIT_CTX] CreateCommandAllocator OK\n");
 
     hr = _impl->d3dDevice->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, _impl->commandAllocator.Get(), nullptr, IID_PPV_ARGS(&_impl->commandList));
     if (FAILED(hr)) {
         CC_LOG_ERROR("CreateCommandList failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
-        diagLog("[INIT_CTX] CreateCommandList FAILED hr=0x%08x\n", static_cast<unsigned>(hr));
         return false;
     }
-    CC_LOG_INFO("[DIAG] CreateCommandList OK.");
-    diagLog("[INIT_CTX] CreateCommandList OK\n");
 
     hr = _impl->commandList->Close();
     if (FAILED(hr)) {
         CC_LOG_ERROR("Initial command list close failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
         return false;
     }
-    CC_LOG_INFO("[DIAG] Initial command list closed OK.");
 
     hr = _impl->d3dDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_impl->frameFence));
     if (FAILED(hr)) {
         CC_LOG_ERROR("CreateFence failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
         return false;
     }
-    CC_LOG_INFO("[DIAG] CreateFence OK.");
 
     _impl->fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
     if (!_impl->fenceEvent) {
         CC_LOG_ERROR("CreateEvent for D3D12 fence failed.");
         return false;
     }
-    CC_LOG_INFO("[DIAG] CreateEvent OK.");
 
     _impl->fenceValue = 0;
 
-    // Final device health check
-    hr = _impl->d3dDevice->GetDeviceRemovedReason();
-    CC_LOG_INFO("[DIAG] initializeD3D12Context complete. DeviceRemovedReason=0x%08x (%s)",
-                 static_cast<unsigned>(hr), SUCCEEDED(hr) ? "OK" : "REMOVED/HUNG!");
-    dumpD3D12DebugMessages(_impl->d3dDevice.Get(), "initContext-final");
-    diagLog("[INIT_CTX] Complete! DRR=0x%08x (%s)\n", static_cast<unsigned>(hr), SUCCEEDED(hr) ? "OK" : "HUNG");
     return true;
 }
 

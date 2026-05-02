@@ -184,10 +184,19 @@ CCD3D12Framebuffer::DescriptorPair CCD3D12Framebuffer::getRTVHandle(uint32_t ind
 #if defined(_WIN32)
     if (index >= _impl->rtvHandles.size()) return {};
 
-    // For swapchain textures, dynamically return the swapchain's current RTV
-    if (_swapchain) {
-        uintptr_t rtvPtr = _swapchain->getCurrentRTVHandle();
-        return {static_cast<uint64_t>(rtvPtr), 0};
+    // Check if THIS specific color attachment is a swapchain texture.
+    // Previously we checked only _swapchain (which is set if ANY attachment
+    // is a swapchain texture), causing non-swapchain attachments in MRT
+    // to incorrectly get the swapchain RTV handle.
+    if (index < static_cast<uint32_t>(_colorTextures.size())) {
+        auto *texture = static_cast<CCD3D12Texture *>(_colorTextures[index]);
+        if (texture && texture->isSwapchainColorTexture()) {
+            auto *sw = static_cast<CCD3D12Swapchain *>(texture->getSwapchain());
+            if (sw) {
+                uintptr_t rtvPtr = sw->getCurrentRTVHandle();
+                return {static_cast<uint64_t>(rtvPtr), 0};
+            }
+        }
     }
 
     const auto &handle = _impl->rtvHandles[index];

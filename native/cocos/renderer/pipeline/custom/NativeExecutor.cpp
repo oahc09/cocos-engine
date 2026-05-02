@@ -44,6 +44,7 @@
 #include "details/GraphView.h"
 #include "details/GslUtils.h"
 #include "details/Range.h"
+#include "base/Log.h"
 
 #if CC_USE_GEOMETRY_RENDERER
     #include "cocos/renderer/pipeline/GeometryRenderer.h"
@@ -1305,6 +1306,12 @@ void NativePipeline::executeRenderGraph(const RenderGraph& rg) {
     auto& ppl = *this;
     auto* scratch = &ppl.unsyncPool;
 
+    static uint32_t s_execFrameCount = 0;
+    ++s_execFrameCount;
+
+    const auto rgVertCount = num_vertices(rg);
+    const auto rgEdgeCount = num_edges(rg);
+
     ppl.resourceGraph.validateSwapchains();
 
     RenderGraphContextCleaner contextCleaner(ppl.nativeContext);
@@ -1341,6 +1348,7 @@ void NativePipeline::executeRenderGraph(const RenderGraph& rg) {
         auto& context = ppl.nativeContext;
         auto& sceneCulling = context.sceneCulling;
         sceneCulling.buildRenderQueues(rg, lg, ppl);
+
         auto& group = ppl.nativeContext.resourceGroups[context.nextFenceValue];
         // notice: we cannot use ranged-for of sceneCulling.renderQueues
         CC_EXPECTS(sceneCulling.numRenderQueues <= sceneCulling.renderQueues.size());

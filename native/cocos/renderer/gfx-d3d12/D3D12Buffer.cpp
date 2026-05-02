@@ -68,7 +68,27 @@ void CCD3D12Buffer::doInit(const BufferViewInfo &info) {
 #if defined(_WIN32)
     _impl->resource = static_cast<ID3D12Resource *>(buffer->getD3D12ResourceHandle());
 #endif
-    _impl->resourceOffset = info.offset;
+    // Buffer views can be created from another view. In that case the final
+    // GPU VA must include the parent view's offset; otherwise we will bind
+    // descriptors to the wrong address/range.
+    const uint64_t parentOffset = static_cast<uint64_t>(buffer->getD3D12ResourceOffset());
+    const uint64_t requestedOffset = parentOffset + static_cast<uint64_t>(info.offset);
+
+#if defined(_WIN32)
+    if (_impl->resource) {
+        const uint64_t resourceWidth = static_cast<uint64_t>(_impl->resource->GetDesc().Width);
+        if (requestedOffset > resourceWidth) {
+            CC_LOG_ERROR("D3D12Buffer view offset out of range. parentOffset=%llu info.offset=%u resourceWidth=%llu",
+                         static_cast<unsigned long long>(parentOffset),
+                         info.offset,
+                         static_cast<unsigned long long>(resourceWidth));
+            _impl->resourceOffset = static_cast<uint32_t>(resourceWidth);
+            return;
+        }
+    }
+#endif
+
+    _impl->resourceOffset = static_cast<uint32_t>(requestedOffset);
 }
 
 void CCD3D12Buffer::doResize(uint32_t size, uint32_t count) {

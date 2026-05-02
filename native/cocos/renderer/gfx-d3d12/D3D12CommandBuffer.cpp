@@ -25,6 +25,7 @@
 #include "D3D12CommandBuffer.h"
 #include "D3D12Buffer.h"
 #include "D3D12DescriptorSet.h"
+#include "D3D12DescriptorSetLayout.h"
 #include "D3D12DescriptorHeapPool.h"
 #include "D3D12Device.h"
 #include "D3D12Framebuffer.h"
@@ -36,24 +37,6 @@
 #include "D3D12Swapchain.h"
 #include "D3D12Texture.h"
 #include "base/Log.h"
-
-// File diagnostic for draw calls
-#include <cstdio>
-#include <cstdarg>
-namespace {
-void drawDiagLog(const char *fmt, ...) {
-    static FILE *s_file = nullptr;
-    if (!s_file) {
-        s_file = fopen("C:\\temp\\d3d12-render-diag.log", "a");
-        if (!s_file) return;
-    }
-    va_list args;
-    va_start(args, fmt);
-    vfprintf(s_file, fmt, args);
-    fflush(s_file);
-    va_end(args);
-}
-} // anonymous namespace
 
 #if defined(_WIN32)
     #ifndef NOMINMAX
@@ -80,6 +63,7 @@ struct CCD3D12CommandBuffer::Impl {
     // Track state for the current recording
     PipelineState *boundPipelineState{nullptr};
     PipelineLayout *boundPipelineLayout{nullptr};
+    InputAssembler *boundIA{nullptr};
     bool isRecording{false};
 
     // Track swapchain for resource barriers during render pass
@@ -88,6 +72,7 @@ struct CCD3D12CommandBuffer::Impl {
     ID3D12Resource *activeDepthStencil{nullptr};
     CCD3D12Texture *activeDepthTexture{nullptr};
     ccstd::vector<CCD3D12Texture *> activeColorTextures;
+    bool inRenderPass{false};
 
     // Deferred descriptor binding state — collected during bindDescriptorSet,
     // flushed to GPU during draw/dispatch to avoid multiple SetDescriptorHeaps calls.
@@ -183,7 +168,10 @@ void CCD3D12CommandBuffer::begin(RenderPass *renderPass, uint32_t subpass, Frame
 
     HRESULT hr = _impl->commandAllocator->Reset();
     if (FAILED(hr)) {
-        CC_LOG_ERROR("D3D12CommandBuffer::begin - allocator reset failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+        CC_LOG_ERROR("D3D12CommandBuffer::begin - allocator reset failed. HRESULT=0x%08x. "
+                      "This typically means the GPU is still executing the previous command list. "
+                      "The Queue::submit fence wait should prevent this.", static_cast<unsigned>(hr));
+        // Do NOT continue recording commands with a stale allocator — it would corrupt GPU state.
         return;
     }
 
@@ -210,7 +198,7 @@ void CCD3D12CommandBuffer::begin(RenderPass *renderPass, uint32_t subpass, Frame
     _impl->activeDepthStencil = nullptr;
     _impl->activeDepthTexture = nullptr;
     _impl->activeColorTextures.clear();
-    // Release upload resources from previous frame — safe now because
+    _impl->inRenderPass = false;
     // Queue::submit() has already waited for GPU completion.
     _impl->pendingUploadResources.clear();
     // Clear pending descriptor sets
@@ -266,7 +254,6 @@ void CCD3D12CommandBuffer::end() {
 }
 
 void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *fbo, const Rect &renderArea, const Color *colors, float depth, uint32_t stencil, CommandBuffer *const *secondaryCBs, uint32_t secondaryCBCount) {
-    (void)renderPass;
     (void)secondaryCBs;
     (void)secondaryCBCount;
 #if defined(_WIN32)
@@ -278,30 +265,11 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
         return;
     }
 
-    // Diagnostic: log render pass info for first few passes
-    static uint32_t s_rpCount = 0;
-    ++s_rpCount;
-    if (s_rpCount <= 20) {
-        const auto &colorTexs = fbo->getColorTextures();
-        bool isSwapchain = (d3d12Fbo->getSwapchain() != nullptr);
-        drawDiagLog("[RENDERPASS] #%u: swapchain=%s colorAttachments=%zu ds=%s area=%dx%d @(%d,%d) clearColor=(%.2f,%.2f,%.2f,%.2f)\n",
-                    s_rpCount, isSwapchain ? "YES" : "NO", colorTexs.size(),
-                    fbo->getDepthStencilTexture() ? "YES" : "NO",
-                    renderArea.width, renderArea.height, renderArea.x, renderArea.y,
-                    colors ? colors[0].x : -1.0f, colors ? colors[0].y : -1.0f,
-                    colors ? colors[0].z : -1.0f, colors ? colors[0].w : -1.0f);
-    }
-
     ccstd::vector<D3D12_RESOURCE_BARRIER> prePassBarriers;
 
     // If this framebuffer renders to a swapchain, insert PRESENT → RENDER_TARGET barrier
     CCD3D12Swapchain *swapchain = d3d12Fbo->getSwapchain();
     if (swapchain) {
-        static uint32_t s_rpCount = 0;
-        ++s_rpCount;
-        if (s_rpCount <= 5) {
-            drawDiagLog("[RENDERPASS] #%u: swapchain FBO detected, inserting PRESENT->RENDER_TARGET barrier\n", s_rpCount);
-        }
         auto *backBuffer = static_cast<ID3D12Resource *>(swapchain->getCurrentBackBufferHandle());
         if (backBuffer) {
             D3D12_RESOURCE_BARRIER barrier{};
@@ -403,24 +371,48 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
         FALSE,
         hasDSV ? &dsvHandle : nullptr);
 
-    // Clear render targets
+    // Clear render targets based on loadOp from RenderPass
+    // CRITICAL: Only clear when loadOp == CLEAR. For LOAD, preserve existing content.
+    // This allows multiple render passes to share the same RT (e.g. 3D scene + UI overlay).
+    const auto &rpColorAttachments = renderPass ? renderPass->getColorAttachments() : ColorAttachmentList();
     for (uint32_t i = 0; i < colorCount; ++i) {
-        if (rtvHandles[i].ptr != 0 && colors && i < colorCount) {
+        if (rtvHandles[i].ptr == 0) continue;
+
+        // Determine loadOp for this attachment
+        LoadOp loadOp = LoadOp::CLEAR; // default: clear if no RenderPass info
+        if (i < rpColorAttachments.size()) {
+            loadOp = rpColorAttachments[i].loadOp;
+        }
+
+        if (loadOp == LoadOp::CLEAR && colors) {
             float clearColor[4] = {colors[i].x, colors[i].y, colors[i].z, colors[i].w};
             _impl->commandList->ClearRenderTargetView(rtvHandles[i], clearColor, 0, nullptr);
         }
+        // LoadOp::LOAD: do nothing, preserve existing content
+        // LoadOp::DISCARD: do nothing, D3D12 DISCARD optimization could be added later
     }
 
-    // Clear depth-stencil
+    // Clear depth-stencil based on depthLoadOp/stencilLoadOp from RenderPass
     if (hasDSV) {
-        D3D12_CLEAR_FLAGS clearFlags = D3D12_CLEAR_FLAG_DEPTH;
+        LoadOp depthLoadOp = LoadOp::CLEAR;
+        LoadOp stencilLoadOp = LoadOp::CLEAR;
         if (renderPass) {
             const auto &dsAttachment = renderPass->getDepthStencilAttachment();
-            if (dsAttachment.format == Format::DEPTH_STENCIL) {
-                clearFlags |= D3D12_CLEAR_FLAG_STENCIL;
-            }
+            depthLoadOp = dsAttachment.depthLoadOp;
+            stencilLoadOp = dsAttachment.stencilLoadOp;
         }
-        _impl->commandList->ClearDepthStencilView(dsvHandle, clearFlags, depth, stencil, 0, nullptr);
+
+        D3D12_CLEAR_FLAGS clearFlags = static_cast<D3D12_CLEAR_FLAGS>(0);
+        if (depthLoadOp == LoadOp::CLEAR) {
+            clearFlags |= D3D12_CLEAR_FLAG_DEPTH;
+        }
+        if (stencilLoadOp == LoadOp::CLEAR) {
+            clearFlags |= D3D12_CLEAR_FLAG_STENCIL;
+        }
+
+        if (clearFlags != 0) {
+            _impl->commandList->ClearDepthStencilView(dsvHandle, clearFlags, depth, stencil, 0, nullptr);
+        }
     }
 
     // Set viewport from render area
@@ -439,6 +431,8 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
     scissorRect.right = static_cast<LONG>(renderArea.x + (renderArea.width > 0 ? renderArea.width : fboWidth));
     scissorRect.bottom = static_cast<LONG>(renderArea.y + (renderArea.height > 0 ? renderArea.height : fboHeight));
     _impl->commandList->RSSetScissorRects(1, &scissorRect);
+
+    _impl->inRenderPass = true;
 #else
     (void)fbo;
     (void)renderArea;
@@ -507,6 +501,8 @@ void CCD3D12CommandBuffer::endRenderPass() {
     if (!postPassBarriers.empty()) {
         _impl->commandList->ResourceBarrier(static_cast<UINT>(postPassBarriers.size()), postPassBarriers.data());
     }
+
+    _impl->inRenderPass = false;
 #endif
     // D3D12 has no explicit endRenderPass beyond resource barriers
 }
@@ -541,6 +537,21 @@ void CCD3D12CommandBuffer::bindPipelineState(PipelineState *pso) {
 
     _impl->commandList->SetPipelineState(d3d12PipelineState);
 
+    // Diagnostic: log blend state of bound PSO
+    {
+        const auto &bs = pso->getBlendState();
+        const char *shaderName = pso->getShader() ? pso->getShader()->getName().c_str() : "<null>";
+        bool anyBlend = false;
+        for (size_t i = 0; i < bs.targets.size(); ++i) {
+            if (bs.targets[i].blend) { anyBlend = true; break; }
+        }
+        CC_LOG_INFO("[D3D12-BIND-PSO] shader='%s' fallback=%d targets=%zu anyBlend=%s blend[0]=%u",
+                     shaderName, d3d12PSO->isDiagnosticFallback() ? 1 : 0,
+                     static_cast<unsigned>(bs.targets.size()),
+                     anyBlend ? "YES" : "NO",
+                     bs.targets.empty() ? 0u : bs.targets[0].blend);
+    }
+
     // Set primitive topology from PSO
     D3D12_PRIMITIVE_TOPOLOGY topology = static_cast<D3D12_PRIMITIVE_TOPOLOGY>(d3d12PSO->getD3D12PrimitiveTopology());
     _impl->commandList->IASetPrimitiveTopology(topology);
@@ -548,6 +559,11 @@ void CCD3D12CommandBuffer::bindPipelineState(PipelineState *pso) {
     auto *rootSig = static_cast<ID3D12RootSignature *>(d3d12PSO->getID3D12RootSignature());
     if (rootSig) {
         _impl->commandList->SetGraphicsRootSignature(rootSig);
+        // Setting a graphics root signature invalidates root descriptor table
+        // assumptions. Re-emit pending descriptor tables before the next draw.
+        if (_impl->pendingSetCount > 0) {
+            _impl->descriptorSetsDirty = true;
+        }
     }
 
     auto *pipelineLayout = pso->getPipelineLayout();
@@ -566,11 +582,6 @@ void CCD3D12CommandBuffer::bindPipelineState(PipelineState *pso) {
 void CCD3D12CommandBuffer::bindDescriptorSet(uint32_t set, DescriptorSet *descriptorSet, uint32_t dynamicOffsetCount, const uint32_t *dynamicOffsets) {
 #if defined(_WIN32)
     if (!_impl->commandList || !descriptorSet) return;
-    static uint32_t s_bindSetLogCount = 0;
-    if (s_bindSetLogCount < 40) {
-        CC_LOG_INFO("[DIAG-SET] bindDescriptorSet set=%u dynCount=%u", set, dynamicOffsetCount);
-        ++s_bindSetLogCount;
-    }
 
     // Defer the actual GPU binding until draw time.
     // D3D12 only allows one CBV/SRV/UAV heap and one Sampler heap bound at a time,
@@ -648,12 +659,6 @@ void CCD3D12CommandBuffer::flushDescriptorSets() {
         const auto samplerCount = d3d12Set->getSamplerDescriptorCount();
         const auto cbvRootIndex = boundLayout->getCbvSrvUavRootParameterIndex(setIdx);
         const auto samplerRootIndex = boundLayout->getSamplerRootParameterIndex(setIdx);
-        static uint32_t s_flushSetDiagCount = 0;
-        if (s_flushSetDiagCount < 40) {
-            CC_LOG_INFO("[D3D12-FLUSH] set=%u cbvCount=%u samplerCount=%u cbvRoot=%d samplerRoot=%d",
-                        setIdx, cbvCount, samplerCount, cbvRootIndex, samplerRootIndex);
-            ++s_flushSetDiagCount;
-        }
 
         // Copy CBV/SRV/UAV descriptors to GPU heap
         if (cbvCount > 0 && cbvRootIndex >= 0) {
@@ -663,6 +668,7 @@ void CCD3D12CommandBuffer::flushDescriptorSets() {
                 D3D12_CPU_DESCRIPTOR_HANDLE srcStart = srcHeap->GetCPUDescriptorHandleForHeapStart();
                 D3D12_CPU_DESCRIPTOR_HANDLE dstStart{};
                 dstStart.ptr = reinterpret_cast<SIZE_T>(alloc.cpuHandle);
+
                 d3dDevice->CopyDescriptorsSimple(cbvCount, dstStart, srcStart, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
                 cbvHeap = static_cast<ID3D12DescriptorHeap *>(heapPool->getHeap(alloc.heapIndex));
                 cbvEntries.push_back({static_cast<UINT>(cbvRootIndex), {alloc.gpuHandle}});
@@ -718,6 +724,7 @@ void CCD3D12CommandBuffer::bindInputAssembler(InputAssembler *ia) {
 #if defined(_WIN32)
     if (!_impl->commandList || !ia) return;
 
+    _impl->boundIA = ia;
     auto *d3d12IA = static_cast<CCD3D12InputAssembler *>(ia);
 
     // Set vertex buffers
@@ -775,7 +782,9 @@ void CCD3D12CommandBuffer::setScissor(const Rect &rect) {
 
 void CCD3D12CommandBuffer::setLineWidth(float width) {
     (void)width;
-    // D3D12 doesn't support line width > 1 natively
+    if (width != 1.0f) {
+        CC_LOG_WARNING("[D3D12] setLineWidth(%.1f) ignored — D3D12 does not support line width > 1", width);
+    }
 }
 
 void CCD3D12CommandBuffer::setDepthBias(float constant, float clamp, float slope) {
@@ -796,15 +805,24 @@ void CCD3D12CommandBuffer::setBlendConstants(const Color &constants) {
 }
 
 void CCD3D12CommandBuffer::setDepthBound(float minBounds, float maxBounds) {
+#if defined(_WIN32)
+    if (!_impl->commandList) return;
+    // OMSetDepthBounds is available on ID3D12GraphicsCommandList1 (D3D12.1+).
+    // Query the extended interface; fall back silently if unavailable.
+    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList1> cmdList1;
+    if (SUCCEEDED(_impl->commandList->QueryInterface(IID_PPV_ARGS(&cmdList1)))) {
+        cmdList1->OMSetDepthBounds(minBounds, maxBounds);
+    }
+#else
     (void)minBounds;
     (void)maxBounds;
-    // Depth bounds test requires D3D12 feature support check
+#endif
 }
 
 void CCD3D12CommandBuffer::setStencilWriteMask(StencilFace face, uint32_t mask) {
     (void)face;
     (void)mask;
-    // Stencil write mask is typically set in pipeline state, not dynamically
+    CC_LOG_WARNING("[D3D12] setStencilWriteMask(face=%u, mask=0x%x) ignored — set in pipeline state", static_cast<unsigned>(face), mask);
 }
 
 void CCD3D12CommandBuffer::setStencilCompareMask(StencilFace face, uint32_t ref, uint32_t mask) {
@@ -835,42 +853,38 @@ void CCD3D12CommandBuffer::draw(const DrawInfo &info) {
     const uint32_t firstInstance = info.firstInstance;
     auto *d3d12PSO = static_cast<CCD3D12PipelineState *>(_impl->boundPipelineState);
 
-    // Diagnostic: log first few draw calls to verify rendering pipeline
-    static uint32_t s_drawCallCount = 0;
-    if (s_drawCallCount < 10) {
-        const char *shaderName = "<null>";
-        if (_impl->boundPipelineState && _impl->boundPipelineState->getShader()) {
-            shaderName = _impl->boundPipelineState->getShader()->getName().c_str();
-        }
-        CC_LOG_INFO("[DIAG-DRAW] #%u: idx=%u vtx=%u inst=%u firstIdx=%u vtxOff=%d firstInst=%u pso=%s swapchain=%s pendingSets=%u layout=%s",
-                     s_drawCallCount,
-                     info.indexCount, info.vertexCount, instanceCount,
-                     info.firstIndex, info.vertexOffset, firstInstance,
-                     _impl->boundPipelineState ? "YES" : "NULL",
-                     _impl->activeSwapchainBackBuffer ? "YES" : "NO",
-                     _impl->pendingSetCount,
-                     _impl->boundPipelineLayout ? "YES" : "NULL");
-        CC_LOG_INFO("[DIAG-DRAW-SHADER] %s", shaderName);
-        drawDiagLog("[DRAW] #%u: idx=%u vtx=%u inst=%u firstIdx=%u vtxOff=%d firstInst=%u pso=%s swapchain=%s pendingSets=%u layout=%s shader=%s\n",
-                     s_drawCallCount,
-                     info.indexCount, info.vertexCount, instanceCount,
-                     info.firstIndex, info.vertexOffset, firstInstance,
-                     _impl->boundPipelineState ? "YES" : "NULL",
-                     _impl->activeSwapchainBackBuffer ? "YES" : "NO",
-                     _impl->pendingSetCount,
-                     _impl->boundPipelineLayout ? "YES" : "NULL",
-                     shaderName);
-        ++s_drawCallCount;
-    }
-
     if (d3d12PSO && d3d12PSO->isDiagnosticFallback()) {
         _impl->commandList->DrawInstanced(3, 1, 0, 0);
-        drawDiagLog("[DRAW-FALLBACK] DrawInstanced(3,1,0,0) swapchain=%s\n",
-                    _impl->activeSwapchainBackBuffer ? "YES" : "NO");
         ++_numDrawCalls;
         _numInstances += 1;
         _numTriangles += 1;
         return;
+    }
+
+    // Check for indirect draw via InputAssembler's indirect buffer
+    if (_impl->boundIA) {
+        auto *ia = static_cast<CCD3D12InputAssembler *>(_impl->boundIA);
+        Buffer *indirectBuf = ia->getIndirectBuffer();
+        if (indirectBuf) {
+            auto *d3d12Buf = static_cast<CCD3D12Buffer *>(indirectBuf);
+            ID3D12Resource *resource = static_cast<ID3D12Resource *>(d3d12Buf->getD3D12ResourceHandle());
+            if (resource) {
+                auto *device = CCD3D12Device::getInstance();
+                if (info.indexCount > 0) {
+                    auto *sig = static_cast<ID3D12CommandSignature *>(device->getDrawIndexedIndirectSignature());
+                    if (sig) {
+                        _impl->commandList->ExecuteIndirect(sig, 1, resource, 0, nullptr, 0);
+                    }
+                } else {
+                    auto *sig = static_cast<ID3D12CommandSignature *>(device->getDrawIndirectSignature());
+                    if (sig) {
+                        _impl->commandList->ExecuteIndirect(sig, 1, resource, 0, nullptr, 0);
+                    }
+                }
+                ++_numDrawCalls;
+                return;
+            }
+        }
     }
 
     if (info.indexCount > 0) {
@@ -1070,28 +1084,417 @@ void CCD3D12CommandBuffer::copyBuffersToTexture(const uint8_t *const *buffers, T
 }
 
 void CCD3D12CommandBuffer::blitTexture(Texture *srcTexture, Texture *dstTexture, const TextureBlit *regions, uint32_t count, Filter filter) {
-    // Blit is complex in D3D12 (requires compute or custom render pass)
+#if defined(_WIN32)
+    if (!_impl->commandList || !srcTexture || !dstTexture || !regions || count == 0) return;
+
+    auto *srcD3D12 = static_cast<CCD3D12Texture *>(srcTexture);
+    auto *dstD3D12 = static_cast<CCD3D12Texture *>(dstTexture);
+    auto *srcResource = static_cast<ID3D12Resource *>(srcD3D12->getD3D12ResourceHandle());
+    auto *dstResource = static_cast<ID3D12Resource *>(dstD3D12->getD3D12ResourceHandle());
+    if (!srcResource || !dstResource) return;
+
+    const auto &srcInfo = srcTexture->getInfo();
+    const auto &dstInfo = dstTexture->getInfo();
+
+    CC_LOG_INFO("[D3D12] blitTexture: src=%ux%u dst=%ux%u regions=%u filter=%d",
+                srcInfo.width, srcInfo.height, dstInfo.width, dstInfo.height,
+                static_cast<unsigned>(count), static_cast<int>(filter));
+
+    // Transition src to COPY_SOURCE, dst to COPY_DEST
+    ccstd::vector<D3D12_RESOURCE_BARRIER> preBarriers;
+
+    D3D12_RESOURCE_STATES srcPrevState = srcD3D12->getCurrentState();
+    if (srcPrevState != D3D12_RESOURCE_STATE_COPY_SOURCE) {
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        b.Transition.pResource = srcResource;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = srcPrevState;
+        b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        preBarriers.push_back(b);
+    }
+
+    D3D12_RESOURCE_STATES dstPrevState = dstD3D12->getCurrentState();
+    if (dstPrevState != D3D12_RESOURCE_STATE_COPY_DEST) {
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        b.Transition.pResource = dstResource;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = dstPrevState;
+        b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+        preBarriers.push_back(b);
+    }
+
+    if (!preBarriers.empty()) {
+        _impl->commandList->ResourceBarrier(static_cast<UINT>(preBarriers.size()), preBarriers.data());
+    }
+    srcD3D12->setCurrentState(D3D12_RESOURCE_STATE_COPY_SOURCE);
+    dstD3D12->setCurrentState(D3D12_RESOURCE_STATE_COPY_DEST);
+
+    for (uint32_t i = 0; i < count; ++i) {
+        const auto &region = regions[i];
+
+        // Check if scaling is needed
+        const bool needsScaling = (region.srcExtent.width != region.dstExtent.width ||
+                                    region.srcExtent.height != region.dstExtent.height ||
+                                    region.srcExtent.depth != region.dstExtent.depth);
+
+        if (needsScaling) {
+            // D3D12 has no native blit with scaling. For now, log a warning and
+            // copy the source box to the destination offset without scaling.
+            // TODO: Implement full-screen quad render pass for scaled blit.
+            CC_LOG_WARNING("[D3D12] blitTexture region %u requires scaling (%ux%ux%u -> %ux%ux%u), "
+                           "which is not yet supported. Copying source size.",
+                           i, region.srcExtent.width, region.srcExtent.height, region.srcExtent.depth,
+                           region.dstExtent.width, region.dstExtent.height, region.dstExtent.depth);
+        }
+
+        // Use CopyTextureRegion (same-size copy, no scaling)
+        const uint32_t srcSubresource = region.srcSubres.mipLevel +
+            region.srcSubres.baseArrayLayer * srcInfo.levelCount;
+        const uint32_t dstSubresource = region.dstSubres.mipLevel +
+            region.dstSubres.baseArrayLayer * dstInfo.levelCount;
+
+        D3D12_TEXTURE_COPY_LOCATION srcLoc{};
+        srcLoc.pResource = srcResource;
+        srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        srcLoc.SubresourceIndex = srcSubresource;
+
+        D3D12_TEXTURE_COPY_LOCATION dstLoc{};
+        dstLoc.pResource = dstResource;
+        dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dstLoc.SubresourceIndex = dstSubresource;
+
+        D3D12_BOX srcBox{};
+        srcBox.left = static_cast<UINT>(region.srcOffset.x);
+        srcBox.top = static_cast<UINT>(region.srcOffset.y);
+        srcBox.front = static_cast<UINT>(region.srcOffset.z);
+        srcBox.right = srcBox.left + region.srcExtent.width;
+        srcBox.bottom = srcBox.top + region.srcExtent.height;
+        srcBox.back = srcBox.front + std::max<uint32_t>(region.srcExtent.depth, 1);
+
+        _impl->commandList->CopyTextureRegion(
+            &dstLoc,
+            region.dstOffset.x, region.dstOffset.y, region.dstOffset.z,
+            &srcLoc,
+            &srcBox);
+    }
+
+    // Transition back to shader resource
+    ccstd::vector<D3D12_RESOURCE_BARRIER> postBarriers;
+
+    D3D12_RESOURCE_STATES srcPostState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    if (hasFlag(srcInfo.usage, TextureUsageBit::COLOR_ATTACHMENT)) {
+        srcPostState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    }
+    {
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        b.Transition.pResource = srcResource;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        b.Transition.StateAfter = srcPostState;
+        postBarriers.push_back(b);
+    }
+
+    D3D12_RESOURCE_STATES dstPostState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    if (hasFlag(dstInfo.usage, TextureUsageBit::COLOR_ATTACHMENT)) {
+        dstPostState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    }
+    {
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        b.Transition.pResource = dstResource;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        b.Transition.StateAfter = dstPostState;
+        postBarriers.push_back(b);
+    }
+
+    if (!postBarriers.empty()) {
+        _impl->commandList->ResourceBarrier(static_cast<UINT>(postBarriers.size()), postBarriers.data());
+    }
+    srcD3D12->setCurrentState(srcPostState);
+    dstD3D12->setCurrentState(dstPostState);
+
+    (void)filter; // Filter is not used for same-size copy (D3D12 CopyTextureRegion doesn't support filtering)
+#else
     (void)srcTexture;
     (void)dstTexture;
     (void)regions;
     (void)count;
     (void)filter;
+#endif
 }
 
 void CCD3D12CommandBuffer::copyTexture(Texture *srcTexture, Texture *dstTexture, const TextureCopy *regions, uint32_t count) {
-    // Texture-to-texture copy via CopyTextureRegion
+#if defined(_WIN32)
+    if (!_impl->commandList || !srcTexture || !dstTexture || !regions || count == 0) return;
+
+    auto *srcD3D12 = static_cast<CCD3D12Texture *>(srcTexture);
+    auto *dstD3D12 = static_cast<CCD3D12Texture *>(dstTexture);
+    auto *srcResource = static_cast<ID3D12Resource *>(srcD3D12->getD3D12ResourceHandle());
+    auto *dstResource = static_cast<ID3D12Resource *>(dstD3D12->getD3D12ResourceHandle());
+    if (!srcResource || !dstResource) {
+        CC_LOG_WARNING("[D3D12] copyTexture: null resource (src=%p dst=%p)", srcResource, dstResource);
+        return;
+    }
+
+    const auto &srcInfo = srcTexture->getInfo();
+    const auto &dstInfo = dstTexture->getInfo();
+
+    CC_LOG_INFO("[D3D12] copyTexture: src=%ux%u dst=%ux%u regions=%u",
+                srcInfo.width, srcInfo.height, dstInfo.width, dstInfo.height, count);
+
+    // Transition src to COPY_SOURCE, dst to COPY_DEST
+    ccstd::vector<D3D12_RESOURCE_BARRIER> preBarriers;
+
+    D3D12_RESOURCE_STATES srcPrevState = srcD3D12->getCurrentState();
+    if (srcPrevState != D3D12_RESOURCE_STATE_COPY_SOURCE) {
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        b.Transition.pResource = srcResource;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = srcPrevState;
+        b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        preBarriers.push_back(b);
+    }
+
+    D3D12_RESOURCE_STATES dstPrevState = dstD3D12->getCurrentState();
+    if (dstPrevState != D3D12_RESOURCE_STATE_COPY_DEST) {
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        b.Transition.pResource = dstResource;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = dstPrevState;
+        b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+        preBarriers.push_back(b);
+    }
+
+    if (!preBarriers.empty()) {
+        _impl->commandList->ResourceBarrier(static_cast<UINT>(preBarriers.size()), preBarriers.data());
+    }
+    srcD3D12->setCurrentState(D3D12_RESOURCE_STATE_COPY_SOURCE);
+    dstD3D12->setCurrentState(D3D12_RESOURCE_STATE_COPY_DEST);
+
+    // Perform texture-to-texture copy for each region
+    for (uint32_t i = 0; i < count; ++i) {
+        const auto &region = regions[i];
+
+        // Calculate D3D12 subresource indices:
+        // subresource = mipLevel + baseArrayLayer * mipLevelCount
+        const uint32_t srcSubresource = region.srcSubres.mipLevel +
+            region.srcSubres.baseArrayLayer * srcInfo.levelCount;
+        const uint32_t dstSubresource = region.dstSubres.mipLevel +
+            region.dstSubres.baseArrayLayer * dstInfo.levelCount;
+
+        // Build source copy location (subresource index)
+        D3D12_TEXTURE_COPY_LOCATION srcLoc{};
+        srcLoc.pResource = srcResource;
+        srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        srcLoc.SubresourceIndex = srcSubresource;
+
+        // Build destination copy location (subresource index)
+        D3D12_TEXTURE_COPY_LOCATION dstLoc{};
+        dstLoc.pResource = dstResource;
+        dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dstLoc.SubresourceIndex = dstSubresource;
+
+        // Build source box (optional — if null, copies entire subresource)
+        D3D12_BOX srcBox{};
+        srcBox.left = static_cast<UINT>(region.srcOffset.x);
+        srcBox.top = static_cast<UINT>(region.srcOffset.y);
+        srcBox.front = static_cast<UINT>(region.srcOffset.z);
+        srcBox.right = srcBox.left + region.extent.width;
+        srcBox.bottom = srcBox.top + region.extent.height;
+        srcBox.back = srcBox.front + std::max<uint32_t>(region.extent.depth, 1);
+
+        _impl->commandList->CopyTextureRegion(
+            &dstLoc,
+            region.dstOffset.x, region.dstOffset.y, region.dstOffset.z,
+            &srcLoc,
+            &srcBox);
+    }
+
+    // Transition src and dst back to reasonable states after copy
+    ccstd::vector<D3D12_RESOURCE_BARRIER> postBarriers;
+
+    // Src back to shader resource
+    D3D12_RESOURCE_STATES srcPostState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    if (hasFlag(srcInfo.usage, TextureUsageBit::COLOR_ATTACHMENT)) {
+        srcPostState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    } else if (hasFlag(srcInfo.usage, TextureUsageBit::DEPTH_STENCIL_ATTACHMENT)) {
+        srcPostState = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+    }
+    {
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        b.Transition.pResource = srcResource;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        b.Transition.StateAfter = srcPostState;
+        postBarriers.push_back(b);
+    }
+
+    // Dst back to shader resource (or render target)
+    D3D12_RESOURCE_STATES dstPostState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    if (hasFlag(dstInfo.usage, TextureUsageBit::COLOR_ATTACHMENT)) {
+        dstPostState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    } else if (hasFlag(dstInfo.usage, TextureUsageBit::DEPTH_STENCIL_ATTACHMENT)) {
+        dstPostState = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+    }
+    {
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        b.Transition.pResource = dstResource;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        b.Transition.StateAfter = dstPostState;
+        postBarriers.push_back(b);
+    }
+
+    if (!postBarriers.empty()) {
+        _impl->commandList->ResourceBarrier(static_cast<UINT>(postBarriers.size()), postBarriers.data());
+    }
+    srcD3D12->setCurrentState(srcPostState);
+    dstD3D12->setCurrentState(dstPostState);
+#else
     (void)srcTexture;
     (void)dstTexture;
     (void)regions;
     (void)count;
+#endif
 }
 
 void CCD3D12CommandBuffer::resolveTexture(Texture *srcTexture, Texture *dstTexture, const TextureCopy *regions, uint32_t count) {
-    // Resolve multisampled texture
+#if defined(_WIN32)
+    if (!_impl->commandList || !srcTexture || !dstTexture || !regions || count == 0) return;
+
+    auto *srcD3D12 = static_cast<CCD3D12Texture *>(srcTexture);
+    auto *dstD3D12 = static_cast<CCD3D12Texture *>(dstTexture);
+    auto *srcResource = static_cast<ID3D12Resource *>(srcD3D12->getD3D12ResourceHandle());
+    auto *dstResource = static_cast<ID3D12Resource *>(dstD3D12->getD3D12ResourceHandle());
+    if (!srcResource || !dstResource) return;
+
+    const auto &srcInfo = srcTexture->getInfo();
+    const auto &dstInfo = dstTexture->getInfo();
+
+    // Verify src is MSAA and dst is non-MSAA
+    const bool srcIsMSAA = (srcInfo.samples != SampleCount::X1);
+    if (!srcIsMSAA) {
+        CC_LOG_WARNING("[D3D12] resolveTexture: source is not MSAA (samples=%u), falling back to copyTexture",
+                       srcInfo.samples);
+        // Fall back to regular copy for non-MSAA sources
+        copyTexture(srcTexture, dstTexture, regions, count);
+        return;
+    }
+
+    CC_LOG_INFO("[D3D12] resolveTexture: src=%ux%u(msaa=%u) dst=%ux%u regions=%u",
+                srcInfo.width, srcInfo.height, srcInfo.samples,
+                dstInfo.width, dstInfo.height, count);
+
+    // Transition src to RESOLVE_SOURCE, dst to RESOLVE_DEST
+    ccstd::vector<D3D12_RESOURCE_BARRIER> preBarriers;
+
+    D3D12_RESOURCE_STATES srcPrevState = srcD3D12->getCurrentState();
+    if (srcPrevState != D3D12_RESOURCE_STATE_RESOLVE_SOURCE) {
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        b.Transition.pResource = srcResource;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = srcPrevState;
+        b.Transition.StateAfter = D3D12_RESOURCE_STATE_RESOLVE_SOURCE;
+        preBarriers.push_back(b);
+    }
+
+    D3D12_RESOURCE_STATES dstPrevState = dstD3D12->getCurrentState();
+    if (dstPrevState != D3D12_RESOURCE_STATE_RESOLVE_DEST) {
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        b.Transition.pResource = dstResource;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = dstPrevState;
+        b.Transition.StateAfter = D3D12_RESOURCE_STATE_RESOLVE_DEST;
+        preBarriers.push_back(b);
+    }
+
+    if (!preBarriers.empty()) {
+        _impl->commandList->ResourceBarrier(static_cast<UINT>(preBarriers.size()), preBarriers.data());
+    }
+    srcD3D12->setCurrentState(D3D12_RESOURCE_STATE_RESOLVE_SOURCE);
+    dstD3D12->setCurrentState(D3D12_RESOURCE_STATE_RESOLVE_DEST);
+
+    // ResolveSubresource operates on a single subresource pair at a time.
+    // For each region, resolve the corresponding mip+layer combination.
+    for (uint32_t i = 0; i < count; ++i) {
+        const auto &region = regions[i];
+        const uint32_t srcSubresource = region.srcSubres.mipLevel +
+            region.srcSubres.baseArrayLayer * srcInfo.levelCount;
+        const uint32_t dstSubresource = region.dstSubres.mipLevel +
+            region.dstSubres.baseArrayLayer * dstInfo.levelCount;
+
+        // ResolveSubresource requires a DXGI format when the source and destination
+        // formats differ (format conversion resolve). For same-format resolves, pass
+        // DXGI_FORMAT_UNKNOWN which lets the runtime use the source format.
+        _impl->commandList->ResolveSubresource(
+            dstResource, dstSubresource,
+            srcResource, srcSubresource,
+            DXGI_FORMAT_UNKNOWN);
+    }
+
+    // Transition back to shader resource after resolve
+    ccstd::vector<D3D12_RESOURCE_BARRIER> postBarriers;
+
+    {
+        D3D12_RESOURCE_STATES srcPostState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        if (hasFlag(srcInfo.usage, TextureUsageBit::COLOR_ATTACHMENT)) {
+            srcPostState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        }
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        b.Transition.pResource = srcResource;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = D3D12_RESOURCE_STATE_RESOLVE_SOURCE;
+        b.Transition.StateAfter = srcPostState;
+        postBarriers.push_back(b);
+        srcD3D12->setCurrentState(srcPostState);
+    }
+    {
+        D3D12_RESOURCE_STATES dstPostState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        if (hasFlag(dstInfo.usage, TextureUsageBit::COLOR_ATTACHMENT)) {
+            dstPostState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        }
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        b.Transition.pResource = dstResource;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = D3D12_RESOURCE_STATE_RESOLVE_DEST;
+        b.Transition.StateAfter = dstPostState;
+        postBarriers.push_back(b);
+        dstD3D12->setCurrentState(dstPostState);
+    }
+
+    if (!postBarriers.empty()) {
+        _impl->commandList->ResourceBarrier(static_cast<UINT>(postBarriers.size()), postBarriers.data());
+    }
+#else
     (void)srcTexture;
     (void)dstTexture;
     (void)regions;
     (void)count;
+#endif
 }
 
 void CCD3D12CommandBuffer::dispatch(const DispatchInfo &info) {
@@ -1099,7 +1502,21 @@ void CCD3D12CommandBuffer::dispatch(const DispatchInfo &info) {
     if (!_impl->commandList) return;
     // Flush any pending descriptor set bindings before dispatching
     flushDescriptorSets();
-    _impl->commandList->Dispatch(info.groupCountX, info.groupCountY, info.groupCountZ);
+
+    if (info.indirectBuffer) {
+        // Indirect dispatch — arguments come from a GPU buffer
+        auto *d3d12Buf = static_cast<CCD3D12Buffer *>(info.indirectBuffer);
+        ID3D12Resource *resource = static_cast<ID3D12Resource *>(d3d12Buf->getD3D12ResourceHandle());
+        if (resource) {
+            auto *sig = static_cast<ID3D12CommandSignature *>(
+                CCD3D12Device::getInstance()->getDispatchIndirectSignature());
+            if (sig) {
+                _impl->commandList->ExecuteIndirect(sig, 1, resource, info.indirectOffset, nullptr, 0);
+            }
+        }
+    } else {
+        _impl->commandList->Dispatch(info.groupCountX, info.groupCountY, info.groupCountZ);
+    }
 #else
     (void)info;
 #endif
@@ -1181,8 +1598,10 @@ void CCD3D12CommandBuffer::pipelineBarrier(const GeneralBarrier *barrier, const 
         auto *resource = static_cast<ID3D12Resource *>(d3d12Texture->getD3D12ResourceHandle());
         if (!resource) continue;
 
-        // Skip swapchain textures — they are handled by beginRenderPass/endRenderPass
-        if (d3d12Texture->isSwapchainColorTexture()) continue;
+        // Skip swapchain textures only during a render pass — their barriers are
+        // managed by beginRenderPass/endRenderPass. Outside a render pass, allow
+        // barriers for swapchain textures (e.g., for copy operations).
+        if (d3d12Texture->isSwapchainColorTexture() && _impl->inRenderPass) continue;
 
         D3D12_RESOURCE_STATES prevState = accessFlagsToD3D12State(texBarrierInfo.prevAccesses);
         D3D12_RESOURCE_STATES nextState = accessFlagsToD3D12State(texBarrierInfo.nextAccesses);
@@ -1251,7 +1670,7 @@ void CCD3D12CommandBuffer::beginQuery(QueryPool *queryPool, uint32_t id) {
     if (!heap) return;
     D3D12_QUERY_TYPE queryType = (d3d12Pool->getType() == QueryType::OCCLUSION)
                                      ? D3D12_QUERY_TYPE_OCCLUSION
-                                     : D3D12_QUERY_TYPE_OCCLUSION;
+                                     : D3D12_QUERY_TYPE_TIMESTAMP;
     _impl->commandList->BeginQuery(heap, queryType, id);
 #else
     (void)queryPool;
@@ -1267,7 +1686,7 @@ void CCD3D12CommandBuffer::endQuery(QueryPool *queryPool, uint32_t id) {
     if (!heap) return;
     D3D12_QUERY_TYPE queryType = (d3d12Pool->getType() == QueryType::OCCLUSION)
                                      ? D3D12_QUERY_TYPE_OCCLUSION
-                                     : D3D12_QUERY_TYPE_OCCLUSION;
+                                     : D3D12_QUERY_TYPE_TIMESTAMP;
     _impl->commandList->EndQuery(heap, queryType, id);
 #else
     (void)queryPool;
@@ -1287,6 +1706,16 @@ void CCD3D12CommandBuffer::resetQueryPool(QueryPool *queryPool) {
     (void)heap;
 #else
     (void)queryPool;
+#endif
+}
+
+void CCD3D12CommandBuffer::customCommand(CustomCommand &&cmd) {
+#if defined(_WIN32)
+    if (cmd && _impl && _impl->commandList) {
+        cmd(static_cast<void *>(_impl->commandList.Get()));
+    }
+#else
+    (void)cmd;
 #endif
 }
 

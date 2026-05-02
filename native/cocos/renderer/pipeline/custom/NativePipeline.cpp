@@ -1508,10 +1508,21 @@ bool NativePipeline::destroy() noexcept {
 }
 
 void NativePipeline::render(const ccstd::vector<scene::Camera *> &cameras) {
-    std::ignore = cameras;
+    static uint32_t s_frameCount = 0;
+    ++s_frameCount;
+
     const auto *sceneData = pipelineSceneData.get();
     auto *commandBuffer = device->getCommandBuffer();
+
+    // Log render graph vertex/edge count before build
+    const auto vertCountBefore = num_vertices(renderGraph);
+    const auto edgeCountBefore = num_edges(renderGraph);
+
     buildRenderPipeline();
+
+    const auto vertCountAfter = num_vertices(renderGraph);
+    const auto edgeCountAfter = num_edges(renderGraph);
+
     executeRenderGraph(renderGraph);
 }
 

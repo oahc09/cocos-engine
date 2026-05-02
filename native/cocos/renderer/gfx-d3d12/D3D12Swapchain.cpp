@@ -28,24 +28,6 @@
 #include "base/Log.h"
 #include "base/Macros.h"
 
-// File diagnostic for swapchain
-#include <cstdio>
-#include <cstdarg>
-namespace {
-void swDiagLog(const char *fmt, ...) {
-    static FILE *s_file = nullptr;
-    if (!s_file) {
-        s_file = fopen("C:\\temp\\d3d12-render-diag.log", "a");
-        if (!s_file) return;
-    }
-    va_list args;
-    va_start(args, fmt);
-    vfprintf(s_file, fmt, args);
-    fflush(s_file);
-    va_end(args);
-}
-} // anonymous namespace
-
 #if defined(_WIN32)
     #ifndef NOMINMAX
         #define NOMINMAX
@@ -83,25 +65,9 @@ bool CCD3D12Swapchain::isReady() const {
 }
 
 void CCD3D12Swapchain::doInit(const SwapchainInfo &info) {
-    swDiagLog("[SWAPCHAIN] doInit called: %ux%u, windowHandle=%p\n", info.width, info.height, _windowHandle);
     if (!_impl) {
         _impl = std::make_unique<Impl>();
     }
-
-#if defined(_WIN32)
-    // DIAG: Check device health BEFORE swapchain init
-    {
-        auto *d3d12Dev = CCD3D12Device::getInstance();
-        if (d3d12Dev) {
-            auto *nativeDev = static_cast<ID3D12Device *>(d3d12Dev->getD3D12DeviceHandle());
-            if (nativeDev) {
-                HRESULT drr = nativeDev->GetDeviceRemovedReason();
-                CC_LOG_INFO("[DIAG] Swapchain::doInit ENTRY: DeviceRemovedReason=0x%08x (%s)",
-                             static_cast<unsigned>(drr), SUCCEEDED(drr) ? "OK" : "HUNG!");
-            }
-        }
-    }
-#endif
 
 #if defined(_WIN32)
     auto hwnd = reinterpret_cast<HWND>(_windowHandle);
@@ -126,31 +92,10 @@ void CCD3D12Swapchain::doInit(const SwapchainInfo &info) {
     CC_LOG_INFO("D3D12 swapchain initialized: %ux%u.", info.width, info.height);
 
 #if defined(_WIN32)
-    // DIAG: Check device health BEFORE createOrResizeSwapchain
-    {
-        auto *nativeDev = static_cast<ID3D12Device *>(CCD3D12Device::getInstance()->getD3D12DeviceHandle());
-        if (nativeDev) {
-            HRESULT drr = nativeDev->GetDeviceRemovedReason();
-            CC_LOG_INFO("[DIAG] Swapchain BEFORE createOrResizeSwapchain: DeviceRemovedReason=0x%08x (%s)",
-                         static_cast<unsigned>(drr), SUCCEEDED(drr) ? "OK" : "HUNG!");
-        }
-    }
     _impl->ready = createOrResizeSwapchain(info.width, info.height);
-    swDiagLog("[SWAPCHAIN] createOrResizeSwapchain result: ready=%d\n", _impl->ready ? 1 : 0);
     if (!_impl->ready) {
         CC_LOG_ERROR("D3D12 swapchain creation failed.");
-        swDiagLog("[SWAPCHAIN] ERROR: swapchain creation FAILED!\n");
-        // DIAG: Dump reason after failure
-        {
-            auto *nativeDev = static_cast<ID3D12Device *>(CCD3D12Device::getInstance()->getD3D12DeviceHandle());
-            if (nativeDev) {
-                HRESULT drr = nativeDev->GetDeviceRemovedReason();
-                CC_LOG_INFO("[DIAG] Swapchain AFTER failed createOrResizeSwapchain: DeviceRemovedReason=0x%08x",
-                             static_cast<unsigned>(drr));
-            }
-        }
     }
-    swDiagLog("[SWAPCHAIN] doInit COMPLETE!\n");
 #endif
 }
 
@@ -224,10 +169,12 @@ bool CCD3D12Swapchain::present() {
         return false;
     }
 
-    // NOTE: syncInterval must be 0 (immediate) because Queue::submit is already
-    // synchronous (fence wait). Using syncInterval=1 with FLIP_DISCARD + sync submit
-    // causes the window to display black on some drivers (AMD Radeon).
-    const UINT syncInterval = 0;
+    // Test both syncInterval values:
+    // - syncInterval=1: VSync, guaranteed to display, but may black-screen with sync submit
+    // - syncInterval=0: Immediate, no VSync, but content may not display on some drivers
+    // Try syncInterval=1 first — if the rendering pipeline is correct (which pixel readback
+    // confirms), VSync present should show the content.
+    const UINT syncInterval = 1;
     HRESULT hr = _impl->swapChain->Present(syncInterval, 0);
     if (FAILED(hr)) {
         CC_LOG_ERROR("IDXGISwapChain::Present failed. HRESULT=0x%08x", static_cast<unsigned>(hr));

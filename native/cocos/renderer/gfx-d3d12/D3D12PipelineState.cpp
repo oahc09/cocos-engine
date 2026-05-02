@@ -31,24 +31,6 @@
 #include "base/Log.h"
 #include "gfx-base/GFXDef.h"
 
-// File diagnostic
-#include <cstdio>
-#include <cstdarg>
-namespace {
-void psoDiagLog(const char *fmt, ...) {
-    static FILE *s_file = nullptr;
-    if (!s_file) {
-        s_file = fopen("C:\\temp\\d3d12-render-diag.log", "a");
-        if (!s_file) return;
-    }
-    va_list args;
-    va_start(args, fmt);
-    vfprintf(s_file, fmt, args);
-    fflush(s_file);
-    va_end(args);
-}
-} // anonymous namespace
-
 #if defined(_WIN32)
     #ifndef NOMINMAX
         #define NOMINMAX
@@ -64,10 +46,6 @@ namespace gfx {
 
 namespace {
 #if defined(_WIN32)
-
-// Temporary triangle fallback is kept only as an opt-in diagnostic tool.
-// Real D3D12 material/pipeline validation should run on compiled engine shaders.
-constexpr bool CC_D3D12_ENABLE_DIAGNOSTIC_TRIANGLE_FALLBACK = false;
 
 ID3D12RootSignature *getOrCreateEmptyRootSignature(ID3D12Device *device) {
     static Microsoft::WRL::ComPtr<ID3D12RootSignature> s_emptyRootSig;
@@ -284,7 +262,11 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
     if (!_impl) return;
 
 #if defined(_WIN32)
+    _impl->pipelineState.Reset();
+    _impl->rootSignature = nullptr;
+    _impl->usesPipelineLayoutRootSignature = false;
     _impl->diagnosticFallback = false;
+
     auto *device = CCD3D12Device::getInstance();
     auto *d3dDevice = static_cast<ID3D12Device *>(device ? device->getD3D12DeviceHandle() : nullptr);
     if (!d3dDevice) {
@@ -306,54 +288,9 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
     auto psBlob = d3d12Shader->getFragmentBytecode();
     auto gsBlob = d3d12Shader->getGeometryBytecode();
 
-    // If no VS bytecode, try runtime compilation of a built-in triangle shader
-    Microsoft::WRL::ComPtr<ID3DBlob> compiledVS;
-    Microsoft::WRL::ComPtr<ID3DBlob> compiledPS;
-
-    if ((!vsBlob.data || vsBlob.size == 0) && CC_D3D12_ENABLE_DIAGNOSTIC_TRIANGLE_FALLBACK) {
-        psoDiagLog("[PSO] No VS bytecode from shader, using built-in fallback.\n");
-        // Built-in HLSL triangle shader (fallback when GLSL->DXIL not available)
-        // Uses SV_VertexID so no vertex buffer input is required.
-        // vid % 3 ensures the triangle repeats safely for any vertex count.
-        static const char *s_builtinHLSL =
-            "float4 VSTriangle(uint vid : SV_VertexID) : SV_POSITION {\n"
-            "    float2 positions[3] = { float2(0.0, 0.5), float2(0.5, -0.5), float2(-0.5, -0.5) };\n"
-            "    return float4(positions[vid % 3], 0.0, 1.0);\n"
-            "}\n"
-            "float4 PSTriangle(float4 pos : SV_POSITION) : SV_TARGET {\n"
-            "    return float4(1.0, 0.5, 0.2, 1.0);\n" // orange
-            "}\n";
-
-        Microsoft::WRL::ComPtr<ID3DBlob> errBlob;
-        HRESULT vsHR = D3DCompile(s_builtinHLSL, strlen(s_builtinHLSL),
-                                   "builtin_triangle", nullptr, nullptr,
-                                   "VSTriangle", "vs_5_0", 0, 0, &compiledVS, &errBlob);
-        if (FAILED(vsHR)) {
-            CC_LOG_ERROR("D3D12PipelineState: built-in VS compile failed: %s",
-                         errBlob ? static_cast<const char *>(errBlob->GetBufferPointer()) : "unknown");
-            return;
-        }
-
-        HRESULT psHR = D3DCompile(s_builtinHLSL, strlen(s_builtinHLSL),
-                                   "builtin_triangle", nullptr, nullptr,
-                                   "PSTriangle", "ps_5_0", 0, 0, &compiledPS, &errBlob);
-        if (FAILED(psHR)) {
-            CC_LOG_ERROR("D3D12PipelineState: built-in PS compile failed: %s",
-                         errBlob ? static_cast<const char *>(errBlob->GetBufferPointer()) : "unknown");
-            return;
-        }
-
-        vsBlob.data = compiledVS->GetBufferPointer();
-        vsBlob.size = compiledVS->GetBufferSize();
-        psBlob.data = compiledPS->GetBufferPointer();
-        psBlob.size = compiledPS->GetBufferSize();
-        _impl->diagnosticFallback = true;
-        psoDiagLog("[PSO] Using built-in HLSL fallback shader (VS=%zu bytes, PS=%zu bytes)\n",
-                    vsBlob.size, psBlob.size);
-        CC_LOG_INFO("D3D12PipelineState: using built-in triangle shader (runtime compiled).");
-    } else {
-        psoDiagLog("[PSO] Using compiled shader bytecode (VS=%zu bytes, PS=%zu bytes, GS=%zu bytes).\n",
-                    vsBlob.size, psBlob.size, gsBlob.size);
+    if (!vsBlob.data || vsBlob.size == 0) {
+        CC_LOG_ERROR("D3D12PipelineState: vertex shader bytecode is empty.");
+        return;
     }
 
     // Build D3D12_GRAPHICS_PIPELINE_STATE_DESC
@@ -391,6 +328,27 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
     const auto &blend = _blendState;
     psoDesc.BlendState.AlphaToCoverageEnable = blend.isA2C ? TRUE : FALSE;
     psoDesc.BlendState.IndependentBlendEnable = blend.isIndepend ? TRUE : FALSE;
+
+    // Diagnostic: log blend state for this PSO
+    {
+        const char *shaderName = _shader ? _shader->getName().c_str() : "<null>";
+        bool anyBlendEnabled = false;
+        for (size_t i = 0; i < blend.targets.size(); ++i) {
+            if (blend.targets[i].blend) { anyBlendEnabled = true; break; }
+        }
+        CC_LOG_INFO("[D3D12-PSO] BlendState: shader='%s' isA2C=%u isIndepend=%u targets=%zu anyBlend=%s",
+                     shaderName, blend.isA2C, blend.isIndepend,
+                     static_cast<unsigned>(blend.targets.size()),
+                     anyBlendEnabled ? "YES" : "NO");
+        for (size_t i = 0; i < blend.targets.size() && i < 4; ++i) {
+            const auto &t = blend.targets[i];
+            CC_LOG_INFO("[D3D12-PSO]   target[%zu]: blend=%u src=%u dst=%u op=%u srcA=%u dstA=%u opA=%u mask=0x%x",
+                         i, t.blend, static_cast<unsigned>(t.blendSrc), static_cast<unsigned>(t.blendDst),
+                         static_cast<unsigned>(t.blendEq), static_cast<unsigned>(t.blendSrcAlpha),
+                         static_cast<unsigned>(t.blendDstAlpha), static_cast<unsigned>(t.blendAlphaEq),
+                         static_cast<unsigned>(t.blendColorMask));
+        }
+    }
 
     UINT numRenderTargets = 0;
     for (UINT i = 0; i < D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i) {
@@ -512,149 +470,13 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
     psoDesc.CachedPSO = {};
     psoDesc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
 
-    if (_impl->diagnosticFallback) {
-        psoDesc.InputLayout.pInputElementDescs = nullptr;
-        psoDesc.InputLayout.NumElements = 0;
-        psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-        psoDesc.DepthStencilState.DepthEnable = FALSE;
-        psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
-        psoDesc.DepthStencilState.StencilEnable = FALSE;
-        psoDesc.BlendState.AlphaToCoverageEnable = FALSE;
-        psoDesc.BlendState.IndependentBlendEnable = FALSE;
-        for (UINT rtIndex = 0; rtIndex < D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT; ++rtIndex) {
-            auto &rtBlend = psoDesc.BlendState.RenderTarget[rtIndex];
-            rtBlend.BlendEnable = FALSE;
-            rtBlend.LogicOpEnable = FALSE;
-            rtBlend.SrcBlend = D3D12_BLEND_ONE;
-            rtBlend.DestBlend = D3D12_BLEND_ZERO;
-            rtBlend.BlendOp = D3D12_BLEND_OP_ADD;
-            rtBlend.SrcBlendAlpha = D3D12_BLEND_ONE;
-            rtBlend.DestBlendAlpha = D3D12_BLEND_ZERO;
-            rtBlend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
-            rtBlend.LogicOp = D3D12_LOGIC_OP_NOOP;
-            rtBlend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-        }
-    }
-
     if (!psoDesc.pRootSignature) {
         CC_LOG_WARNING("D3D12PipelineState: no root signature available. Skipping PSO creation.");
         return;
     }
 
-    // Detailed PSO diagnostics before creation
-    psoDiagLog("[PSO] Creating PSO: VS=%zuB PS=%zuB InputElems=%u RTCount=%u RootSig=%p\n",
-               psoDesc.VS.BytecodeLength, psoDesc.PS.BytecodeLength,
-               psoDesc.InputLayout.NumElements, psoDesc.NumRenderTargets,
-               psoDesc.pRootSignature);
-
-    // Dump InputLayout elements
-    for (UINT i = 0; i < psoDesc.InputLayout.NumElements; ++i) {
-        const auto &elem = psoDesc.InputLayout.pInputElementDescs[i];
-        psoDiagLog("[PSO]   InputElem[%u]: Semantic=%s%u Format=%u Slot=%u Offset=%u Class=%u StepRate=%u\n",
-                   i, elem.SemanticName ? elem.SemanticName : "NULL",
-                   elem.SemanticIndex, static_cast<unsigned>(elem.Format),
-                   elem.InputSlot, elem.AlignedByteOffset,
-                   static_cast<unsigned>(elem.InputSlotClass), elem.InstanceDataStepRate);
-    }
-
-    // Dump render target formats
-    for (UINT i = 0; i < psoDesc.NumRenderTargets; ++i) {
-        psoDiagLog("[PSO]   RT[%u] format=%u\n", i, static_cast<unsigned>(psoDesc.RTVFormats[i]));
-    }
-    psoDiagLog("[PSO]   DSV format=%u\n", static_cast<unsigned>(psoDesc.DSVFormat));
-    psoDiagLog("[PSO]   Topology=%u SampleCount=%u SampleMask=0x%x\n",
-               static_cast<unsigned>(psoDesc.PrimitiveTopologyType),
-               psoDesc.SampleDesc.Count, psoDesc.SampleMask);
-
-    // Dump pipeline layout info for diagnostics
-    if (_pipelineLayout) {
-        auto *d3d12Layout = static_cast<CCD3D12PipelineLayout *>(_pipelineLayout);
-        psoDiagLog("[PSO] PipelineLayout: cbvSrvUavRootIdx[0]=%d cbvSrvUavRootIdx[1]=%d cbvSrvUavRootIdx[2]=%d\n",
-                   d3d12Layout->getCbvSrvUavRootParameterIndex(0),
-                   d3d12Layout->getCbvSrvUavRootParameterIndex(1),
-                   d3d12Layout->getCbvSrvUavRootParameterIndex(2));
-        psoDiagLog("[PSO] PipelineLayout: samplerRootIdx[0]=%d samplerRootIdx[1]=%d samplerRootIdx[2]=%d\n",
-                   d3d12Layout->getSamplerRootParameterIndex(0),
-                   d3d12Layout->getSamplerRootParameterIndex(1),
-                   d3d12Layout->getSamplerRootParameterIndex(2));
-
-        // Dump DescriptorSetLayout bindings to understand what Root Signature covers
-        psoDiagLog("[PSO] PipelineLayout has %zu set layouts:\n",
-                   _pipelineLayout->getSetLayouts().size());
-        uint32_t si = 0;
-        for (auto *setLayout : _pipelineLayout->getSetLayouts()) {
-            if (!setLayout) {
-                psoDiagLog("[PSO]   set[%u]: null layout\n", si);
-                ++si;
-                continue;
-            }
-            auto *d3d12SetLayout = static_cast<const CCD3D12DescriptorSetLayout *>(setLayout);
-            const auto &bindings = d3d12SetLayout->getBindings();
-            psoDiagLog("[PSO]   set[%u]: %zu bindings\n", si, bindings.size());
-            for (size_t bi = 0; bi < bindings.size(); ++bi) {
-                const auto &b = bindings[bi];
-                psoDiagLog("[PSO]     binding[%zu]: type=%u binding=%u count=%u stages=0x%x\n",
-                           bi, static_cast<unsigned>(b.descriptorType),
-                           static_cast<unsigned>(b.binding),
-                           static_cast<unsigned>(b.count),
-                           static_cast<unsigned>(b.stageFlags));
-            }
-            ++si;
-        }
-    }
-
     HRESULT hr = d3dDevice->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&_impl->pipelineState));
     if (FAILED(hr)) {
-        psoDiagLog("[PSO] CreateGraphicsPipelineState FAILED hr=0x%08x\n", static_cast<unsigned>(hr));
-
-        // Try to get D3D12 debug layer message — filter for relevant ones
-        Microsoft::WRL::ComPtr<ID3D12InfoQueue> infoQueue;
-        if (SUCCEEDED(d3dDevice->QueryInterface(IID_PPV_ARGS(&infoQueue)))) {
-            UINT64 numStored = infoQueue->GetNumStoredMessages();
-            psoDiagLog("[PSO] D3D12 debug messages: %llu stored\n", numStored);
-            // Filter: only output messages containing keywords related to PSO failure
-            UINT64 outputCount = 0;
-            for (UINT64 i = 0; i < numStored && outputCount < 20; ++i) {
-                SIZE_T msgLen = 0;
-                infoQueue->GetMessage(i, nullptr, &msgLen);
-                if (msgLen > 0) {
-                    D3D12_MESSAGE *msg = static_cast<D3D12_MESSAGE *>(malloc(msgLen));
-                    if (msg && SUCCEEDED(infoQueue->GetMessage(i, msg, &msgLen))) {
-                        // Check if message contains relevant keywords
-                        bool isRelevant = false;
-                        const char *desc = msg->pDescription;
-                        size_t descLen = msg->DescriptionByteLength;
-                        // Keywords that indicate PSO/root signature issues
-                        const char *keywords[] = {"root", "Root", "signature", "Signature",
-                            "binding", "Binding", "register", "Register", "space",
-                            "descriptor", "Descriptor", "range", "Range",
-                            "mismatch", "unbound", "not declared", "not found",
-                            "position", "Position", "SV_Position", "rasteriz",
-                            "E_INVALIDARG", "0x80070057", "CREATE"};
-                        for (auto kw : keywords) {
-                            if (desc && descLen > 0) {
-                                // Simple substring search
-                                size_t kwLen = strlen(kw);
-                                for (size_t j = 0; j + kwLen <= descLen; ++j) {
-                                    if (memcmp(desc + j, kw, kwLen) == 0) {
-                                        isRelevant = true;
-                                        break;
-                                    }
-                                }
-                            }
-                            if (isRelevant) break;
-                        }
-                        if (isRelevant) {
-                            psoDiagLog("[PSO] D3D12 msg[%llu]: %.*s\n", i, static_cast<unsigned>(descLen), desc);
-                            ++outputCount;
-                        }
-                    }
-                    free(msg);
-                }
-            }
-            infoQueue->ClearStoredMessages();
-        }
-
         CC_LOG_ERROR("D3D12PipelineState: CreateGraphicsPipelineState failed. HRESULT=0x%08x. "
                      "Retrying with cleared InputLayout.",
                      static_cast<unsigned>(hr));
@@ -668,87 +490,33 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
             psoDesc.InputLayout.pInputElementDescs = nullptr;
             psoDesc.InputLayout.NumElements = 0;
 
-            psoDiagLog("[PSO] Retrying with cleared InputLayout (real shader preserved)...\n");
             hr = d3dDevice->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&_impl->pipelineState));
             if (SUCCEEDED(hr)) {
                 _impl->rootSignature = psoDesc.pRootSignature;
                 _impl->diagnosticFallback = true;
-                psoDiagLog("[PSO] Retry PSO created successfully (no InputLayout, real shader).\n");
                 CC_LOG_INFO("D3D12PipelineState: retry PSO created successfully with cleared InputLayout.");
             } else {
-                psoDiagLog("[PSO] Retry with cleared InputLayout ALSO FAILED hr=0x%08x\n", static_cast<unsigned>(hr));
-
                 // Try with empty root signature to isolate: is the issue RootSig or shader/PSO-desc?
                 auto *emptyRootSig = getOrCreateEmptyRootSignature(d3dDevice);
                 if (emptyRootSig) {
                     psoDesc.pRootSignature = emptyRootSig;
-                    psoDiagLog("[PSO] Retrying with EMPTY root signature (cleared InputLayout)...\n");
                     hr = d3dDevice->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&_impl->pipelineState));
                     if (SUCCEEDED(hr)) {
-                        psoDiagLog("[PSO] EMPTY root signature WORKS! Issue is with PipelineLayout's Root Signature.\n");
                         _impl->rootSignature = psoDesc.pRootSignature;
+                        _impl->usesPipelineLayoutRootSignature = false;
                         _impl->diagnosticFallback = true;
                         CC_LOG_INFO("D3D12PipelineState: PSO created with empty root signature (root sig mismatch).");
-                    } else {
-                        psoDiagLog("[PSO] EMPTY root signature ALSO FAILED hr=0x%08x — shader/PSO desc issue.\n", static_cast<unsigned>(hr));
                     }
                 }
 
-                if (FAILED(hr) && CC_D3D12_ENABLE_DIAGNOSTIC_TRIANGLE_FALLBACK) {
-                    // Last resort: fallback triangle shader with empty root signature
-                    if (!compiledVS || !compiledPS) {
-                        Microsoft::WRL::ComPtr<ID3DBlob> fbErr;
-                        static const char *s_fallbackHLSL =
-                            "float4 VSTriangle(uint vid : SV_VertexID) : SV_POSITION {\n"
-                            "    float2 pos[3] = { float2(0.0, 0.5), float2(0.5, -0.5), float2(-0.5, -0.5) };\n"
-                            "    return float4(pos[vid % 3], 0.0, 1.0);\n"
-                            "}\n"
-                            "float4 PSTriangle(float4 p : SV_POSITION) : SV_TARGET {\n"
-                            "    return float4(1.0, 0.5, 0.2, 1.0);\n"
-                            "}\n";
-                        HRESULT vsH = D3DCompile(s_fallbackHLSL, strlen(s_fallbackHLSL),
-                                                  "fallback_triangle", nullptr, nullptr,
-                                                  "VSTriangle", "vs_5_1", 0, 0, &compiledVS, &fbErr);
-                        HRESULT psH = D3DCompile(s_fallbackHLSL, strlen(s_fallbackHLSL),
-                                                  "fallback_triangle", nullptr, nullptr,
-                                                  "PSTriangle", "ps_5_1", 0, 0, &compiledPS, &fbErr);
-                        if (FAILED(vsH) || FAILED(psH)) {
-                            CC_LOG_ERROR("D3D12PipelineState: fallback shader compile failed.");
-                        }
-                    }
-
-                    if (compiledVS && compiledPS) {
-                        psoDesc.VS.pShaderBytecode = compiledVS->GetBufferPointer();
-                        psoDesc.VS.BytecodeLength = compiledVS->GetBufferSize();
-                        psoDesc.PS.pShaderBytecode = compiledPS->GetBufferPointer();
-                        psoDesc.PS.BytecodeLength = compiledPS->GetBufferSize();
-                        psoDesc.pRootSignature = getOrCreateEmptyRootSignature(d3dDevice);
-                        _impl->usesPipelineLayoutRootSignature = false;
-                        psoDesc.InputLayout.pInputElementDescs = nullptr;
-                        psoDesc.InputLayout.NumElements = 0;
-                        psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-                        psoDesc.DepthStencilState.DepthEnable = FALSE;
-                        psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
-                        psoDesc.DepthStencilState.StencilEnable = FALSE;
-
-                        psoDiagLog("[PSO] Last-resort fallback shader...\n");
-                        hr = d3dDevice->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&_impl->pipelineState));
-                        if (SUCCEEDED(hr)) {
-                            _impl->rootSignature = psoDesc.pRootSignature;
-                            psoDiagLog("[PSO] Fallback PSO created successfully.\n");
-                            CC_LOG_INFO("D3D12PipelineState: fallback PSO created successfully.");
-                        } else {
-                            psoDiagLog("[PSO] ALL retries FAILED hr=0x%08x\n", static_cast<unsigned>(hr));
-                            CC_LOG_ERROR("D3D12PipelineState: all PSO creation attempts failed. HRESULT=0x%08x",
-                                         static_cast<unsigned>(hr));
-                        }
-                    }
+                if (FAILED(hr)) {
+                    CC_LOG_ERROR("D3D12PipelineState: all PSO creation attempts failed. HRESULT=0x%08x",
+                                 static_cast<unsigned>(hr));
                 }
             }
         }
     } else {
         _impl->rootSignature = psoDesc.pRootSignature;
-        psoDiagLog("[PSO] Created successfully (primary path).\n");
         CC_LOG_INFO("D3D12PipelineState created successfully.");
     }
 #endif

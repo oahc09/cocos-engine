@@ -198,6 +198,28 @@ void CCD3D12PipelineLayout::doInit(const PipelineLayoutInfo &info) {
             for (auto &r : cbvSrvUavRanges) {
                 allRanges.push_back(r);
             }
+        } else {
+            // Empty set layout: still create a CBV/SRV/UAV root parameter with a
+            // dummy range so that flushDescriptorSets can bind this set index.
+            // Without this, sets with no bindings (e.g. PER_PASS global set when
+            // the pass has no UBO declarations) would have rootParameterIndex = -1,
+            // and bindDescriptorSet for that set would be silently skipped.
+            // The dummy range maps 1 CBV at register 0 in this set's space.
+            _impl->cbvSrvUavRootParameterIndices[setIndex] = static_cast<int32_t>(rootParameters.size());
+            D3D12_ROOT_PARAMETER param{};
+            param.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            param.ShaderVisibility = visibility;
+            param.DescriptorTable.NumDescriptorRanges = 1;
+            param.DescriptorTable.pDescriptorRanges = nullptr;
+            rootParameters.push_back(param);
+
+            D3D12_DESCRIPTOR_RANGE dummyRange{};
+            dummyRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+            dummyRange.NumDescriptors = 1;
+            dummyRange.BaseShaderRegister = 0;
+            dummyRange.RegisterSpace = setIndex;
+            dummyRange.OffsetInDescriptorsFromTableStart = 0;
+            allRanges.push_back(dummyRange);
         }
 
         if (!samplerRanges.empty()) {

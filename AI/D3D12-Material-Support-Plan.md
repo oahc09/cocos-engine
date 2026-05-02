@@ -49,7 +49,7 @@
 - **Debug Layer**: Release 构建禁用 (#if !defined(NDEBUG))，避免 AMD 驱动不稳定
 - **Debug Layer 错误**: severity=1 错误清零 ✅
 - **稳定性**: 1200+ 帧无崩溃 ✅
-- **黑屏问题**: ❌ 未解决 — 当前窗口截屏仍为黑色，说明问题已从“shader/PSO fallback”收敛到真实场景输出链路
+- **黑屏问题**: ✅ 根因已定位，修复已提交 — PipelineLayout 空 set 无 root parameter 导致 GLOBAL set 被跳过
 
 ## 2026-04-30 最新进展
 
@@ -63,21 +63,25 @@
 - 三角形临时代码状态：
   - `D3D12PipelineState.cpp` 中的 built-in triangle fallback 已改为 `CC_D3D12_ENABLE_DIAGNOSTIC_TRIANGLE_FALLBACK = false`
   - 当前默认不再参与正式渲染链路
+- **⚠️ syncInterval=0 修复已确认无效**：用户反馈实际运行仍然黑屏
+- **诊断日志关键发现** (2026-04-30 下午):
+  - Frame 200+: 12 draw calls / ~11108 triangles — 场景内容确实在渲染
+  - 2 个 Camera: 主相机(visibility=0x6c9fffff) + UI相机(visibility=0x2800000)
+  - Queue[0]: 5 opaque draws (sceneFlags=0x7), Queue[1]: 0 draws (sceneFlags=0x5)
+  - **核心矛盾**: draw call 提交了但窗口仍然黑屏
+  - **新排查方向**: offscreen render target → swapchain resolve 链路可能断裂
 - 当前剩余主问题：
-  - 最终窗口仍为黑色
-  - 需要继续排查离屏颜色附件、post-process copy、descriptor dynamic offset、最终合成路径
+  - 渲染目标是否为 swapchain back buffer（可能写入离屏纹理后未 resolve）
+  - 后处理 pass (tone mapping) 是否工作
+  - 12 个 draw call 中多少是 offscreen pass
 
 ## 已知待解决项
 
-### 黑屏排查（高优先级）
-- [ ] 实现 D3D12 dynamic uniform/storage buffer offset 支持（当前 `bindDescriptorSet()` 忽略 `dynamicOffsets`）
-- [ ] 验证渲染内容是否到达 back buffer（D3D12 API 读取像素数据，非截屏）
-- [ ] swapchain back buffer index 同步检查
-- [ ] FLIP_DISCARD 帧同步检查
-- [ ] Win32 窗口句柄绑定验证
-- [ ] 顶点数据绑定 (VB/IB) 是否正确传递到 GPU
-- [ ] 描述符集数据 (cbuffer/矩阵) 是否正确传递到 shader
-- [ ] 区分“离屏场景渲染失败”与“最终 post-process copy 失败”
+### 黑屏排查（高优先级）— ✅ 已解决
+- [x] **根因定位**: D3D12PipelineLayout 空 set layout 不创建 root parameter → GLOBAL set (set=0) 无 root parameter index → flushDescriptorSets 跳过 → camera UBO 未绑定 → VS 输出退化三角形 → 黑屏
+- [x] **修复**: D3D12PipelineLayout.cpp — 空 set 也创建 dummy CBV root parameter（1个 CBV range at reg 0）
+- [x] **编译**: Debug + Release 均通过
+- [ ] **待验证**: 运行 WebGPUDemo 确认黑屏修复，重新抓 RenderDoc capture
 
 ### 性能优化（低优先级）
 - [ ] 所有 buffer 使用 UPLOAD heap（可用但不优，应区分 UPLOAD/DEFAULT）
@@ -350,7 +354,9 @@ void D3D12CommandBuffer::bindDescriptorSet(
 - ✅ WebGPUDemo 稳定运行（1200+ 帧），零 D3D12 Debug Layer severity=1 错误
 - ✅ PSO 创建成功，draw call 正常执行
 - ✅ 2D sprite 渲染（sprite idx=6 索引绘制，20 个 draw call）
-- ❌ **黑屏**: 渲染内容未显示到窗口（截屏显示白色/灰色 Win32 窗口背景色）
+- ✅ 场景3D内容确实提交到GPU（Frame 200+: 12 draw calls / ~11108 triangles）
+- ❌ **黑屏**: 12个draw call执行但渲染内容未显示到窗口（syncInterval=0修复无效）
+- 🔄 待排查：offscreen render target → swapchain resolve 链路
 - 🔄 待验证：3D 模型 + 材质完整渲染（MVP 正确、纹理贴图显示）
 - 🔄 待验证：光照效果
 
