@@ -434,35 +434,52 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
         psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM; // default
     }
 
-    // Input layout — build from _inputState attributes
-    //
-    // SPIRV-Cross maps ALL GLSL vertex inputs to TEXCOORD semantics:
-    //   a_position → TEXCOORD0, a_texcoord → TEXCOORD1, a_color → TEXCOORD2, ...
-    // The HLSL input signature always uses TEXCOORD+N, so InputLayout must match.
-    // The semantic index corresponds to the SPIR-V location assignment,
-    // which follows the attribute order in the shader.
-    //
+    // Input layout. SPIRV-Cross emits GLSL vertex inputs as TEXCOORD+location in
+    // HLSL, so build the D3D12 layout from the shader's active attributes and
+    // match them back to the IA attributes by name. Some effects (particles,
+    // skinned variants, etc.) conditionally remove attributes via macros; using
+    // the raw IA order as TEXCOORD0..N makes later inputs shift and corrupts VS
+    // data.
     ccstd::vector<D3D12_INPUT_ELEMENT_DESC> inputElements;
-    if (!_inputState.attributes.empty()) {
-        inputElements.reserve(_inputState.attributes.size());
+    const AttributeList &shaderAttributes = _shader ? _shader->getAttributes() : _inputState.attributes;
+    if (!shaderAttributes.empty()) {
+        inputElements.reserve(shaderAttributes.size());
         _impl->semanticNames.clear();
-        _impl->semanticNames.reserve(_inputState.attributes.size());
+        _impl->semanticNames.reserve(shaderAttributes.size());
 
-        for (size_t i = 0; i < _inputState.attributes.size(); ++i) {
-            const auto &attr = _inputState.attributes[i];
+        for (const auto &shaderAttr : shaderAttributes) {
             D3D12_INPUT_ELEMENT_DESC elem{};
-            // All attributes use TEXCOORD semantic to match SPIRV-Cross HLSL output.
-            // SPIRV-Cross assigns TEXCOORD indices based on SPIR-V location decorations,
-            // which follow the same order as the attribute list.
             _impl->semanticNames.push_back("TEXCOORD");
             elem.SemanticName = _impl->semanticNames.back().c_str();
-            elem.SemanticIndex = static_cast<UINT>(i);
-            elem.Format = toD3D12VertexFormat(attr.format);
-            elem.InputSlot = attr.stream;
-            elem.AlignedByteOffset = D3D12_APPEND_ALIGNED_ELEMENT;
-            elem.InputSlotClass = attr.isInstanced ? D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA
-                                                    : D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
-            elem.InstanceDataStepRate = attr.isInstanced ? 1 : 0;
+            elem.SemanticIndex = shaderAttr.location;
+
+            bool attributeFound = false;
+            uint32_t offsets[256] = {};
+            for (const auto &attr : _inputState.attributes) {
+                if (attr.name == shaderAttr.name) {
+                    elem.Format = toD3D12VertexFormat(attr.format);
+                    elem.InputSlot = attr.stream;
+                    elem.AlignedByteOffset = offsets[attr.stream];
+                    elem.InputSlotClass = attr.isInstanced ? D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA
+                                                            : D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+                    elem.InstanceDataStepRate = attr.isInstanced ? 1 : 0;
+                    attributeFound = true;
+                    break;
+                }
+                offsets[attr.stream] += GFX_FORMAT_INFOS[static_cast<uint32_t>(attr.format)].size;
+            }
+
+            if (!attributeFound) {
+                // Keep PSO creation valid if a shader declares an attribute that
+                // the IA does not provide. This mirrors the fallback used by the
+                // Vulkan/WGPU backends: read dummy data from the beginning of
+                // stream 0 instead of shifting all following attributes.
+                elem.Format = toD3D12VertexFormat(shaderAttr.format);
+                elem.InputSlot = 0;
+                elem.AlignedByteOffset = 0;
+                elem.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+                elem.InstanceDataStepRate = 0;
+            }
             inputElements.push_back(elem);
         }
 
