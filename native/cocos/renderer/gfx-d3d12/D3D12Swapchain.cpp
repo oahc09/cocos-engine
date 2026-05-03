@@ -28,7 +28,6 @@
 #include "base/Log.h"
 #include "base/Macros.h"
 
-#if defined(_WIN32)
     #ifndef NOMINMAX
         #define NOMINMAX
     #endif
@@ -36,13 +35,11 @@
     #include <d3d12.h>
     #include <dxgi1_6.h>
     #include <wrl/client.h>
-#endif
 
 namespace cc {
 namespace gfx {
 
 struct CCD3D12Swapchain::Impl {
-#if defined(_WIN32)
     static constexpr uint32_t BACK_BUFFER_COUNT = 2;
     Microsoft::WRL::ComPtr<IDXGISwapChain3> swapChain;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> rtvHeap;
@@ -50,18 +47,13 @@ struct CCD3D12Swapchain::Impl {
     uint32_t currentBackBufferIndex{0};
     uint32_t rtvDescriptorSize{0};
     bool ready{false};
-#endif
 };
 
 CCD3D12Swapchain::CCD3D12Swapchain() = default;
 CCD3D12Swapchain::~CCD3D12Swapchain() = default;
 
 bool CCD3D12Swapchain::isReady() const {
-#if defined(_WIN32)
     return _impl ? _impl->ready : false;
-#else
-    return false;
-#endif
 }
 
 void CCD3D12Swapchain::doInit(const SwapchainInfo &info) {
@@ -69,12 +61,8 @@ void CCD3D12Swapchain::doInit(const SwapchainInfo &info) {
         _impl = std::make_unique<Impl>();
     }
 
-#if defined(_WIN32)
     auto hwnd = reinterpret_cast<HWND>(_windowHandle);
     CC_ASSERT(hwnd != nullptr);
-#else
-    CC_ASSERT(_windowHandle != nullptr);
-#endif
 
     _colorTexture = ccnew CCD3D12Texture;
     _depthStencilTexture = ccnew CCD3D12Texture;
@@ -91,16 +79,13 @@ void CCD3D12Swapchain::doInit(const SwapchainInfo &info) {
 
     CC_LOG_INFO("D3D12 swapchain initialized: %ux%u.", info.width, info.height);
 
-#if defined(_WIN32)
     _impl->ready = createOrResizeSwapchain(info.width, info.height);
     if (!_impl->ready) {
         CC_LOG_ERROR("D3D12 swapchain creation failed.");
     }
-#endif
 }
 
 void CCD3D12Swapchain::doDestroy() {
-#if defined(_WIN32)
     if (_impl) {
         for (auto &backBuffer : _impl->backBuffers) {
             backBuffer.Reset();
@@ -110,7 +95,6 @@ void CCD3D12Swapchain::doDestroy() {
         _impl->ready = false;
         _impl->currentBackBufferIndex = 0;
     }
-#endif
 
     CC_SAFE_DESTROY_NULL(_depthStencilTexture);
     CC_SAFE_DESTROY_NULL(_colorTexture);
@@ -124,11 +108,9 @@ void CCD3D12Swapchain::doResize(uint32_t width, uint32_t height, SurfaceTransfor
     if (_depthStencilTexture) {
         _depthStencilTexture->resize(width, height);
     }
-#if defined(_WIN32)
     if (_impl) {
         _impl->ready = createOrResizeSwapchain(width, height);
     }
-#endif
 }
 
 void CCD3D12Swapchain::doDestroySurface() {
@@ -138,7 +120,6 @@ void CCD3D12Swapchain::doCreateSurface(void *windowHandle) {
     (void)windowHandle;
 }
 
-#if defined(_WIN32)
 void *CCD3D12Swapchain::getCurrentBackBufferHandle() const {
     if (!_impl || !_impl->ready) {
         return nullptr;
@@ -157,11 +138,7 @@ uintptr_t CCD3D12Swapchain::getCurrentRTVHandle() const {
 }
 
 uint32_t CCD3D12Swapchain::getCurrentBackBufferIndex() const {
-#if defined(_WIN32)
     return _impl ? _impl->currentBackBufferIndex : 0;
-#else
-    return 0;
-#endif
 }
 
 bool CCD3D12Swapchain::present() {
@@ -292,19 +269,6 @@ bool CCD3D12Swapchain::createRenderTargetViews() {
 
     return true;
 }
-#else
-void *CCD3D12Swapchain::getCurrentBackBufferHandle() const {
-    return nullptr;
-}
-
-uintptr_t CCD3D12Swapchain::getCurrentRTVHandle() const {
-    return 0;
-}
-
-bool CCD3D12Swapchain::present() {
-    return false;
-}
-#endif
 
 } // namespace gfx
 } // namespace cc

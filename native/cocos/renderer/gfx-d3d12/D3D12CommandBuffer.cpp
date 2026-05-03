@@ -38,25 +38,6 @@
 #include "D3D12Texture.h"
 #include "base/Log.h"
 
-// File diagnostic for correlating RenderDoc events with D3D12 binding state.
-#include <cstdarg>
-#include <cstdio>
-namespace {
-void drawDiagLog(const char *fmt, ...) {
-    static FILE *s_file = nullptr;
-    if (!s_file) {
-        s_file = fopen("C:\\temp\\d3d12-render-diag.log", "a");
-        if (!s_file) return;
-    }
-    va_list args;
-    va_start(args, fmt);
-    vfprintf(s_file, fmt, args);
-    fflush(s_file);
-    va_end(args);
-}
-} // anonymous namespace
-
-#if defined(_WIN32)
     #ifndef NOMINMAX
         #define NOMINMAX
     #endif
@@ -64,7 +45,6 @@ void drawDiagLog(const char *fmt, ...) {
     #include <cstring>
     #include <d3d12.h>
     #include <wrl/client.h>
-#endif
 
 namespace cc {
 namespace gfx {
@@ -73,7 +53,6 @@ namespace gfx {
 static constexpr uint32_t D3D12_MAX_BOUND_SETS = 4;
 
 struct CCD3D12CommandBuffer::Impl {
-#if defined(_WIN32)
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator> commandAllocator;
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commandList;
     Microsoft::WRL::ComPtr<ID3D12Device> d3dDevice; // cached ref, not owning
@@ -108,7 +87,6 @@ struct CCD3D12CommandBuffer::Impl {
     // the start of the next begin() call, by which point the Queue has
     // already waited for the previous frame's GPU work to complete.
     ccstd::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> pendingUploadResources;
-#endif
 };
 
 CCD3D12CommandBuffer::CCD3D12CommandBuffer()
@@ -119,7 +97,6 @@ CCD3D12CommandBuffer::~CCD3D12CommandBuffer() = default;
 
 void CCD3D12CommandBuffer::doInit(const CommandBufferInfo &info) {
     (void)info;
-#if defined(_WIN32)
     auto *device = CCD3D12Device::getInstance();
     if (!device) {
         CC_LOG_ERROR("D3D12CommandBuffer: device not available.");
@@ -161,24 +138,20 @@ void CCD3D12CommandBuffer::doInit(const CommandBufferInfo &info) {
     }
 
     CC_LOG_INFO("D3D12CommandBuffer initialized.");
-#endif
 }
 
 void CCD3D12CommandBuffer::doDestroy() {
-#if defined(_WIN32)
     _impl->commandList.Reset();
     _impl->commandAllocator.Reset();
     _impl->d3dDevice.Reset();
     _impl->boundPipelineState = nullptr;
     _impl->boundPipelineLayout = nullptr;
-#endif
 }
 
 void CCD3D12CommandBuffer::begin(RenderPass *renderPass, uint32_t subpass, Framebuffer *frameBuffer) {
     (void)renderPass;
     (void)subpass;
     (void)frameBuffer;
-#if defined(_WIN32)
     if (!_impl->commandAllocator || !_impl->commandList) {
         CC_LOG_ERROR("D3D12CommandBuffer::begin - allocator or command list is null.");
         return;
@@ -228,11 +201,9 @@ void CCD3D12CommandBuffer::begin(RenderPass *renderPass, uint32_t subpass, Frame
     _numDrawCalls = 0;
     _numInstances = 0;
     _numTriangles = 0;
-#endif
 }
 
 void CCD3D12CommandBuffer::end() {
-#if defined(_WIN32)
     if (!_impl->commandList) return;
 
     HRESULT hr = _impl->commandList->Close();
@@ -268,13 +239,11 @@ void CCD3D12CommandBuffer::end() {
         }
     }
     _impl->isRecording = false;
-#endif
 }
 
 void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *fbo, const Rect &renderArea, const Color *colors, float depth, uint32_t stencil, CommandBuffer *const *secondaryCBs, uint32_t secondaryCBCount) {
     (void)secondaryCBs;
     (void)secondaryCBCount;
-#if defined(_WIN32)
     if (!_impl->commandList) return;
 
     auto *d3d12Fbo = static_cast<CCD3D12Framebuffer *>(fbo);
@@ -451,17 +420,9 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
     _impl->commandList->RSSetScissorRects(1, &scissorRect);
 
     _impl->inRenderPass = true;
-#else
-    (void)fbo;
-    (void)renderArea;
-    (void)colors;
-    (void)depth;
-    (void)stencil;
-#endif
 }
 
 void CCD3D12CommandBuffer::endRenderPass() {
-#if defined(_WIN32)
     ccstd::vector<D3D12_RESOURCE_BARRIER> postPassBarriers;
 
     // If we transitioned a swapchain back buffer to RENDER_TARGET, transition it back to PRESENT
@@ -521,7 +482,6 @@ void CCD3D12CommandBuffer::endRenderPass() {
     }
 
     _impl->inRenderPass = false;
-#endif
     // D3D12 has no explicit endRenderPass beyond resource barriers
 }
 
@@ -543,7 +503,6 @@ void CCD3D12CommandBuffer::execute(CommandBuffer *const *cmdBuffs, uint32_t coun
 }
 
 void CCD3D12CommandBuffer::bindPipelineState(PipelineState *pso) {
-#if defined(_WIN32)
     if (!_impl->commandList || !pso) return;
 
     auto *d3d12PSO = static_cast<CCD3D12PipelineState *>(pso);
@@ -586,13 +545,9 @@ void CCD3D12CommandBuffer::bindPipelineState(PipelineState *pso) {
     }
 
     _impl->boundPipelineState = pso;
-#else
-    (void)pso;
-#endif
 }
 
 void CCD3D12CommandBuffer::bindDescriptorSet(uint32_t set, DescriptorSet *descriptorSet, uint32_t dynamicOffsetCount, const uint32_t *dynamicOffsets) {
-#if defined(_WIN32)
     if (!_impl->commandList || !descriptorSet) return;
 
     // Defer the actual GPU binding until draw time.
@@ -602,22 +557,6 @@ void CCD3D12CommandBuffer::bindDescriptorSet(uint32_t set, DescriptorSet *descri
     d3d12Set->forceUpdate(); // ensure CPU staging descriptors are up to date
     if (dynamicOffsetCount > 0 && dynamicOffsets) {
         d3d12Set->applyDynamicOffsets(dynamicOffsetCount, dynamicOffsets);
-    }
-
-    static uint32_t s_bindSetDiagCount = 0;
-    if (s_bindSetDiagCount < 3000) {
-        drawDiagLog("[BIND-SET] #%u setIndex=%u set=%p layout=%p dynCount=%u dyn0=%u cbvCount=%u samplerCount=%u pendingBefore=%u dirtyBefore=%d\n",
-                    s_bindSetDiagCount,
-                    set,
-                    descriptorSet,
-                    descriptorSet->getLayout(),
-                    dynamicOffsetCount,
-                    (dynamicOffsetCount > 0 && dynamicOffsets) ? dynamicOffsets[0] : 0U,
-                    d3d12Set->getCbvSrvUavDescriptorCount(),
-                    d3d12Set->getSamplerDescriptorCount(),
-                    _impl->pendingSetCount,
-                    _impl->descriptorSetsDirty ? 1 : 0);
-        ++s_bindSetDiagCount;
     }
 
     // Store in pending list (replace if same set index already recorded)
@@ -636,16 +575,9 @@ void CCD3D12CommandBuffer::bindDescriptorSet(uint32_t set, DescriptorSet *descri
         ++_impl->pendingSetCount;
     }
     _impl->descriptorSetsDirty = true;
-#else
-    (void)set;
-    (void)descriptorSet;
-    (void)dynamicOffsetCount;
-    (void)dynamicOffsets;
-#endif
 }
 
 void CCD3D12CommandBuffer::flushDescriptorSets() {
-#if defined(_WIN32)
     if (!_impl->descriptorSetsDirty || !_impl->commandList) return;
     _impl->descriptorSetsDirty = false;
 
@@ -654,18 +586,6 @@ void CCD3D12CommandBuffer::flushDescriptorSets() {
 
     auto *boundLayout = static_cast<CCD3D12PipelineLayout *>(_impl->boundPipelineLayout);
     if (!boundLayout) return;
-
-    static uint32_t s_flushDiagCount = 0;
-    const bool flushDiag = s_flushDiagCount < 3000;
-    const uint32_t flushId = s_flushDiagCount++;
-    if (flushDiag) {
-        const char *shaderName = "<null>";
-        if (_impl->boundPipelineState && _impl->boundPipelineState->getShader()) {
-            shaderName = _impl->boundPipelineState->getShader()->getName().c_str();
-        }
-        drawDiagLog("[FLUSH] #%u shader='%s' boundLayout=%p pendingSets=%u\n",
-                    flushId, shaderName, _impl->boundPipelineLayout, _impl->pendingSetCount);
-    }
 
     auto *d3dDevice = static_cast<ID3D12Device *>(device->getD3D12DeviceHandle());
     auto *heapPool = device->getGPUDescriptorHeapPool();
@@ -699,17 +619,6 @@ void CCD3D12CommandBuffer::flushDescriptorSets() {
         const auto samplerCount = d3d12Set->getSamplerDescriptorCount();
         const auto cbvRootIndex = boundLayout->getCbvSrvUavRootParameterIndex(setIdx);
         const auto samplerRootIndex = boundLayout->getSamplerRootParameterIndex(setIdx);
-        if (flushDiag) {
-            drawDiagLog("  [FLUSH-SET] #%u setIndex=%u set=%p layout=%p cbvCount=%u samplerCount=%u cbvRoot=%d samplerRoot=%d\n",
-                        flushId,
-                        setIdx,
-                        d3d12Set,
-                        d3d12Set->getLayout(),
-                        cbvCount,
-                        samplerCount,
-                        cbvRootIndex,
-                        samplerRootIndex);
-        }
 
         // Copy CBV/SRV/UAV descriptors to GPU heap
         if (cbvCount > 0 && cbvRootIndex >= 0) {
@@ -723,15 +632,6 @@ void CCD3D12CommandBuffer::flushDescriptorSets() {
                 d3dDevice->CopyDescriptorsSimple(cbvCount, dstStart, srcStart, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
                 cbvHeap = static_cast<ID3D12DescriptorHeap *>(heapPool->getHeap(alloc.heapIndex));
                 cbvEntries.push_back({static_cast<UINT>(cbvRootIndex), {alloc.gpuHandle}});
-                if (flushDiag) {
-                    drawDiagLog("    [FLUSH-CBV] #%u setIndex=%u root=%d gpuHandle=0x%llx count=%u heapIndex=%u\n",
-                                flushId,
-                                setIdx,
-                                cbvRootIndex,
-                                static_cast<unsigned long long>(alloc.gpuHandle),
-                                cbvCount,
-                                alloc.heapIndex);
-                }
             }
         }
 
@@ -746,15 +646,6 @@ void CCD3D12CommandBuffer::flushDescriptorSets() {
                 d3dDevice->CopyDescriptorsSimple(samplerCount, dstStart, srcStart, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
                 samplerHeap = static_cast<ID3D12DescriptorHeap *>(samplerPool->getHeap(alloc.heapIndex));
                 samplerEntries.push_back({static_cast<UINT>(samplerRootIndex), {alloc.gpuHandle}});
-                if (flushDiag) {
-                    drawDiagLog("    [FLUSH-SAMP] #%u setIndex=%u root=%d gpuHandle=0x%llx count=%u heapIndex=%u\n",
-                                flushId,
-                                setIdx,
-                                samplerRootIndex,
-                                static_cast<unsigned long long>(alloc.gpuHandle),
-                                samplerCount,
-                                alloc.heapIndex);
-                }
             }
         }
     }
@@ -785,12 +676,9 @@ void CCD3D12CommandBuffer::flushDescriptorSets() {
     for (const auto &entry : samplerEntries) {
         _impl->commandList->SetGraphicsRootDescriptorTable(entry.rootParameterIndex, entry.gpuHandle);
     }
-#else
-#endif
 }
 
 void CCD3D12CommandBuffer::bindInputAssembler(InputAssembler *ia) {
-#if defined(_WIN32)
     if (!_impl->commandList || !ia) return;
 
     _impl->boundIA = ia;
@@ -812,13 +700,9 @@ void CCD3D12CommandBuffer::bindInputAssembler(InputAssembler *ia) {
     }
 
     // Note: primitive topology is set in bindPipelineState from PSO info
-#else
-    (void)ia;
-#endif
 }
 
 void CCD3D12CommandBuffer::setViewport(const Viewport &vp) {
-#if defined(_WIN32)
     if (!_impl->commandList) return;
 
     D3D12_VIEWPORT d3dViewport{};
@@ -829,13 +713,9 @@ void CCD3D12CommandBuffer::setViewport(const Viewport &vp) {
     d3dViewport.MinDepth = vp.minDepth;
     d3dViewport.MaxDepth = vp.maxDepth;
     _impl->commandList->RSSetViewports(1, &d3dViewport);
-#else
-    (void)vp;
-#endif
 }
 
 void CCD3D12CommandBuffer::setScissor(const Rect &rect) {
-#if defined(_WIN32)
     if (!_impl->commandList) return;
 
     D3D12_RECT d3dRect{};
@@ -844,9 +724,6 @@ void CCD3D12CommandBuffer::setScissor(const Rect &rect) {
     d3dRect.right = static_cast<LONG>(rect.x + rect.width);
     d3dRect.bottom = static_cast<LONG>(rect.y + rect.height);
     _impl->commandList->RSSetScissorRects(1, &d3dRect);
-#else
-    (void)rect;
-#endif
 }
 
 void CCD3D12CommandBuffer::setLineWidth(float width) {
@@ -865,16 +742,11 @@ void CCD3D12CommandBuffer::setDepthBias(float constant, float clamp, float slope
 }
 
 void CCD3D12CommandBuffer::setBlendConstants(const Color &constants) {
-#if defined(_WIN32)
     if (!_impl->commandList) return;
     _impl->commandList->OMSetBlendFactor(&constants.x);
-#else
-    (void)constants;
-#endif
 }
 
 void CCD3D12CommandBuffer::setDepthBound(float minBounds, float maxBounds) {
-#if defined(_WIN32)
     if (!_impl->commandList) return;
     // OMSetDepthBounds is available on ID3D12GraphicsCommandList1 (D3D12.1+).
     // Query the extended interface; fall back silently if unavailable.
@@ -882,10 +754,6 @@ void CCD3D12CommandBuffer::setDepthBound(float minBounds, float maxBounds) {
     if (SUCCEEDED(_impl->commandList->QueryInterface(IID_PPV_ARGS(&cmdList1)))) {
         cmdList1->OMSetDepthBounds(minBounds, maxBounds);
     }
-#else
-    (void)minBounds;
-    (void)maxBounds;
-#endif
 }
 
 void CCD3D12CommandBuffer::setStencilWriteMask(StencilFace face, uint32_t mask) {
@@ -895,16 +763,10 @@ void CCD3D12CommandBuffer::setStencilWriteMask(StencilFace face, uint32_t mask) 
 }
 
 void CCD3D12CommandBuffer::setStencilCompareMask(StencilFace face, uint32_t ref, uint32_t mask) {
-#if defined(_WIN32)
     if (!_impl->commandList) return;
     (void)face;
     (void)mask;
     _impl->commandList->OMSetStencilRef(ref);
-#else
-    (void)face;
-    (void)ref;
-    (void)mask;
-#endif
 }
 
 void CCD3D12CommandBuffer::nextSubpass() {
@@ -912,7 +774,6 @@ void CCD3D12CommandBuffer::nextSubpass() {
 }
 
 void CCD3D12CommandBuffer::draw(const DrawInfo &info) {
-#if defined(_WIN32)
     if (!_impl->commandList) return;
 
     // Flush any pending descriptor set bindings before drawing
@@ -921,36 +782,6 @@ void CCD3D12CommandBuffer::draw(const DrawInfo &info) {
     const uint32_t instanceCount = std::max<uint32_t>(info.instanceCount, 1);
     const uint32_t firstInstance = info.firstInstance;
     auto *d3d12PSO = static_cast<CCD3D12PipelineState *>(_impl->boundPipelineState);
-    static uint32_t s_drawDiagCount = 0;
-    const uint32_t drawId = s_drawDiagCount++;
-    if (drawId < 3000) {
-        const char *shaderName = "<null>";
-        if (_impl->boundPipelineState && _impl->boundPipelineState->getShader()) {
-            shaderName = _impl->boundPipelineState->getShader()->getName().c_str();
-        }
-        const auto *blendTarget0 = (_impl->boundPipelineState && !_impl->boundPipelineState->getBlendState().targets.empty())
-                                       ? &_impl->boundPipelineState->getBlendState().targets[0]
-                                       : nullptr;
-        drawDiagLog("[DRAW] #%u shader='%s' indexCount=%u vertexCount=%u instanceCount=%u firstIndex=%u vertexOffset=%d firstInstance=%u pso=%p layout=%p pendingSets=%u dirtyAfterFlush=%d fallback=%d blend0=%u src=%u dst=%u srcA=%u dstA=%u\n",
-                    drawId,
-                    shaderName,
-                    info.indexCount,
-                    info.vertexCount,
-                    instanceCount,
-                    info.firstIndex,
-                    info.vertexOffset,
-                    firstInstance,
-                    _impl->boundPipelineState,
-                    _impl->boundPipelineLayout,
-                    _impl->pendingSetCount,
-                    _impl->descriptorSetsDirty ? 1 : 0,
-                    (d3d12PSO && d3d12PSO->isDiagnosticFallback()) ? 1 : 0,
-                    blendTarget0 ? blendTarget0->blend : 0U,
-                    blendTarget0 ? static_cast<uint32_t>(blendTarget0->blendSrc) : 0U,
-                    blendTarget0 ? static_cast<uint32_t>(blendTarget0->blendDst) : 0U,
-                    blendTarget0 ? static_cast<uint32_t>(blendTarget0->blendSrcAlpha) : 0U,
-                    blendTarget0 ? static_cast<uint32_t>(blendTarget0->blendDstAlpha) : 0U);
-    }
 
     if (d3d12PSO && d3d12PSO->isDiagnosticFallback()) {
         _impl->commandList->DrawInstanced(3, 1, 0, 0);
@@ -1006,13 +837,9 @@ void CCD3D12CommandBuffer::draw(const DrawInfo &info) {
     ++_numDrawCalls;
     _numInstances += instanceCount;
     _numTriangles += info.indexCount > 0 ? (info.indexCount / 3) * instanceCount : (info.vertexCount / 3) * instanceCount;
-#else
-    (void)info;
-#endif
 }
 
 void CCD3D12CommandBuffer::updateBuffer(Buffer *buff, const void *data, uint32_t size) {
-#if defined(_WIN32)
     if (!_impl->commandList || !buff || !data || size == 0) return;
 
     auto *d3d12Buffer = static_cast<CCD3D12Buffer *>(buff);
@@ -1030,15 +857,9 @@ void CCD3D12CommandBuffer::updateBuffer(Buffer *buff, const void *data, uint32_t
     std::memcpy(mappedData, data, size);
     D3D12_RANGE writeRange{0, size};
     resource->Unmap(0, &writeRange);
-#else
-    (void)buff;
-    (void)data;
-    (void)size;
-#endif
 }
 
 void CCD3D12CommandBuffer::copyBuffersToTexture(const uint8_t *const *buffers, Texture *texture, const BufferTextureCopy *regions, uint32_t count) {
-#if defined(_WIN32)
     if (!_impl->commandList || !buffers || !texture || !regions || count == 0) return;
 
     auto *d3d12Texture = static_cast<CCD3D12Texture *>(texture);
@@ -1174,16 +995,9 @@ void CCD3D12CommandBuffer::copyBuffersToTexture(const uint8_t *const *buffers, T
     toPostCopy.Transition.StateAfter = postCopyState;
     _impl->commandList->ResourceBarrier(1, &toPostCopy);
     d3d12Texture->setCurrentState(postCopyState);
-#else
-    (void)buffers;
-    (void)texture;
-    (void)regions;
-    (void)count;
-#endif
 }
 
 void CCD3D12CommandBuffer::blitTexture(Texture *srcTexture, Texture *dstTexture, const TextureBlit *regions, uint32_t count, Filter filter) {
-#if defined(_WIN32)
     if (!_impl->commandList || !srcTexture || !dstTexture || !regions || count == 0) return;
 
     auto *srcD3D12 = static_cast<CCD3D12Texture *>(srcTexture);
@@ -1321,17 +1135,9 @@ void CCD3D12CommandBuffer::blitTexture(Texture *srcTexture, Texture *dstTexture,
     dstD3D12->setCurrentState(dstPostState);
 
     (void)filter; // Filter is not used for same-size copy (D3D12 CopyTextureRegion doesn't support filtering)
-#else
-    (void)srcTexture;
-    (void)dstTexture;
-    (void)regions;
-    (void)count;
-    (void)filter;
-#endif
 }
 
 void CCD3D12CommandBuffer::copyTexture(Texture *srcTexture, Texture *dstTexture, const TextureCopy *regions, uint32_t count) {
-#if defined(_WIN32)
     if (!_impl->commandList || !srcTexture || !dstTexture || !regions || count == 0) return;
 
     auto *srcD3D12 = static_cast<CCD3D12Texture *>(srcTexture);
@@ -1465,16 +1271,9 @@ void CCD3D12CommandBuffer::copyTexture(Texture *srcTexture, Texture *dstTexture,
     }
     srcD3D12->setCurrentState(srcPostState);
     dstD3D12->setCurrentState(dstPostState);
-#else
-    (void)srcTexture;
-    (void)dstTexture;
-    (void)regions;
-    (void)count;
-#endif
 }
 
 void CCD3D12CommandBuffer::resolveTexture(Texture *srcTexture, Texture *dstTexture, const TextureCopy *regions, uint32_t count) {
-#if defined(_WIN32)
     if (!_impl->commandList || !srcTexture || !dstTexture || !regions || count == 0) return;
 
     auto *srcD3D12 = static_cast<CCD3D12Texture *>(srcTexture);
@@ -1588,16 +1387,9 @@ void CCD3D12CommandBuffer::resolveTexture(Texture *srcTexture, Texture *dstTextu
     if (!postBarriers.empty()) {
         _impl->commandList->ResourceBarrier(static_cast<UINT>(postBarriers.size()), postBarriers.data());
     }
-#else
-    (void)srcTexture;
-    (void)dstTexture;
-    (void)regions;
-    (void)count;
-#endif
 }
 
 void CCD3D12CommandBuffer::dispatch(const DispatchInfo &info) {
-#if defined(_WIN32)
     if (!_impl->commandList) return;
     // Flush any pending descriptor set bindings before dispatching
     flushDescriptorSets();
@@ -1616,13 +1408,9 @@ void CCD3D12CommandBuffer::dispatch(const DispatchInfo &info) {
     } else {
         _impl->commandList->Dispatch(info.groupCountX, info.groupCountY, info.groupCountZ);
     }
-#else
-    (void)info;
-#endif
 }
 
 void CCD3D12CommandBuffer::pipelineBarrier(const GeneralBarrier *barrier, const BufferBarrier *const *bufferBarriers, const Buffer *const *buffers, uint32_t bufferCount, const TextureBarrier *const *textureBarriers, const Texture *const *textures, uint32_t textureBarrierCount) {
-#if defined(_WIN32)
     if (!_impl->commandList) return;
 
     // Map Cocos AccessFlags to D3D12_RESOURCE_STATES
@@ -1750,19 +1538,9 @@ void CCD3D12CommandBuffer::pipelineBarrier(const GeneralBarrier *barrier, const 
     }
 
     (void)barrier;
-#else
-    (void)barrier;
-    (void)bufferBarriers;
-    (void)buffers;
-    (void)bufferCount;
-    (void)textureBarriers;
-    (void)textures;
-    (void)textureBarrierCount;
-#endif
 }
 
 void CCD3D12CommandBuffer::beginQuery(QueryPool *queryPool, uint32_t id) {
-#if defined(_WIN32)
     if (!_impl || !_impl->commandList) return;
     auto *d3d12Pool = static_cast<CCD3D12QueryPool *>(queryPool);
     auto *heap = static_cast<ID3D12QueryHeap *>(d3d12Pool->getD3D12QueryHeap());
@@ -1771,14 +1549,9 @@ void CCD3D12CommandBuffer::beginQuery(QueryPool *queryPool, uint32_t id) {
                                      ? D3D12_QUERY_TYPE_OCCLUSION
                                      : D3D12_QUERY_TYPE_TIMESTAMP;
     _impl->commandList->BeginQuery(heap, queryType, id);
-#else
-    (void)queryPool;
-    (void)id;
-#endif
 }
 
 void CCD3D12CommandBuffer::endQuery(QueryPool *queryPool, uint32_t id) {
-#if defined(_WIN32)
     if (!_impl || !_impl->commandList) return;
     auto *d3d12Pool = static_cast<CCD3D12QueryPool *>(queryPool);
     auto *heap = static_cast<ID3D12QueryHeap *>(d3d12Pool->getD3D12QueryHeap());
@@ -1787,14 +1560,9 @@ void CCD3D12CommandBuffer::endQuery(QueryPool *queryPool, uint32_t id) {
                                      ? D3D12_QUERY_TYPE_OCCLUSION
                                      : D3D12_QUERY_TYPE_TIMESTAMP;
     _impl->commandList->EndQuery(heap, queryType, id);
-#else
-    (void)queryPool;
-    (void)id;
-#endif
 }
 
 void CCD3D12CommandBuffer::resetQueryPool(QueryPool *queryPool) {
-#if defined(_WIN32)
     if (!_impl || !_impl->commandList) return;
     auto *d3d12Pool = static_cast<CCD3D12QueryPool *>(queryPool);
     auto *heap = static_cast<ID3D12QueryHeap *>(d3d12Pool->getD3D12QueryHeap());
@@ -1803,27 +1571,16 @@ void CCD3D12CommandBuffer::resetQueryPool(QueryPool *queryPool) {
     // The results are overwritten on next BeginQuery/EndQuery cycle.
     // We clear the CPU-side results here.
     (void)heap;
-#else
-    (void)queryPool;
-#endif
 }
 
 void CCD3D12CommandBuffer::customCommand(CustomCommand &&cmd) {
-#if defined(_WIN32)
     if (cmd && _impl && _impl->commandList) {
         cmd(static_cast<void *>(_impl->commandList.Get()));
     }
-#else
-    (void)cmd;
-#endif
 }
 
 void *CCD3D12CommandBuffer::getD3D12CommandList() const {
-#if defined(_WIN32)
     return _impl ? _impl->commandList.Get() : nullptr;
-#else
-    return nullptr;
-#endif
 }
 
 } // namespace gfx

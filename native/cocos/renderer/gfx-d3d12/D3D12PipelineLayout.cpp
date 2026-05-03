@@ -28,19 +28,16 @@
 #include "base/Log.h"
 #include "gfx-base/GFXDef.h"
 
-#if defined(_WIN32)
     #ifndef NOMINMAX
         #define NOMINMAX
     #endif
     #include <d3d12.h>
     #include <wrl/client.h>
-#endif
 
 namespace cc {
 namespace gfx {
 
 namespace {
-#if defined(_WIN32)
 
 D3D12_SHADER_VISIBILITY toD3D12ShaderVisibility(ShaderStageFlags stageFlags) {
     if (hasAnyFlags(stageFlags, ShaderStageFlagBit::ALL)) {
@@ -86,13 +83,10 @@ D3D12_DESCRIPTOR_RANGE_TYPE toD3D12DescriptorRangeType(DescriptorType type) {
     }
 }
 
-#endif // _WIN32
 } // namespace
 
 struct CCD3D12PipelineLayout::Impl {
-#if defined(_WIN32)
     Microsoft::WRL::ComPtr<ID3D12RootSignature> rootSignature;
-#endif
     ccstd::vector<int32_t> cbvSrvUavRootParameterIndices;
     ccstd::vector<int32_t> samplerRootParameterIndices;
 };
@@ -110,7 +104,6 @@ void CCD3D12PipelineLayout::doInit(const PipelineLayoutInfo &info) {
     _impl->cbvSrvUavRootParameterIndices.assign(_setLayouts.size(), -1);
     _impl->samplerRootParameterIndices.assign(_setLayouts.size(), -1);
 
-#if defined(_WIN32)
     auto *device = CCD3D12Device::getInstance();
     auto *d3dDevice = static_cast<ID3D12Device *>(device ? device->getD3D12DeviceHandle() : nullptr);
     if (!d3dDevice) {
@@ -284,25 +277,18 @@ void CCD3D12PipelineLayout::doInit(const PipelineLayoutInfo &info) {
     CC_LOG_INFO("D3D12 PipelineLayout initialized: %u set layouts, %u root parameters",
                 static_cast<uint32_t>(_setLayouts.size()),
                 static_cast<uint32_t>(rootParameters.size()));
-#endif
 }
 
 void CCD3D12PipelineLayout::doDestroy() {
-#if defined(_WIN32)
     if (_impl && _impl->rootSignature) {
         _impl->rootSignature.Reset();
     }
-#endif
     _impl->cbvSrvUavRootParameterIndices.clear();
     _impl->samplerRootParameterIndices.clear();
 }
 
 void *CCD3D12PipelineLayout::getID3D12RootSignature() const {
-#if defined(_WIN32)
     return _impl ? _impl->rootSignature.Get() : nullptr;
-#else
-    return nullptr;
-#endif
 }
 
 int32_t CCD3D12PipelineLayout::getCbvSrvUavRootParameterIndex(uint32_t set) const {

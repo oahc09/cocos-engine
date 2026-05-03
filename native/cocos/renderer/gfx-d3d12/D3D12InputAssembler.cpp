@@ -27,18 +27,15 @@
 #include "D3D12Device.h"
 #include "base/Log.h"
 
-#if defined(_WIN32)
     #ifndef NOMINMAX
         #define NOMINMAX
     #endif
     #include <d3d12.h>
     #include <cstring>
-#endif
 
 namespace cc {
 namespace gfx {
 
-#if defined(_WIN32)
 static DXGI_FORMAT gfxFormatToDXGI(Format format) {
     switch (format) {
         case Format::R8:      return DXGI_FORMAT_R8_UNORM;
@@ -135,10 +132,8 @@ static void extractSemantic(const ccstd::string &attrName, char *semanticName, u
         }
     }
 }
-#endif
 
 struct CCD3D12InputAssembler::Impl {
-#if defined(_WIN32)
     ccstd::vector<D3D12_INPUT_ELEMENT_DESC> inputElements;
     ccstd::vector<ccstd::string> semanticNames; // persistent storage for SemanticName pointers
     // Cached vertex buffer views
@@ -146,7 +141,6 @@ struct CCD3D12InputAssembler::Impl {
     D3D12_INDEX_BUFFER_VIEW ibView{};
     bool hasIndexBuffer{false};
     uint32_t indexFormat{0}; // DXGI_FORMAT as uint32_t
-#endif
 };
 
 CCD3D12InputAssembler::CCD3D12InputAssembler()
@@ -156,7 +150,6 @@ CCD3D12InputAssembler::CCD3D12InputAssembler()
 CCD3D12InputAssembler::~CCD3D12InputAssembler() = default;
 
 void CCD3D12InputAssembler::doInit(const InputAssemblerInfo &info) {
-#if defined(_WIN32)
     auto *device = CCD3D12Device::getInstance();
     if (!device) {
         CC_LOG_ERROR("D3D12InputAssembler: device not available.");
@@ -253,46 +246,28 @@ void CCD3D12InputAssembler::doInit(const InputAssemblerInfo &info) {
     CC_LOG_INFO("D3D12InputAssembler initialized with %u attributes, %u vertex buffers.",
                 static_cast<unsigned>(info.attributes.size()),
                 static_cast<unsigned>(info.vertexBuffers.size()));
-#else
-    (void)info;
-#endif
 }
 
 void CCD3D12InputAssembler::doDestroy() {
-#if defined(_WIN32)
     _impl->inputElements.clear();
     _impl->semanticNames.clear();
     _impl->vbViews.clear();
     _impl->hasIndexBuffer = false;
-#endif
 }
 
 void *CCD3D12InputAssembler::getInputElementDescs() const {
-#if defined(_WIN32)
     return _impl ? _impl->inputElements.data() : nullptr;
-#else
-    return nullptr;
-#endif
 }
 
 uint32_t CCD3D12InputAssembler::getInputElementDescCount() const {
-#if defined(_WIN32)
     return _impl ? static_cast<uint32_t>(_impl->inputElements.size()) : 0;
-#else
-    return 0;
-#endif
 }
 
 uint32_t CCD3D12InputAssembler::getVertexBufferCount() const {
-#if defined(_WIN32)
     return _impl ? static_cast<uint32_t>(_impl->vbViews.size()) : 0;
-#else
-    return 0;
-#endif
 }
 
 void CCD3D12InputAssembler::fillVertexBufferViews(void *views) const {
-#if defined(_WIN32)
     if (!views || _vertexBuffers.empty()) return;
     auto *dst = static_cast<D3D12_VERTEX_BUFFER_VIEW *>(views);
     for (size_t i = 0; i < _vertexBuffers.size(); ++i) {
@@ -308,21 +283,13 @@ void CCD3D12InputAssembler::fillVertexBufferViews(void *views) const {
         }
         dst[i] = view;
     }
-#else
-    (void)views;
-#endif
 }
 
 bool CCD3D12InputAssembler::hasIndexBuffer() const {
-#if defined(_WIN32)
     return _impl ? _impl->hasIndexBuffer : false;
-#else
-    return false;
-#endif
 }
 
 void CCD3D12InputAssembler::fillIndexBufferView(void *view) const {
-#if defined(_WIN32)
     if (!view || !_indexBuffer) return;
     auto *d3d12Buffer = static_cast<CCD3D12Buffer *>(_indexBuffer);
     D3D12_INDEX_BUFFER_VIEW liveView{};
@@ -334,21 +301,14 @@ void CCD3D12InputAssembler::fillIndexBufferView(void *view) const {
         liveView.Format = d3d12Buffer->getStride() == 4 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT;
     }
     *static_cast<D3D12_INDEX_BUFFER_VIEW *>(view) = liveView;
-#else
-    (void)view;
-#endif
 }
 
 uint32_t CCD3D12InputAssembler::getIndexFormat() const {
-#if defined(_WIN32)
     if (!_indexBuffer) {
         return 0;
     }
     return _indexBuffer->getStride() == 4 ? static_cast<uint32_t>(DXGI_FORMAT_R32_UINT)
                                           : static_cast<uint32_t>(DXGI_FORMAT_R16_UINT);
-#else
-    return 0;
-#endif
 }
 
 } // namespace gfx

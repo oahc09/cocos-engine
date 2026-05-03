@@ -29,20 +29,17 @@
 #include "D3D12RenderPass.h"
 #include "base/Log.h"
 
-#if defined(_WIN32)
     #ifndef NOMINMAX
         #define NOMINMAX
     #endif
     #include <d3d12.h>
     #include <dxgiformat.h>
     #include <wrl/client.h>
-#endif
 
 namespace cc {
 namespace gfx {
 
 struct CCD3D12Framebuffer::Impl {
-#if defined(_WIN32)
     // RTV descriptor heap (one heap for all render targets)
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> rtvHeap;
     // DSV descriptor heap
@@ -51,7 +48,6 @@ struct CCD3D12Framebuffer::Impl {
     // Store CPU descriptor handles
     ccstd::vector<D3D12_CPU_DESCRIPTOR_HANDLE> rtvHandles;
     D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle{};
-#endif
 
     uint32_t width{0};
     uint32_t height{0};
@@ -70,7 +66,6 @@ void CCD3D12Framebuffer::doInit(const FramebufferInfo &info) {
     (void)info;
     if (!_impl) return;
 
-#if defined(_WIN32)
     auto *device = CCD3D12Device::getInstance();
     auto *d3dDevice = static_cast<ID3D12Device *>(device ? device->getD3D12DeviceHandle() : nullptr);
     if (!d3dDevice) {
@@ -162,11 +157,9 @@ void CCD3D12Framebuffer::doInit(const FramebufferInfo &info) {
 
     CC_LOG_INFO("D3D12Framebuffer initialized: %u color attachments, size=%ux%u, swapchain=%s",
                 colorCount, _impl->width, _impl->height, _swapchain ? "yes" : "no");
-#endif
 }
 
 void CCD3D12Framebuffer::doDestroy() {
-#if defined(_WIN32)
     if (_impl) {
         _impl->rtvHeap.Reset();
         _impl->dsvHeap.Reset();
@@ -176,12 +169,10 @@ void CCD3D12Framebuffer::doDestroy() {
         _impl->height = 0;
         _impl->rtvDescriptorSize = 0;
     }
-#endif
 }
 
 CCD3D12Framebuffer::DescriptorPair CCD3D12Framebuffer::getRTVHandle(uint32_t index) const {
     if (!_impl) return {};
-#if defined(_WIN32)
     if (index >= _impl->rtvHandles.size()) return {};
 
     // Check if THIS specific color attachment is a swapchain texture.
@@ -201,19 +192,11 @@ CCD3D12Framebuffer::DescriptorPair CCD3D12Framebuffer::getRTVHandle(uint32_t ind
 
     const auto &handle = _impl->rtvHandles[index];
     return {static_cast<uint64_t>(handle.ptr), 0};
-#else
-    (void)index;
-    return {};
-#endif
 }
 
 CCD3D12Framebuffer::DescriptorPair CCD3D12Framebuffer::getDSVHandle() const {
     if (!_impl) return {};
-#if defined(_WIN32)
     return {static_cast<uint64_t>(_impl->dsvHandle.ptr), 0};
-#else
-    return {};
-#endif
 }
 
 uint32_t CCD3D12Framebuffer::getWidth() const {

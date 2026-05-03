@@ -31,7 +31,6 @@
 #include "base/Log.h"
 #include "gfx-base/GFXDef.h"
 
-#if defined(_WIN32)
     #ifndef NOMINMAX
         #define NOMINMAX
     #endif
@@ -39,13 +38,11 @@
     #include <dxgiformat.h>
     #include <wrl/client.h>
     #include <d3dcompiler.h>
-#endif
 
 namespace cc {
 namespace gfx {
 
 namespace {
-#if defined(_WIN32)
 
 ID3D12RootSignature *getOrCreateEmptyRootSignature(ID3D12Device *device) {
     static Microsoft::WRL::ComPtr<ID3D12RootSignature> s_emptyRootSig;
@@ -248,11 +245,9 @@ DXGI_FORMAT toD3D12VertexFormat(Format fmt) {
     }
 }
 
-#endif
 } // namespace
 
 struct CCD3D12PipelineState::Impl {
-#if defined(_WIN32)
     Microsoft::WRL::ComPtr<ID3D12PipelineState> pipelineState;
     ID3D12RootSignature *rootSignature{nullptr};
     D3D12_PRIMITIVE_TOPOLOGY primitiveTopology{D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST};
@@ -261,7 +256,6 @@ struct CCD3D12PipelineState::Impl {
     // Per-PSO persistent storage for InputLayout semantic names.
     // Must outlive the PSO because D3D12_INPUT_ELEMENT_DESC::SemanticName is a raw pointer.
     ccstd::vector<ccstd::string> semanticNames;
-#endif
 };
 
 CCD3D12PipelineState::CCD3D12PipelineState() {
@@ -276,7 +270,6 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
     (void)info;
     if (!_impl) return;
 
-#if defined(_WIN32)
     _impl->pipelineState.Reset();
     _impl->rootSignature = nullptr;
     _impl->usesPipelineLayoutRootSignature = false;
@@ -559,11 +552,9 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
         _impl->rootSignature = psoDesc.pRootSignature;
         CC_LOG_INFO("D3D12PipelineState created successfully.");
     }
-#endif
 }
 
 void CCD3D12PipelineState::doDestroy() {
-#if defined(_WIN32)
     if (_impl) {
         _impl->pipelineState.Reset();
         _impl->rootSignature = nullptr;
@@ -571,47 +562,26 @@ void CCD3D12PipelineState::doDestroy() {
         _impl->usesPipelineLayoutRootSignature = false;
         _impl->diagnosticFallback = false;
     }
-#endif
 }
 
 void *CCD3D12PipelineState::getID3D12PipelineState() const {
-#if defined(_WIN32)
     return _impl ? _impl->pipelineState.Get() : nullptr;
-#else
-    return nullptr;
-#endif
 }
 
 uint32_t CCD3D12PipelineState::getD3D12PrimitiveTopology() const {
-#if defined(_WIN32)
     return _impl ? static_cast<uint32_t>(_impl->primitiveTopology) : 0;
-#else
-    return 0;
-#endif
 }
 
 void *CCD3D12PipelineState::getID3D12RootSignature() const {
-#if defined(_WIN32)
     return _impl ? _impl->rootSignature : nullptr;
-#else
-    return nullptr;
-#endif
 }
 
 bool CCD3D12PipelineState::usesPipelineLayoutRootSignature() const {
-#if defined(_WIN32)
     return _impl ? _impl->usesPipelineLayoutRootSignature : false;
-#else
-    return false;
-#endif
 }
 
 bool CCD3D12PipelineState::isDiagnosticFallback() const {
-#if defined(_WIN32)
     return _impl ? _impl->diagnosticFallback : false;
-#else
-    return false;
-#endif
 }
 
 } // namespace gfx

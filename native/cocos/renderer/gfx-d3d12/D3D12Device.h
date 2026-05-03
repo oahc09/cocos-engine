@@ -116,6 +116,13 @@ protected:
 
     struct Impl;
     std::unique_ptr<Impl> _impl;
+
+    // Raw swapchain references for present().
+    // The DeviceAgent/DeviceValidator layers wrap swapchains and store them
+    // in THEIR _swapchains list (which is private to Device base class).
+    // CCD3D12Device::present() needs access to the actual swapchain objects,
+    // so we maintain our own tracking here.
+    ccstd::vector<CCD3D12Swapchain *> _d3d12Swapchains;
 };
 
 } // namespace gfx

@@ -41,17 +41,15 @@
 #include "base/Log.h"
 
 
-#if defined(_WIN32)
-    #ifndef NOMINMAX
-        #define NOMINMAX
-    #endif
-    #include <algorithm>
-    #include <cstring>
-    #include <windows.h>
-    #include <d3d12.h>
-    #include <dxgi1_6.h>
-    #include <wrl/client.h>
+#ifndef NOMINMAX
+    #define NOMINMAX
 #endif
+#include <algorithm>
+#include <cstring>
+#include <windows.h>
+#include <d3d12.h>
+#include <dxgi1_6.h>
+#include <wrl/client.h>
 
 namespace cc {
 namespace gfx {
@@ -61,7 +59,6 @@ CCD3D12Device *CCD3D12Device::instance = nullptr;
 namespace {
 constexpr float D3D12_POC_CLEAR_COLOR[4] = {0.1F, 0.2F, 0.8F, 1.0F};
 
-#if defined(_WIN32)
 D3D12_RESOURCE_BARRIER textureTransition(ID3D12Resource *resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
     D3D12_RESOURCE_BARRIER barrier{};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -72,12 +69,9 @@ D3D12_RESOURCE_BARRIER textureTransition(ID3D12Resource *resource, D3D12_RESOURC
     barrier.Transition.StateAfter = after;
     return barrier;
 }
-
-#endif
 }
 
 struct CCD3D12Device::Impl {
-#if defined(_WIN32)
     Microsoft::WRL::ComPtr<IDXGIFactory6> dxgiFactory;
     Microsoft::WRL::ComPtr<ID3D12Device> d3dDevice;
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> graphicsQueue;
@@ -88,7 +82,6 @@ struct CCD3D12Device::Impl {
 
     HANDLE fenceEvent{nullptr};
     uint64_t fenceValue{0};
-#endif
 
     // GPU-visible descriptor heap pools for shader access
     std::unique_ptr<D3D12DescriptorHeapPool> gpuDescriptorHeapPool;    // CBV_SRV_UAV, shaderVisible
@@ -126,7 +119,6 @@ CCD3D12Device::~CCD3D12Device() {
 bool CCD3D12Device::doInit(const DeviceInfo &info) {
     (void)info;
 
-#if defined(_WIN32)
     if (!initializeD3D12Context()) {
         CC_LOG_ERROR("Failed to initialize D3D12 context.");
         return false;
@@ -142,7 +134,6 @@ bool CCD3D12Device::doInit(const DeviceInfo &info) {
         D3D12DescriptorHeapPool::HeapType::SAMPLER, 2048, true);
 
     CC_LOG_INFO("D3D12 descriptor heap pools initialized.");
-#endif
 
     QueueInfo queueInfo;
     queueInfo.type = QueueType::GRAPHICS;
@@ -224,7 +215,6 @@ bool CCD3D12Device::doInit(const DeviceInfo &info) {
 }
 
 void CCD3D12Device::doDestroy() {
-#if defined(_WIN32)
     waitForGpu();
 
     // Release dummy resources
@@ -251,7 +241,6 @@ void CCD3D12Device::doDestroy() {
     _impl->graphicsQueue.Reset();
     _impl->d3dDevice.Reset();
     _impl->dxgiFactory.Reset();
-#endif
 
     CC_SAFE_DESTROY_AND_DELETE(_cmdBuff);
     CC_SAFE_DESTROY_AND_DELETE(_queryPool);
@@ -259,14 +248,14 @@ void CCD3D12Device::doDestroy() {
 }
 
 void CCD3D12Device::acquire(Swapchain *const *swapchains, uint32_t count) {
-    (void)swapchains;
-    (void)count;
-
-    // Note: Back buffer index is already refreshed in Swapchain::present()
-    // via GetCurrentBackBufferIndex() after each Present() call. The engine
-    // frame loop is: acquire() → render → present(), so by the time acquire()
-    // runs, the index was set at the end of the previous frame's present().
-    // No additional index refresh is needed here.
+    // The DeviceAgent and DeviceValidator layers unwrap their wrappers before
+    // passing swapchains down to us, so the pointers here are raw CCD3D12Swapchain*.
+    _d3d12Swapchains.clear();
+    for (uint32_t i = 0; i < count; ++i) {
+        if (swapchains[i]) {
+            _d3d12Swapchains.push_back(static_cast<CCD3D12Swapchain *>(swapchains[i]));
+        }
+    }
 
     if (_onAcquire) {
         _onAcquire->execute();
@@ -282,38 +271,26 @@ CCD3D12Buffer *CCD3D12Device::getDummyBuffer() const {
 }
 
 void *CCD3D12Device::getDrawIndirectSignature() const {
-#if defined(_WIN32)
     return _impl ? _impl->drawIndirectSig.Get() : nullptr;
-#else
-    return nullptr;
-#endif
 }
 
 void *CCD3D12Device::getDrawIndexedIndirectSignature() const {
-#if defined(_WIN32)
     return _impl ? _impl->drawIndexedIndirectSig.Get() : nullptr;
-#else
-    return nullptr;
-#endif
 }
 
 void *CCD3D12Device::getDispatchIndirectSignature() const {
-#if defined(_WIN32)
     return _impl ? _impl->dispatchIndirectSig.Get() : nullptr;
-#else
-    return nullptr;
-#endif
 }
 
 void CCD3D12Device::present() {
-#if defined(_WIN32)
     if (!_impl->graphicsQueue || !_impl->frameFence || !_impl->fenceEvent) {
         return;
     }
 
-    const auto &swapchains = getSwapchains();
-    for (auto *swapchain : swapchains) {
-        auto *d3d12Swapchain = static_cast<CCD3D12Swapchain *>(swapchain);
+    // Use _d3d12Swapchains instead of getSwapchains() — the DeviceAgent/DeviceValidator
+    // layers wrap swapchains and store them in THEIR _swapchains (private to Device base).
+    // Our _d3d12Swapchains tracks the raw CCD3D12Swapchain objects created by this device.
+    for (auto *d3d12Swapchain : _d3d12Swapchains) {
         if (!d3d12Swapchain || !d3d12Swapchain->isReady()) {
             continue;
         }
@@ -335,7 +312,12 @@ void CCD3D12Device::present() {
         if (_impl->frameFence->GetCompletedValue() < _impl->fenceValue) {
             hr = _impl->frameFence->SetEventOnCompletion(_impl->fenceValue, _impl->fenceEvent);
             if (SUCCEEDED(hr)) {
-                WaitForSingleObject(_impl->fenceEvent, INFINITE);
+                DWORD waitResult = WaitForSingleObject(_impl->fenceEvent, 5000);
+                if (waitResult == WAIT_TIMEOUT) {
+                    CC_LOG_ERROR("D3D12 present fence wait timed out (5s). GPU may be hung.");
+                } else if (waitResult == WAIT_FAILED) {
+                    CC_LOG_ERROR("D3D12 present WaitForSingleObject failed. errno=%u", static_cast<unsigned>(GetLastError()));
+                }
             } else {
                 CC_LOG_ERROR("D3D12 fence wait setup failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
             }
@@ -345,9 +327,6 @@ void CCD3D12Device::present() {
     // Note: GPU descriptor heap pool reset is now handled exclusively in
     // CommandBuffer::begin() to avoid double-reset if multiple command buffers
     // exist. Previously this was redundantly called here AND in begin().
-#else
-    // D3D12 only supported on Windows
-#endif
 }
 
 CommandBuffer *CCD3D12Device::createCommandBuffer(const CommandBufferInfo &info, bool hasAgent) {
@@ -409,7 +388,6 @@ PipelineState *CCD3D12Device::createPipelineState() {
 }
 
 void CCD3D12Device::copyBuffersToTexture(const uint8_t *const *buffers, Texture *dst, const BufferTextureCopy *regions, uint32_t count) {
-#if defined(_WIN32)
     if (!buffers || !dst || !regions || count == 0 || !_impl->d3dDevice || !_impl->graphicsQueue || !_impl->commandAllocator || !_impl->commandList) {
         return;
     }
@@ -579,12 +557,6 @@ void CCD3D12Device::copyBuffersToTexture(const uint8_t *const *buffers, Texture 
 
     // Now safe to release upload resources — GPU has finished.
     uploadResources.clear();
-#else
-    (void)buffers;
-    (void)dst;
-    (void)regions;
-    (void)count;
-#endif
 }
 
 void CCD3D12Device::copyTextureToBuffers(Texture *src, uint8_t *const *buffers, const BufferTextureCopy *region, uint32_t count) {
@@ -601,7 +573,6 @@ void CCD3D12Device::getQueryPoolResults(QueryPool *queryPool) {
 }
 
 SampleCount CCD3D12Device::getMaxSampleCount(Format format, TextureUsage usage, TextureFlags flags) const {
-#if defined(_WIN32)
     if (!_impl || !_impl->d3dDevice) return SampleCount::X1;
 
     DXGI_FORMAT dxgiFormat = DXGI_FORMAT_UNKNOWN;
@@ -641,11 +612,6 @@ SampleCount CCD3D12Device::getMaxSampleCount(Format format, TextureUsage usage, 
             }
         }
     }
-#else
-    (void)format;
-    (void)usage;
-    (void)flags;
-#endif
     return SampleCount::X1;
 }
 
@@ -794,7 +760,6 @@ void CCD3D12Device::initCapabilities() {
     _caps.clipSpaceSignY = 1.F;
 }
 
-#if defined(_WIN32)
 bool CCD3D12Device::initializeD3D12Context() {
     UINT dxgiFactoryFlags = 0;
 
@@ -819,22 +784,79 @@ bool CCD3D12Device::initializeD3D12Context() {
     }
 
     Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
-    for (UINT adapterIndex = 0; _impl->dxgiFactory->EnumAdapters1(adapterIndex, &adapter) != DXGI_ERROR_NOT_FOUND; ++adapterIndex) {
-        DXGI_ADAPTER_DESC1 adapterDesc{};
-        adapter->GetDesc1(&adapterDesc);
-        if (adapterDesc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) {
-            continue;
+
+    // Enumerate all adapters and pick the best one:
+    // 1. Skip software adapters (WARP)
+    // 2. Prefer discrete GPU (highest DedicatedVideoMemory)
+    // 3. Fall back to integrated GPU if no discrete GPU available
+    // 4. Last resort: WARP software adapter
+    {
+        Microsoft::WRL::ComPtr<IDXGIAdapter1> bestAdapter;
+        DXGI_ADAPTER_DESC1 bestDesc{};
+        bool foundDiscrete = false;
+
+        for (UINT adapterIndex = 0; _impl->dxgiFactory->EnumAdapters1(adapterIndex, &adapter) != DXGI_ERROR_NOT_FOUND; ++adapterIndex) {
+            DXGI_ADAPTER_DESC1 adapterDesc{};
+            adapter->GetDesc1(&adapterDesc);
+
+            // Skip software adapters
+            if (adapterDesc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) {
+                adapter.Reset();
+                continue;
+            }
+
+            // Check D3D12 support before considering this adapter
+            Microsoft::WRL::ComPtr<ID3D12Device> testDevice;
+            if (FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&testDevice)))) {
+                adapter.Reset();
+                continue;
+            }
+
+            char adapterName[128] = {};
+            wcstombs(adapterName, adapterDesc.Description, sizeof(adapterName) - 1);
+            bool isDiscrete = (adapterDesc.DedicatedVideoMemory > 0 &&
+                              adapterDesc.SharedSystemMemory > 0) ||
+                             (adapterDesc.VendorId == 0x10DE) ||  // NVIDIA
+                             (adapterDesc.VendorId == 0x1002);    // AMD
+            CC_LOG_INFO("Adapter[%u]: %s (VRAM=%llu MB, Shared=%llu MB, VendorID=0x%04x, Discrete=%s)",
+                         adapterIndex, adapterName,
+                         static_cast<unsigned long long>(adapterDesc.DedicatedVideoMemory / (1024 * 1024)),
+                         static_cast<unsigned long long>(adapterDesc.SharedSystemMemory / (1024 * 1024)),
+                         static_cast<unsigned>(adapterDesc.VendorId),
+                         isDiscrete ? "yes" : "no");
+
+            // Selection priority: discrete > integrated (by VRAM size within category)
+            if (!foundDiscrete && isDiscrete) {
+                // First discrete GPU found — always pick it over any integrated
+                bestAdapter = adapter;
+                bestDesc = adapterDesc;
+                foundDiscrete = true;
+            } else if (foundDiscrete && isDiscrete &&
+                       adapterDesc.DedicatedVideoMemory > bestDesc.DedicatedVideoMemory) {
+                // Better discrete GPU found
+                bestAdapter = adapter;
+                bestDesc = adapterDesc;
+            } else if (!foundDiscrete &&
+                       (!bestAdapter || adapterDesc.DedicatedVideoMemory > bestDesc.DedicatedVideoMemory)) {
+                // No discrete found yet, pick the one with most VRAM
+                bestAdapter = adapter;
+                bestDesc = adapterDesc;
+            }
+
+            adapter.Reset();
         }
-        char adapterName[128] = {};
-        wcstombs(adapterName, adapterDesc.Description, sizeof(adapterName) - 1);
-        CC_LOG_INFO("Adapter[%u]: %s (VRAM=%llu MB, VendorID=0x%04x)",
-                     adapterIndex, adapterName,
-                     static_cast<unsigned long long>(adapterDesc.DedicatedVideoMemory / (1024 * 1024)),
-                     static_cast<unsigned>(adapterDesc.VendorId));
-        if (SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&_impl->d3dDevice)))) {
-            break;
+
+        if (bestAdapter) {
+            hr = D3D12CreateDevice(bestAdapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&_impl->d3dDevice));
+            if (SUCCEEDED(hr)) {
+                char name[128] = {};
+                wcstombs(name, bestDesc.Description, sizeof(name) - 1);
+                CC_LOG_INFO("D3D12: selected adapter '%s' (VRAM=%llu MB, VendorID=0x%04x)",
+                            name,
+                            static_cast<unsigned long long>(bestDesc.DedicatedVideoMemory / (1024 * 1024)),
+                            static_cast<unsigned>(bestDesc.VendorId));
+            }
         }
-        adapter.Reset();
     }
 
     if (!_impl->d3dDevice) {
@@ -925,30 +947,17 @@ void CCD3D12Device::waitForGpu() {
         WaitForSingleObject(_impl->fenceEvent, INFINITE);
     }
 }
-#endif
 
 void *CCD3D12Device::getD3D12DeviceHandle() const {
-#if defined(_WIN32)
     return _impl ? _impl->d3dDevice.Get() : nullptr;
-#else
-    return nullptr;
-#endif
 }
 
 void *CCD3D12Device::getGraphicsQueueHandle() const {
-#if defined(_WIN32)
     return _impl ? _impl->graphicsQueue.Get() : nullptr;
-#else
-    return nullptr;
-#endif
 }
 
 void *CCD3D12Device::getDXGIFactoryHandle() const {
-#if defined(_WIN32)
     return _impl ? _impl->dxgiFactory.Get() : nullptr;
-#else
-    return nullptr;
-#endif
 }
 
 D3D12DescriptorHeapPool *CCD3D12Device::getGPUDescriptorHeapPool() const {

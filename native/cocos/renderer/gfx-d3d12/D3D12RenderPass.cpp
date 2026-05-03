@@ -26,18 +26,15 @@
 #include "base/Log.h"
 #include "gfx-base/GFXDef.h"
 
-#if defined(_WIN32)
     #ifndef NOMINMAX
         #define NOMINMAX
     #endif
     #include <dxgiformat.h>
-#endif
 
 namespace cc {
 namespace gfx {
 
 namespace {
-#if defined(_WIN32)
 uint32_t toDXGIFormatUint32(Format format) {
     DXGI_FORMAT dxgi = DXGI_FORMAT_UNKNOWN;
     switch (format) {
@@ -114,7 +111,6 @@ uint32_t toDXGIFormatUint32(Format format) {
     }
     return static_cast<uint32_t>(dxgi);
 }
-#endif
 } // namespace
 
 struct CCD3D12RenderPass::Impl {
@@ -137,7 +133,6 @@ void CCD3D12RenderPass::doInit(const RenderPassInfo &info) {
     (void)info;
     if (!_impl) return;
 
-#if defined(_WIN32)
     // Process color attachments — use base class _colorAttachments which is already populated
     _impl->rtvFormats.clear();
     for (const auto &attachment : _colorAttachments) {
@@ -171,7 +166,6 @@ void CCD3D12RenderPass::doInit(const RenderPassInfo &info) {
 
     CC_LOG_INFO("D3D12RenderPass initialized: %u color attachments, DSV format=0x%x",
                 _impl->colorAttachmentCount, _impl->dsvFormat);
-#endif
 }
 
 void CCD3D12RenderPass::doDestroy() {

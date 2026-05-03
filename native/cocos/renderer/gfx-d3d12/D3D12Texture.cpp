@@ -28,26 +28,21 @@
 #include "base/Log.h"
 #include "gfx-base/GFXDef.h"
 
-#if defined(_WIN32)
     #ifndef NOMINMAX
         #define NOMINMAX
     #endif
     #include <d3d12.h>
     #include <dxgiformat.h>
     #include <wrl/client.h>
-#endif
 
 namespace cc {
 namespace gfx {
 
 struct CCD3D12Texture::Impl {
-#if defined(_WIN32)
     Microsoft::WRL::ComPtr<ID3D12Resource> resource;
-#endif
 };
 
 namespace {
-#if defined(_WIN32)
 DXGI_FORMAT toD3D12Format(Format format) {
     switch (format) {
         case Format::R8:
@@ -225,7 +220,6 @@ UINT toD3D12SampleCount(SampleCount samples) {
             return 1;
     }
 }
-#endif
 } // namespace
 
 CCD3D12Texture::CCD3D12Texture() {
@@ -239,11 +233,9 @@ CCD3D12Texture::~CCD3D12Texture() {
 void CCD3D12Texture::doInit(const TextureInfo &info) {
     (void)info;
     createResource(_info.width, _info.height);
-#if defined(_WIN32)
     // createResource() uses CreateCommittedResource(..., D3D12_RESOURCE_STATE_COMMON, ...),
     // so tracked state must start from COMMON until an explicit barrier changes it.
     _currentState = D3D12_RESOURCE_STATE_COMMON;
-#endif
 }
 
 void CCD3D12Texture::doInit(const TextureViewInfo &info) {
@@ -251,15 +243,12 @@ void CCD3D12Texture::doInit(const TextureViewInfo &info) {
     if (!texture) {
         return;
     }
-#if defined(_WIN32)
     _impl->resource = static_cast<ID3D12Resource *>(texture->getD3D12ResourceHandle());
     _currentState = texture->getCurrentState();
-#endif
 }
 
 void CCD3D12Texture::doInit(const SwapchainTextureInfo &info) {
     (void)info;
-#if defined(_WIN32)
     if (hasFlag(_info.usage, TextureUsageBit::DEPTH_STENCIL_ATTACHMENT)) {
         createResource(_info.width, _info.height);
         // Depth resource is created in COMMON and transitioned on first use.
@@ -268,17 +257,14 @@ void CCD3D12Texture::doInit(const SwapchainTextureInfo &info) {
         // Swapchain color textures start as PRESENT, will be transitioned by beginRenderPass
         _currentState = D3D12_RESOURCE_STATE_PRESENT;
     }
-#endif
     // Swapchain color textures wrap the swapchain's back buffers;
     // the resource is obtained dynamically via getD3D12ResourceHandle()
 }
 
 void CCD3D12Texture::doDestroy() {
-#if defined(_WIN32)
     if (_impl) {
         _impl->resource.Reset();
     }
-#endif
 }
 
 void CCD3D12Texture::doResize(uint32_t width, uint32_t height, uint32_t size) {
@@ -290,15 +276,11 @@ void CCD3D12Texture::doResize(uint32_t width, uint32_t height, uint32_t size) {
 }
 
 void *CCD3D12Texture::getD3D12ResourceHandle() const {
-#if defined(_WIN32)
     // For swapchain color textures, dynamically return the current back buffer
     if (isSwapchainColorTexture()) {
         return static_cast<CCD3D12Swapchain *>(_swapchain)->getCurrentBackBufferHandle();
     }
     return _impl ? _impl->resource.Get() : nullptr;
-#else
-    return nullptr;
-#endif
 }
 
 bool CCD3D12Texture::isSwapchainColorTexture() const {
@@ -306,7 +288,6 @@ bool CCD3D12Texture::isSwapchainColorTexture() const {
 }
 
 bool CCD3D12Texture::createResource(uint32_t width, uint32_t height) {
-#if defined(_WIN32)
     if (!_impl || width == 0 || height == 0 || isSwapchainColorTexture()) {
         return false;
     }
@@ -418,11 +399,6 @@ bool CCD3D12Texture::createResource(uint32_t width, uint32_t height) {
 
     _impl->resource = resource;
     return true;
-#else
-    (void)width;
-    (void)height;
-    return false;
-#endif
 }
 
 } // namespace gfx

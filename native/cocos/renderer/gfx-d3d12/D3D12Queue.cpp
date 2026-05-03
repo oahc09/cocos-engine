@@ -27,16 +27,13 @@
 #include "D3D12Queue.h"
 #include "base/Log.h"
 
-#if defined(_WIN32)
     #ifndef NOMINMAX
         #define NOMINMAX
     #endif
     #include <d3d12.h>
     #include <wrl/client.h>
-#endif
 
 namespace {
-#if defined(_WIN32)
 void dumpQueueDebugMessages(ID3D12Device *device, const char *checkpoint) {
     if (!device) {
         return;
@@ -68,18 +65,15 @@ void dumpQueueDebugMessages(ID3D12Device *device, const char *checkpoint) {
     }
     infoQueue->ClearStoredMessages();
 }
-#endif
 } // namespace
 
 namespace cc {
 namespace gfx {
 
 struct CCD3D12Queue::Impl {
-#if defined(_WIN32)
     Microsoft::WRL::ComPtr<ID3D12Fence> fence;
     HANDLE fenceEvent{nullptr};
     uint64_t fenceValue{0};
-#endif
 };
 
 CCD3D12Queue::CCD3D12Queue()
@@ -90,7 +84,6 @@ CCD3D12Queue::~CCD3D12Queue() = default;
 
 void CCD3D12Queue::doInit(const QueueInfo &info) {
     (void)info;
-#if defined(_WIN32)
     auto *device = CCD3D12Device::getInstance();
     if (!device) {
         CC_LOG_ERROR("D3D12Queue: device not available.");
@@ -118,21 +111,17 @@ void CCD3D12Queue::doInit(const QueueInfo &info) {
     _impl->fenceValue = 0;
 
     CC_LOG_INFO("D3D12Queue initialized.");
-#endif
 }
 
 void CCD3D12Queue::doDestroy() {
-#if defined(_WIN32)
     if (_impl->fenceEvent) {
         CloseHandle(_impl->fenceEvent);
         _impl->fenceEvent = nullptr;
     }
     _impl->fence.Reset();
-#endif
 }
 
 void CCD3D12Queue::submit(CommandBuffer *const *cmdBuffs, uint32_t count) {
-#if defined(_WIN32)
     auto *device = CCD3D12Device::getInstance();
     if (!device) {
         CC_LOG_ERROR("D3D12Queue::submit - device is null.");
@@ -179,15 +168,20 @@ void CCD3D12Queue::submit(CommandBuffer *const *cmdBuffs, uint32_t count) {
         if (_impl->fence->GetCompletedValue() < _impl->fenceValue) {
             hr = _impl->fence->SetEventOnCompletion(_impl->fenceValue, _impl->fenceEvent);
             if (SUCCEEDED(hr)) {
-                WaitForSingleObject(_impl->fenceEvent, INFINITE);
+                DWORD waitResult = WaitForSingleObject(_impl->fenceEvent, 5000);
+                if (waitResult == WAIT_TIMEOUT) {
+                    CC_LOG_ERROR("D3D12Queue::submit - fence wait timed out (5s). GPU may be hung.");
+                    if (d3dDevice) {
+                        HRESULT deviceHR = d3dDevice->GetDeviceRemovedReason();
+                        CC_LOG_ERROR("D3D12 device removed reason: 0x%08x", static_cast<unsigned>(deviceHR));
+                    }
+                } else if (waitResult == WAIT_FAILED) {
+                    CC_LOG_ERROR("D3D12Queue::submit - WaitForSingleObject failed. errno=%u", static_cast<unsigned>(GetLastError()));
+                }
             }
         }
         dumpQueueDebugMessages(d3dDevice, "after-fence-wait");
     }
-#else
-    (void)cmdBuffs;
-    (void)count;
-#endif
 }
 
 } // namespace gfx

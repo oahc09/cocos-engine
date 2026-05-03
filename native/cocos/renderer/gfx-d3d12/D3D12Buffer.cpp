@@ -26,7 +26,6 @@
 #include "D3D12Device.h"
 #include "base/Log.h"
 
-#if defined(_WIN32)
     #ifndef NOMINMAX
         #define NOMINMAX
     #endif
@@ -34,15 +33,12 @@
     #include <cstring>
     #include <d3d12.h>
     #include <wrl/client.h>
-#endif
 
 namespace cc {
 namespace gfx {
 
 struct CCD3D12Buffer::Impl {
-#if defined(_WIN32)
     Microsoft::WRL::ComPtr<ID3D12Resource> resource;
-#endif
     uint32_t resourceOffset{0};
 };
 
@@ -65,16 +61,13 @@ void CCD3D12Buffer::doInit(const BufferViewInfo &info) {
         return;
     }
 
-#if defined(_WIN32)
     _impl->resource = static_cast<ID3D12Resource *>(buffer->getD3D12ResourceHandle());
-#endif
     // Buffer views can be created from another view. In that case the final
     // GPU VA must include the parent view's offset; otherwise we will bind
     // descriptors to the wrong address/range.
     const uint64_t parentOffset = static_cast<uint64_t>(buffer->getD3D12ResourceOffset());
     const uint64_t requestedOffset = parentOffset + static_cast<uint64_t>(info.offset);
 
-#if defined(_WIN32)
     if (_impl->resource) {
         const uint64_t resourceWidth = static_cast<uint64_t>(_impl->resource->GetDesc().Width);
         if (requestedOffset > resourceWidth) {
@@ -86,7 +79,6 @@ void CCD3D12Buffer::doInit(const BufferViewInfo &info) {
             return;
         }
     }
-#endif
 
     _impl->resourceOffset = static_cast<uint32_t>(requestedOffset);
 }
@@ -100,11 +92,9 @@ void CCD3D12Buffer::doResize(uint32_t size, uint32_t count) {
 }
 
 void CCD3D12Buffer::doDestroy() {
-#if defined(_WIN32)
     if (_impl) {
         _impl->resource.Reset();
     }
-#endif
     if (_impl) {
         _impl->resourceOffset = 0;
     }
@@ -115,7 +105,6 @@ void CCD3D12Buffer::update(const void *buffer, uint32_t size) {
         return;
     }
 
-#if defined(_WIN32)
     if (!_impl || !_impl->resource) {
         return;
     }
@@ -135,33 +124,22 @@ void CCD3D12Buffer::update(const void *buffer, uint32_t size) {
     static uint32_t s_diagBufferUpdateCount = 0;
     if (s_diagBufferUpdateCount < 48 && copySize >= sizeof(float) * 4 && _size <= 256) {
         const auto *floats = static_cast<const float *>(buffer);
-        CC_LOG_INFO("[D3D12-BUF] size=%u copy=%u f0=%.3f f1=%.3f f2=%.3f f3=%.3f",
-                    _size, copySize, floats[0], floats[1], floats[2], floats[3]);
         ++s_diagBufferUpdateCount;
     }
 
     D3D12_RANGE writeRange{_impl->resourceOffset, _impl->resourceOffset + copySize};
     _impl->resource->Unmap(0, &writeRange);
-#endif
 }
 
 void *CCD3D12Buffer::getD3D12ResourceHandle() const {
-#if defined(_WIN32)
     return _impl ? _impl->resource.Get() : nullptr;
-#else
-    return nullptr;
-#endif
 }
 
 uint64_t CCD3D12Buffer::getD3D12GPUVirtualAddress() const {
-#if defined(_WIN32)
     if (!_impl || !_impl->resource) {
         return 0;
     }
     return static_cast<uint64_t>(_impl->resource->GetGPUVirtualAddress() + _impl->resourceOffset);
-#else
-    return 0;
-#endif
 }
 
 uint32_t CCD3D12Buffer::getD3D12ResourceOffset() const {
@@ -169,7 +147,6 @@ uint32_t CCD3D12Buffer::getD3D12ResourceOffset() const {
 }
 
 bool CCD3D12Buffer::createResource(uint32_t size) {
-#if defined(_WIN32)
     if (!_impl || size == 0) {
         return false;
     }
@@ -217,10 +194,6 @@ bool CCD3D12Buffer::createResource(uint32_t size) {
     _impl->resource = resource;
     _impl->resourceOffset = 0;
     return true;
-#else
-    (void)size;
-    return false;
-#endif
 }
 
 } // namespace gfx

@@ -27,12 +27,10 @@
 #include "gfx-base/GFXTexture.h"
 #include <memory>
 
-#if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <d3d12.h>
-#endif
 
 namespace cc {
 namespace gfx {
@@ -53,10 +51,8 @@ public:
     Swapchain *getSwapchain() const { return _swapchain; }
 
     // D3D12 resource state tracking — used by pipelineBarrier
-#if defined(_WIN32)
     D3D12_RESOURCE_STATES getCurrentState() const { return _currentState; }
     void setCurrentState(D3D12_RESOURCE_STATES state) { _currentState = state; }
-#endif
 
 protected:
     void doInit(const TextureInfo &info) override;
@@ -71,9 +67,7 @@ private:
     struct Impl;
     std::unique_ptr<Impl> _impl;
 
-#if defined(_WIN32)
     D3D12_RESOURCE_STATES _currentState = D3D12_RESOURCE_STATE_COMMON;
-#endif
 };
 
 } // namespace gfx

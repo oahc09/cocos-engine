@@ -26,23 +26,19 @@
 #include "D3D12Device.h"
 #include "base/Log.h"
 
-#if defined(_WIN32)
     #ifndef NOMINMAX
         #define NOMINMAX
     #endif
     #include <cstring>
     #include <d3d12.h>
     #include <wrl/client.h>
-#endif
 
 namespace cc {
 namespace gfx {
 
 struct CCD3D12QueryPool::Impl {
-#if defined(_WIN32)
     Microsoft::WRL::ComPtr<ID3D12QueryHeap> queryHeap;
     Microsoft::WRL::ComPtr<ID3D12Resource> readbackBuffer;
-#endif
 };
 
 CCD3D12QueryPool::CCD3D12QueryPool()
@@ -52,7 +48,6 @@ CCD3D12QueryPool::CCD3D12QueryPool()
 CCD3D12QueryPool::~CCD3D12QueryPool() = default;
 
 void CCD3D12QueryPool::doInit(const QueryPoolInfo &info) {
-#if defined(_WIN32)
     auto *devicePtr = static_cast<ID3D12Device *>(CCD3D12Device::getInstance()->getD3D12DeviceHandle());
     if (!devicePtr) {
         CC_LOG_ERROR("D3D12QueryPool::doInit — device handle is null.");
@@ -152,28 +147,18 @@ void CCD3D12QueryPool::doInit(const QueryPoolInfo &info) {
     }
 
     CC_LOG_INFO("D3D12 QueryPool initialized: type=%u, maxQueries=%u", static_cast<unsigned>(_type), _maxQueryObjects);
-#else
-    (void)info;
-#endif
 }
 
 void CCD3D12QueryPool::doDestroy() {
-#if defined(_WIN32)
     _impl->readbackBuffer.Reset();
     _impl->queryHeap.Reset();
-#endif
 }
 
 void *CCD3D12QueryPool::getD3D12QueryHeap() const {
-#if defined(_WIN32)
     return _impl ? _impl->queryHeap.Get() : nullptr;
-#else
-    return nullptr;
-#endif
 }
 
 void CCD3D12QueryPool::fetchResults() {
-#if defined(_WIN32)
     if (!_impl->queryHeap || !_impl->readbackBuffer) {
         return;
     }
@@ -278,9 +263,6 @@ void CCD3D12QueryPool::fetchResults() {
     D3D12_RANGE writeRange{0, 0};
     _impl->readbackBuffer->Unmap(0, &writeRange);
 
-#else
-    // Non-Windows: no-op
-#endif
 }
 
 } // namespace gfx

@@ -48,19 +48,16 @@ void dsDiagLog(const char *fmt, ...) {
 }
 } // anonymous namespace
 
-#if defined(_WIN32)
     #ifndef NOMINMAX
         #define NOMINMAX
     #endif
     #include <d3d12.h>
     #include <wrl/client.h>
-#endif
 
 namespace cc {
 namespace gfx {
 
 namespace {
-#if defined(_WIN32)
 
 // Map engine Format to DXGI_FORMAT for SRV/UAV descriptors
 DXGI_FORMAT toSRVFormat(Format format) {
@@ -137,7 +134,66 @@ D3D12_TEXTURE_ADDRESS_MODE toAddressMode(Address addr) {
     }
 }
 
-#endif // _WIN32
+D3D12_COMPARISON_FUNC toComparisonFunc(ComparisonFunc func) {
+    switch (func) {
+        case ComparisonFunc::NEVER: return D3D12_COMPARISON_FUNC_NEVER;
+        case ComparisonFunc::LESS: return D3D12_COMPARISON_FUNC_LESS;
+        case ComparisonFunc::EQUAL: return D3D12_COMPARISON_FUNC_EQUAL;
+        case ComparisonFunc::LESS_EQUAL: return D3D12_COMPARISON_FUNC_LESS_EQUAL;
+        case ComparisonFunc::GREATER: return D3D12_COMPARISON_FUNC_GREATER;
+        case ComparisonFunc::NOT_EQUAL: return D3D12_COMPARISON_FUNC_NOT_EQUAL;
+        case ComparisonFunc::GREATER_EQUAL: return D3D12_COMPARISON_FUNC_GREATER_EQUAL;
+        case ComparisonFunc::ALWAYS: return D3D12_COMPARISON_FUNC_ALWAYS;
+        default: return D3D12_COMPARISON_FUNC_ALWAYS;
+    }
+}
+
+D3D12_FILTER toSamplerFilter(const SamplerInfo &info) {
+    const bool comparison = info.cmpFunc != ComparisonFunc::ALWAYS;
+    if (info.minFilter == Filter::ANISOTROPIC ||
+        info.magFilter == Filter::ANISOTROPIC ||
+        info.mipFilter == Filter::ANISOTROPIC) {
+        return comparison ? D3D12_FILTER_COMPARISON_ANISOTROPIC : D3D12_FILTER_ANISOTROPIC;
+    }
+
+    const bool point = info.minFilter == Filter::POINT &&
+                       info.magFilter == Filter::POINT &&
+                       info.mipFilter == Filter::POINT;
+    if (point) {
+        return comparison ? D3D12_FILTER_COMPARISON_MIN_MAG_MIP_POINT : D3D12_FILTER_MIN_MAG_MIP_POINT;
+    }
+    return comparison ? D3D12_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR : D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+}
+
+D3D12_SAMPLER_DESC makeSamplerDesc(const SamplerInfo &info) {
+    D3D12_SAMPLER_DESC desc{};
+    desc.Filter = toSamplerFilter(info);
+    desc.AddressU = toAddressMode(info.addressU);
+    desc.AddressV = toAddressMode(info.addressV);
+    desc.AddressW = toAddressMode(info.addressW);
+    desc.MaxAnisotropy = info.maxAnisotropy > 0 ? static_cast<UINT>(info.maxAnisotropy) : 1U;
+    desc.ComparisonFunc = info.cmpFunc == ComparisonFunc::ALWAYS
+                              ? D3D12_COMPARISON_FUNC_NEVER
+                              : toComparisonFunc(info.cmpFunc);
+    desc.MinLOD = 0.0f;
+    desc.MaxLOD = D3D12_FLOAT32_MAX;
+    desc.MipLODBias = 0.0f;
+    return desc;
+}
+
+D3D12_SAMPLER_DESC makeDefaultSamplerDesc() {
+    SamplerInfo info{};
+    info.minFilter = Filter::POINT;
+    info.magFilter = Filter::POINT;
+    info.mipFilter = Filter::POINT;
+    info.addressU = Address::CLAMP;
+    info.addressV = Address::CLAMP;
+    info.addressW = Address::CLAMP;
+    info.maxAnisotropy = 1;
+    info.cmpFunc = ComparisonFunc::ALWAYS;
+    return makeSamplerDesc(info);
+}
+
 } // namespace
 
 // CPU-side descriptor storage for a single binding slot.
@@ -161,7 +217,6 @@ struct DescriptorData {
 };
 
 struct CCD3D12DescriptorSet::Impl {
-#if defined(_WIN32)
     ccstd::vector<DescriptorData> descriptors;
 
     // CPU-visible descriptor heap (staging area)
@@ -178,7 +233,6 @@ struct CCD3D12DescriptorSet::Impl {
 
     bool needsCbvSrvUav{false};
     bool needsSampler{false};
-#endif
 };
 
 CCD3D12DescriptorSet::CCD3D12DescriptorSet()
@@ -192,7 +246,6 @@ CCD3D12DescriptorSet::~CCD3D12DescriptorSet() {
 void CCD3D12DescriptorSet::doInit(const DescriptorSetInfo &info) {
     (void)info;
 
-#if defined(_WIN32)
     auto *layout = static_cast<const CCD3D12DescriptorSetLayout *>(_layout);
     if (!layout) {
         CC_LOG_ERROR("D3D12DescriptorSet: null layout.");
@@ -255,11 +308,9 @@ void CCD3D12DescriptorSet::doInit(const DescriptorSetInfo &info) {
 
     CC_LOG_INFO("D3D12 DescriptorSet initialized: %zu descriptors (CBV/SRV/UAV=%u, Sampler=%u)",
                 _impl->descriptors.size(), _impl->cbvSrvUavDescriptorCount, _impl->samplerDescriptorCount);
-#endif
 }
 
 void CCD3D12DescriptorSet::doDestroy() {
-#if defined(_WIN32)
     if (_impl) {
         _impl->descriptors.clear();
         if (_impl->cbvSrvUavHeap) {
@@ -271,7 +322,6 @@ void CCD3D12DescriptorSet::doDestroy() {
         _impl->cbvSrvUavDescriptorCount = 0;
         _impl->samplerDescriptorCount = 0;
     }
-#endif
 }
 
 void CCD3D12DescriptorSet::update() {
@@ -280,7 +330,6 @@ void CCD3D12DescriptorSet::update() {
 }
 
 void CCD3D12DescriptorSet::forceUpdate() {
-#if defined(_WIN32)
     if (!_impl || _impl->descriptors.empty()) return;
 
     auto *device = CCD3D12Device::getInstance();
@@ -391,16 +440,6 @@ void CCD3D12DescriptorSet::forceUpdate() {
                 case DescriptorType::UNIFORM_BUFFER:
                 case DescriptorType::DYNAMIC_UNIFORM_BUFFER: {
                     auto *gfxBuffer = _buffers[descIdx].ptr;
-                    if (diagLog) {
-                        auto *d3d12Buffer = gfxBuffer ? static_cast<CCD3D12Buffer *>(gfxBuffer) : nullptr;
-                        CC_LOG_INFO("[D3D12-SET] CBV binding=%u idx=%u hasBuffer=%s size=%u",
-                                    binding.binding, descIdx, gfxBuffer ? "Y" : "N", gfxBuffer ? gfxBuffer->getSize() : 0);
-                        if (d3d12Buffer) {
-                            CC_LOG_INFO("[D3D12-SET]   CBV offset=%u gpuVA=0x%llx",
-                                        d3d12Buffer->getD3D12ResourceOffset(),
-                                        static_cast<unsigned long long>(d3d12Buffer->getD3D12GPUVirtualAddress()));
-                        }
-                    }
                     if (fileDiag) {
                         auto *d3d12Buf = gfxBuffer ? static_cast<CCD3D12Buffer *>(gfxBuffer) : nullptr;
                         void *rawRes = d3d12Buf ? d3d12Buf->getD3D12ResourceHandle() : nullptr;
@@ -481,10 +520,6 @@ void CCD3D12DescriptorSet::forceUpdate() {
                 case DescriptorType::STORAGE_BUFFER:
                 case DescriptorType::DYNAMIC_STORAGE_BUFFER: {
                     auto *gfxBuffer = _buffers[descIdx].ptr;
-                    if (diagLog) {
-                        CC_LOG_INFO("[D3D12-SET] SRV-BUF binding=%u idx=%u hasBuffer=%s size=%u",
-                                    binding.binding, descIdx, gfxBuffer ? "Y" : "N", gfxBuffer ? gfxBuffer->getSize() : 0);
-                    }
                     if (gfxBuffer && cbvSrvUavOffset < _impl->cbvSrvUavDescriptorCount) {
                         auto *d3d12Buffer = static_cast<CCD3D12Buffer *>(gfxBuffer);
                         auto *rawResource = static_cast<ID3D12Resource *>(d3d12Buffer->getD3D12ResourceHandle());
@@ -520,11 +555,6 @@ void CCD3D12DescriptorSet::forceUpdate() {
                     // Texture (SRV) part
                     auto *gfxTexture = _textures[descIdx].ptr;
                     auto *gfxSampler = _samplers[descIdx].ptr;
-                    if (diagLog) {
-                        const auto format = gfxTexture ? static_cast<uint32_t>(gfxTexture->getFormat()) : 0U;
-                        CC_LOG_INFO("[D3D12-SET] TEX+SAMP binding=%u idx=%u hasTex=%s fmt=%u hasSampler=%s",
-                                    binding.binding, descIdx, gfxTexture ? "Y" : "N", format, gfxSampler ? "Y" : "N");
-                    }
                     if (gfxTexture && cbvSrvUavOffset < _impl->cbvSrvUavDescriptorCount) {
                         auto *d3d12Texture = static_cast<CCD3D12Texture *>(gfxTexture);
                         auto *rawResource = static_cast<ID3D12Resource *>(d3d12Texture->getD3D12ResourceHandle());
@@ -569,40 +599,15 @@ void CCD3D12DescriptorSet::forceUpdate() {
 
                     // Sampler part
                     if (gfxSampler && samplerOffset < _impl->samplerDescriptorCount) {
-                        D3D12_SAMPLER_DESC samplerDesc{};
                         const auto &samplerInfo = gfxSampler->getInfo();
-
-                        if (samplerInfo.minFilter == Filter::POINT) {
-                            samplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
-                        } else if (samplerInfo.minFilter == Filter::ANISOTROPIC) {
-                            samplerDesc.Filter = D3D12_FILTER_ANISOTROPIC;
-                        } else {
-                            samplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-                        }
-
-                        samplerDesc.AddressU = toAddressMode(samplerInfo.addressU);
-                        samplerDesc.AddressV = toAddressMode(samplerInfo.addressV);
-                        samplerDesc.AddressW = toAddressMode(samplerInfo.addressW);
-                        samplerDesc.MaxAnisotropy = static_cast<UINT>(samplerInfo.maxAnisotropy);
-                        samplerDesc.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
-                        samplerDesc.MinLOD = 0.0f;
-                        samplerDesc.MaxLOD = D3D12_FLOAT32_MAX;
-                        samplerDesc.MipLODBias = 0.0f;
+                        D3D12_SAMPLER_DESC samplerDesc = makeSamplerDesc(samplerInfo);
 
                         D3D12_CPU_DESCRIPTOR_HANDLE handle;
                         handle.ptr = _impl->samplerCpuStart.ptr + samplerOffset * _impl->samplerDescriptorSize;
                         d3dDevice->CreateSampler(&samplerDesc, handle);
                     } else if (samplerOffset < _impl->samplerDescriptorCount) {
                         // Null sampler binding: write default sampler to keep heap slot valid.
-                        D3D12_SAMPLER_DESC defaultSampler{};
-                        defaultSampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
-                        defaultSampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-                        defaultSampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-                        defaultSampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-                        defaultSampler.MaxAnisotropy = 1;
-                        defaultSampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
-                        defaultSampler.MinLOD = 0.0f;
-                        defaultSampler.MaxLOD = D3D12_FLOAT32_MAX;
+                        D3D12_SAMPLER_DESC defaultSampler = makeDefaultSamplerDesc();
                         D3D12_CPU_DESCRIPTOR_HANDLE handle;
                         handle.ptr = _impl->samplerCpuStart.ptr + samplerOffset * _impl->samplerDescriptorSize;
                         d3dDevice->CreateSampler(&defaultSampler, handle);
@@ -612,11 +617,6 @@ void CCD3D12DescriptorSet::forceUpdate() {
                 }
                 case DescriptorType::TEXTURE: {
                     auto *gfxTexture = _textures[descIdx].ptr;
-                    if (diagLog) {
-                        const auto format = gfxTexture ? static_cast<uint32_t>(gfxTexture->getFormat()) : 0U;
-                        CC_LOG_INFO("[D3D12-SET] TEX binding=%u idx=%u hasTex=%s fmt=%u",
-                                    binding.binding, descIdx, gfxTexture ? "Y" : "N", format);
-                    }
                     if (gfxTexture && cbvSrvUavOffset < _impl->cbvSrvUavDescriptorCount) {
                         auto *d3d12Texture = static_cast<CCD3D12Texture *>(gfxTexture);
                         auto *rawResource = static_cast<ID3D12Resource *>(d3d12Texture->getD3D12ResourceHandle());
@@ -662,41 +662,16 @@ void CCD3D12DescriptorSet::forceUpdate() {
                 }
                 case DescriptorType::SAMPLER: {
                     auto *gfxSampler = _samplers[descIdx].ptr;
-                    if (diagLog) {
-                        CC_LOG_INFO("[D3D12-SET] SAMP binding=%u idx=%u hasSampler=%s",
-                                    binding.binding, descIdx, gfxSampler ? "Y" : "N");
-                    }
                     if (gfxSampler && samplerOffset < _impl->samplerDescriptorCount) {
-                        D3D12_SAMPLER_DESC samplerDesc{};
                         const auto &samplerInfo = gfxSampler->getInfo();
-
-                        if (samplerInfo.minFilter == Filter::POINT) {
-                            samplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
-                        } else {
-                            samplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-                        }
-                        samplerDesc.AddressU = toAddressMode(samplerInfo.addressU);
-                        samplerDesc.AddressV = toAddressMode(samplerInfo.addressV);
-                        samplerDesc.AddressW = toAddressMode(samplerInfo.addressW);
-                        samplerDesc.MaxAnisotropy = static_cast<UINT>(samplerInfo.maxAnisotropy);
-                        samplerDesc.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
-                        samplerDesc.MinLOD = 0.0f;
-                        samplerDesc.MaxLOD = D3D12_FLOAT32_MAX;
+                        D3D12_SAMPLER_DESC samplerDesc = makeSamplerDesc(samplerInfo);
 
                         D3D12_CPU_DESCRIPTOR_HANDLE handle;
                         handle.ptr = _impl->samplerCpuStart.ptr + samplerOffset * _impl->samplerDescriptorSize;
                         d3dDevice->CreateSampler(&samplerDesc, handle);
                     } else if (samplerOffset < _impl->samplerDescriptorCount) {
                         // Null sampler binding: write default sampler to keep heap slot valid.
-                        D3D12_SAMPLER_DESC defaultSampler{};
-                        defaultSampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
-                        defaultSampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-                        defaultSampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-                        defaultSampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-                        defaultSampler.MaxAnisotropy = 1;
-                        defaultSampler.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
-                        defaultSampler.MinLOD = 0.0f;
-                        defaultSampler.MaxLOD = D3D12_FLOAT32_MAX;
+                        D3D12_SAMPLER_DESC defaultSampler = makeDefaultSamplerDesc();
                         D3D12_CPU_DESCRIPTOR_HANDLE handle;
                         handle.ptr = _impl->samplerCpuStart.ptr + samplerOffset * _impl->samplerDescriptorSize;
                         d3dDevice->CreateSampler(&defaultSampler, handle);
@@ -706,11 +681,6 @@ void CCD3D12DescriptorSet::forceUpdate() {
                 }
                 case DescriptorType::STORAGE_IMAGE: {
                     auto *gfxTexture = _textures[descIdx].ptr;
-                    if (diagLog) {
-                        const auto format = gfxTexture ? static_cast<uint32_t>(gfxTexture->getFormat()) : 0U;
-                        CC_LOG_INFO("[D3D12-SET] UAV binding=%u idx=%u hasTex=%s fmt=%u",
-                                    binding.binding, descIdx, gfxTexture ? "Y" : "N", format);
-                    }
                     if (cbvSrvUavOffset < _impl->cbvSrvUavDescriptorCount) {
                         D3D12_CPU_DESCRIPTOR_HANDLE handle;
                         handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
@@ -738,11 +708,6 @@ void CCD3D12DescriptorSet::forceUpdate() {
                 case DescriptorType::INPUT_ATTACHMENT: {
                     // Input attachment is treated as SRV in D3D12
                     auto *gfxTexture = _textures[descIdx].ptr;
-                    if (diagLog) {
-                        const auto format = gfxTexture ? static_cast<uint32_t>(gfxTexture->getFormat()) : 0U;
-                        CC_LOG_INFO("[D3D12-SET] INPUT binding=%u idx=%u hasTex=%s fmt=%u",
-                                    binding.binding, descIdx, gfxTexture ? "Y" : "N", format);
-                    }
                     if (gfxTexture && cbvSrvUavOffset < _impl->cbvSrvUavDescriptorCount) {
                         auto *d3d12Texture = static_cast<CCD3D12Texture *>(gfxTexture);
                         auto *rawResource = static_cast<ID3D12Resource *>(d3d12Texture->getD3D12ResourceHandle());
@@ -779,7 +744,6 @@ void CCD3D12DescriptorSet::forceUpdate() {
             }
         }
     }
-#endif
 
     if (diagLog) {
         ++s_diagDescriptorSetLogCount;
@@ -793,39 +757,22 @@ void CCD3D12DescriptorSet::forceUpdate() {
 }
 
 void *CCD3D12DescriptorSet::getCbvSrvUavDescriptorHeap() const {
-#if defined(_WIN32)
     return (_impl && _impl->cbvSrvUavHeap) ? _impl->cbvSrvUavHeap.Get() : nullptr;
-#else
-    return nullptr;
-#endif
 }
 
 void *CCD3D12DescriptorSet::getSamplerDescriptorHeap() const {
-#if defined(_WIN32)
     return (_impl && _impl->samplerHeap) ? _impl->samplerHeap.Get() : nullptr;
-#else
-    return nullptr;
-#endif
 }
 
 uint32_t CCD3D12DescriptorSet::getCbvSrvUavDescriptorCount() const {
-#if defined(_WIN32)
     return _impl ? _impl->cbvSrvUavDescriptorCount : 0;
-#else
-    return 0;
-#endif
 }
 
 uint32_t CCD3D12DescriptorSet::getSamplerDescriptorCount() const {
-#if defined(_WIN32)
     return _impl ? _impl->samplerDescriptorCount : 0;
-#else
-    return 0;
-#endif
 }
 
 void CCD3D12DescriptorSet::applyDynamicOffsets(uint32_t dynamicOffsetCount, const uint32_t *dynamicOffsets) {
-#if defined(_WIN32)
     if (!_impl || !_layout || dynamicOffsetCount == 0 || !dynamicOffsets) {
         return;
     }
@@ -963,10 +910,6 @@ void CCD3D12DescriptorSet::applyDynamicOffsets(uint32_t dynamicOffsetCount, cons
             }
         }
     }
-#else
-    (void)dynamicOffsetCount;
-    (void)dynamicOffsets;
-#endif
 }
 
 } // namespace gfx

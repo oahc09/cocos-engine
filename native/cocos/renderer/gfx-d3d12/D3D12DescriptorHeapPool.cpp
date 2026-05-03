@@ -26,29 +26,23 @@
 #include "D3D12Device.h"
 #include "base/Log.h"
 
-#if defined(_WIN32)
     #ifndef NOMINMAX
         #define NOMINMAX
     #endif
     #include <d3d12.h>
     #include <wrl/client.h>
-#endif
 
 namespace cc {
 namespace gfx {
 
 struct HeapEntry {
-#if defined(_WIN32)
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> heap;
-#endif
     uint32_t usedCount{0};
     uint32_t capacity{0};
 };
 
 struct D3D12DescriptorHeapPool::Impl {
-#if defined(_WIN32)
     D3D12_DESCRIPTOR_HEAP_TYPE d3dHeapType{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV};
-#endif
     HeapType heapType{HeapType::CBV_SRV_UAV};
     uint32_t maxDescriptorsPerHeap{1024};
     uint32_t descriptorSize{0};
@@ -81,7 +75,6 @@ void D3D12DescriptorHeapPool::initialize(HeapType heapType, uint32_t maxDescript
     _impl->maxDescriptorsPerHeap = maxDescriptorsPerHeap;
     _impl->shaderVisible = shaderVisible;
 
-#if defined(_WIN32)
     auto *device = CCD3D12Device::getInstance();
     auto *d3dDevice = static_cast<ID3D12Device *>(device ? device->getD3D12DeviceHandle() : nullptr);
     if (!d3dDevice) {
@@ -99,7 +92,6 @@ void D3D12DescriptorHeapPool::initialize(HeapType heapType, uint32_t maxDescript
     }
 
     _impl->descriptorSize = d3dDevice->GetDescriptorHandleIncrementSize(_impl->d3dHeapType);
-#endif
 
     _impl->initialized = true;
     CC_LOG_INFO("D3D12DescriptorHeapPool initialized: type=%s, maxPerHeap=%u, shaderVisible=%s",
@@ -122,7 +114,6 @@ D3D12DescriptorHeapPool::Allocation D3D12DescriptorHeapPool::allocate(uint32_t c
         return alloc;
     }
 
-#if defined(_WIN32)
     // First try to find a free block that fits
     for (auto it = _impl->freeList.begin(); it != _impl->freeList.end(); ++it) {
         if (it->count >= count) {
@@ -219,7 +210,6 @@ D3D12DescriptorHeapPool::Allocation D3D12DescriptorHeapPool::allocate(uint32_t c
     }
 
     alloc.isValid = true;
-#endif
 
     return alloc;
 }
@@ -232,7 +222,6 @@ void D3D12DescriptorHeapPool::deallocate(const Allocation &alloc) {
     // Add to free list for potential reuse
     typename Impl::FreeBlock block;
     // Recover offset from CPU handle
-#if defined(_WIN32)
     if (alloc.heapIndex < static_cast<uint32_t>(_impl->heaps.size())) {
         auto &heap = _impl->heaps[alloc.heapIndex];
         D3D12_CPU_DESCRIPTOR_HANDLE heapStart = heap.heap->GetCPUDescriptorHandleForHeapStart();
@@ -244,7 +233,6 @@ void D3D12DescriptorHeapPool::deallocate(const Allocation &alloc) {
         block.count = alloc.numDescriptors;
         _impl->freeList.push_back(block);
     }
-#endif
 }
 
 void D3D12DescriptorHeapPool::reset() {
@@ -259,14 +247,10 @@ uint32_t D3D12DescriptorHeapPool::getDescriptorSize() const {
 }
 
 void *D3D12DescriptorHeapPool::getHeap(uint32_t heapIndex) const {
-#if defined(_WIN32)
     if (!_impl || heapIndex >= static_cast<uint32_t>(_impl->heaps.size())) {
         return nullptr;
     }
     return _impl->heaps[heapIndex].heap.Get();
-#else
-    return nullptr;
-#endif
 }
 
 uint32_t D3D12DescriptorHeapPool::getHeapCount() const {
