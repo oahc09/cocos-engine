@@ -886,16 +886,18 @@ void CCD3D12DescriptorSet::applyDynamicOffsets(uint32_t dynamicOffsetCount, cons
                             const uint64_t totalOffset = static_cast<uint64_t>(d3d12Buffer->getD3D12ResourceOffset()) + dynamicOffset;
                             const uint64_t resourceWidth = rawResource->GetDesc().Width;
                             const uint64_t availableSize = (resourceWidth > totalOffset) ? (resourceWidth - totalOffset) : 0ULL;
-                            const uint64_t logicalSize = gfxBuffer->getSize() > dynamicOffset ? static_cast<uint64_t>(gfxBuffer->getSize() - dynamicOffset) : 0ULL;
-                            const uint64_t logicalAligned = logicalSize & ~255ULL;
-                            const uint64_t cbvSize = std::min<uint64_t>(availableSize & ~255ULL, 64ULL * 1024ULL);
-                            if (logicalAligned >= 256ULL && cbvSize < logicalAligned) {
-                                CC_LOG_WARNING("[D3D12-CBV-DYN] available range smaller than logical dynamic buffer size: binding=%u descIdx=%u dynOffset=%u logical=%llu available=%llu rawWidth=%llu totalOffset=%llu",
+                            // The dynamic offset selects an element inside the backing allocation.
+                            // It must not shrink the logical size of the bound buffer view.
+                            const uint64_t requiredAligned = (static_cast<uint64_t>(gfxBuffer->getSize()) + 255ULL) & ~255ULL;
+                            const uint64_t availableAligned = availableSize & ~255ULL;
+                            const uint64_t cbvSize = std::min<uint64_t>(requiredAligned, 64ULL * 1024ULL);
+                            if (availableAligned < cbvSize) {
+                                CC_LOG_ERROR("[D3D12-CBV-DYN] dynamic CBV range is too small: binding=%u descIdx=%u dynOffset=%u required=%llu available=%llu rawWidth=%llu totalOffset=%llu",
                                                binding.binding,
                                                descIdx,
                                                dynamicOffset,
-                                               static_cast<unsigned long long>(logicalAligned),
                                                static_cast<unsigned long long>(cbvSize),
+                                               static_cast<unsigned long long>(availableAligned),
                                                static_cast<unsigned long long>(resourceWidth),
                                                static_cast<unsigned long long>(totalOffset));
                             }
@@ -906,7 +908,7 @@ void CCD3D12DescriptorSet::applyDynamicOffsets(uint32_t dynamicOffsetCount, cons
 
                             D3D12_CPU_DESCRIPTOR_HANDLE handle;
                             handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
-                            if (cbvDesc.SizeInBytes >= 256U) {
+                            if (cbvDesc.SizeInBytes >= 256U && availableAligned >= cbvSize) {
                                 d3dDevice->CreateConstantBufferView(&cbvDesc, handle);
                             } else {
                                 writeDummyCBV(handle);

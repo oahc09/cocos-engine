@@ -58,3 +58,10 @@
 - copyTexture/blitTexture/resolveTexture 完整实现
 - getRTVHandle 按 texture 独立检查
 - pipelineBarrier 增加 inRenderPass 标志
+
+### D3D12 半透明渲染修复 (2026-05-03)
+- **H1 已修复**: bindPipelineState 中添加 OMSetBlendFactor，传递 BlendState.blendColor
+- **M1 已修复**: SampleDesc.Count 从 RenderPass.getSampleCount() 获取（不再硬编码 1）
+- **附带效果**: Alpha-to-Coverage 现在可随 MSAA 启用生效
+- 分析报告: AI/d3d12-alpha-blend-analysis.md
+- **已知残留限制**: CONSTANT_ALPHA 映射不精确（D3D12 API 限制，不影响内置 Effect）

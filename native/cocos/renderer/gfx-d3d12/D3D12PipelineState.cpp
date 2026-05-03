@@ -210,6 +210,21 @@ UINT8 toD3D12ColorWriteMask(ColorMask mask) {
     return result;
 }
 
+D3D12_RENDER_TARGET_BLEND_DESC makeDefaultRenderTargetBlendDesc() {
+    D3D12_RENDER_TARGET_BLEND_DESC desc{};
+    desc.BlendEnable = FALSE;
+    desc.LogicOpEnable = FALSE;
+    desc.SrcBlend = D3D12_BLEND_ONE;
+    desc.DestBlend = D3D12_BLEND_ZERO;
+    desc.BlendOp = D3D12_BLEND_OP_ADD;
+    desc.SrcBlendAlpha = D3D12_BLEND_ONE;
+    desc.DestBlendAlpha = D3D12_BLEND_ZERO;
+    desc.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    desc.LogicOp = D3D12_LOGIC_OP_NOOP;
+    desc.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    return desc;
+}
+
 DXGI_FORMAT toD3D12VertexFormat(Format fmt) {
     switch (fmt) {
         case Format::RGB32F:    return DXGI_FORMAT_R32G32B32_FLOAT;
@@ -353,18 +368,19 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
     UINT numRenderTargets = 0;
     for (UINT i = 0; i < D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i) {
         auto &rtBlend = psoDesc.BlendState.RenderTarget[i];
+        rtBlend = makeDefaultRenderTargetBlendDesc();
         if (i < blend.targets.size()) {
             const auto &target = blend.targets[i];
             rtBlend.BlendEnable = target.blend ? TRUE : FALSE;
+            rtBlend.LogicOpEnable = FALSE;
             rtBlend.SrcBlend = toD3D12Blend(target.blendSrc);
             rtBlend.DestBlend = toD3D12Blend(target.blendDst);
             rtBlend.BlendOp = toD3D12BlendOp(target.blendEq);
             rtBlend.SrcBlendAlpha = toD3D12Blend(target.blendSrcAlpha);
             rtBlend.DestBlendAlpha = toD3D12Blend(target.blendDstAlpha);
             rtBlend.BlendOpAlpha = toD3D12BlendOp(target.blendAlphaEq);
+            rtBlend.LogicOp = D3D12_LOGIC_OP_NOOP;
             rtBlend.RenderTargetWriteMask = toD3D12ColorWriteMask(target.blendColorMask);
-        } else {
-            rtBlend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
         }
     }
 
@@ -460,9 +476,16 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
     // Primitive topology
     psoDesc.PrimitiveTopologyType = toD3D12PrimitiveTopologyType(_primitive);
 
-    // Sample description
-    psoDesc.SampleDesc.Count = 1;
-    psoDesc.SampleDesc.Quality = 0;
+    // Sample description — derive from RenderPass if available
+    if (_renderPass) {
+        auto *d3d12RenderPass = static_cast<CCD3D12RenderPass *>(const_cast<RenderPass *>(_renderPass));
+        uint32_t sampleCount = d3d12RenderPass->getSampleCount();
+        psoDesc.SampleDesc.Count = (sampleCount > 0) ? sampleCount : 1;
+        psoDesc.SampleDesc.Quality = 0;
+    } else {
+        psoDesc.SampleDesc.Count = 1;
+        psoDesc.SampleDesc.Quality = 0;
+    }
     psoDesc.SampleMask = 0xFFFFFFFF;
 
     // Node mask

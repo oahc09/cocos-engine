@@ -293,10 +293,20 @@ uint32_t CCD3D12InputAssembler::getVertexBufferCount() const {
 
 void CCD3D12InputAssembler::fillVertexBufferViews(void *views) const {
 #if defined(_WIN32)
-    if (!_impl || _impl->vbViews.empty()) return;
+    if (!views || _vertexBuffers.empty()) return;
     auto *dst = static_cast<D3D12_VERTEX_BUFFER_VIEW *>(views);
-    for (size_t i = 0; i < _impl->vbViews.size(); ++i) {
-        dst[i] = _impl->vbViews[i];
+    for (size_t i = 0; i < _vertexBuffers.size(); ++i) {
+        auto *d3d12Buffer = static_cast<CCD3D12Buffer *>(_vertexBuffers[i]);
+        D3D12_VERTEX_BUFFER_VIEW view{};
+        if (d3d12Buffer) {
+            // Buffer::resize() can recreate the D3D12 resource after the IA was
+            // initialized. Build the view from the live buffer to avoid stale
+            // GPU virtual addresses and sizes.
+            view.BufferLocation = d3d12Buffer->getD3D12GPUVirtualAddress();
+            view.SizeInBytes = d3d12Buffer->getSize();
+            view.StrideInBytes = d3d12Buffer->getStride();
+        }
+        dst[i] = view;
     }
 #else
     (void)views;
@@ -313,8 +323,17 @@ bool CCD3D12InputAssembler::hasIndexBuffer() const {
 
 void CCD3D12InputAssembler::fillIndexBufferView(void *view) const {
 #if defined(_WIN32)
-    if (!_impl || !_impl->hasIndexBuffer) return;
-    *static_cast<D3D12_INDEX_BUFFER_VIEW *>(view) = _impl->ibView;
+    if (!view || !_indexBuffer) return;
+    auto *d3d12Buffer = static_cast<CCD3D12Buffer *>(_indexBuffer);
+    D3D12_INDEX_BUFFER_VIEW liveView{};
+    if (d3d12Buffer) {
+        // Keep index binding in sync with Buffer::resize(), which can replace
+        // the underlying D3D12 resource after IA creation.
+        liveView.BufferLocation = d3d12Buffer->getD3D12GPUVirtualAddress();
+        liveView.SizeInBytes = d3d12Buffer->getSize();
+        liveView.Format = d3d12Buffer->getStride() == 4 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT;
+    }
+    *static_cast<D3D12_INDEX_BUFFER_VIEW *>(view) = liveView;
 #else
     (void)view;
 #endif
@@ -322,7 +341,11 @@ void CCD3D12InputAssembler::fillIndexBufferView(void *view) const {
 
 uint32_t CCD3D12InputAssembler::getIndexFormat() const {
 #if defined(_WIN32)
-    return _impl ? _impl->indexFormat : 0;
+    if (!_indexBuffer) {
+        return 0;
+    }
+    return _indexBuffer->getStride() == 4 ? static_cast<uint32_t>(DXGI_FORMAT_R32_UINT)
+                                          : static_cast<uint32_t>(DXGI_FORMAT_R16_UINT);
 #else
     return 0;
 #endif

@@ -38,6 +38,24 @@
 #include "D3D12Texture.h"
 #include "base/Log.h"
 
+// File diagnostic for correlating RenderDoc events with D3D12 binding state.
+#include <cstdarg>
+#include <cstdio>
+namespace {
+void drawDiagLog(const char *fmt, ...) {
+    static FILE *s_file = nullptr;
+    if (!s_file) {
+        s_file = fopen("C:\\temp\\d3d12-render-diag.log", "a");
+        if (!s_file) return;
+    }
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(s_file, fmt, args);
+    fflush(s_file);
+    va_end(args);
+}
+} // anonymous namespace
+
 #if defined(_WIN32)
     #ifndef NOMINMAX
         #define NOMINMAX
@@ -537,19 +555,13 @@ void CCD3D12CommandBuffer::bindPipelineState(PipelineState *pso) {
 
     _impl->commandList->SetPipelineState(d3d12PipelineState);
 
-    // Diagnostic: log blend state of bound PSO
+    // Apply blend constants from PSO's BlendState.
+    // This matches WebGL backend behavior (gl.blendColor) and is required
+    // when any target uses CONSTANT_COLOR / CONSTANT_ALPHA blend factors.
     {
         const auto &bs = pso->getBlendState();
-        const char *shaderName = pso->getShader() ? pso->getShader()->getName().c_str() : "<null>";
-        bool anyBlend = false;
-        for (size_t i = 0; i < bs.targets.size(); ++i) {
-            if (bs.targets[i].blend) { anyBlend = true; break; }
-        }
-        CC_LOG_INFO("[D3D12-BIND-PSO] shader='%s' fallback=%d targets=%zu anyBlend=%s blend[0]=%u",
-                     shaderName, d3d12PSO->isDiagnosticFallback() ? 1 : 0,
-                     static_cast<unsigned>(bs.targets.size()),
-                     anyBlend ? "YES" : "NO",
-                     bs.targets.empty() ? 0u : bs.targets[0].blend);
+        float blendFactor[4] = { bs.blendColor.x, bs.blendColor.y, bs.blendColor.z, bs.blendColor.w };
+        _impl->commandList->OMSetBlendFactor(blendFactor);
     }
 
     // Set primitive topology from PSO
@@ -592,6 +604,22 @@ void CCD3D12CommandBuffer::bindDescriptorSet(uint32_t set, DescriptorSet *descri
         d3d12Set->applyDynamicOffsets(dynamicOffsetCount, dynamicOffsets);
     }
 
+    static uint32_t s_bindSetDiagCount = 0;
+    if (s_bindSetDiagCount < 3000) {
+        drawDiagLog("[BIND-SET] #%u setIndex=%u set=%p layout=%p dynCount=%u dyn0=%u cbvCount=%u samplerCount=%u pendingBefore=%u dirtyBefore=%d\n",
+                    s_bindSetDiagCount,
+                    set,
+                    descriptorSet,
+                    descriptorSet->getLayout(),
+                    dynamicOffsetCount,
+                    (dynamicOffsetCount > 0 && dynamicOffsets) ? dynamicOffsets[0] : 0U,
+                    d3d12Set->getCbvSrvUavDescriptorCount(),
+                    d3d12Set->getSamplerDescriptorCount(),
+                    _impl->pendingSetCount,
+                    _impl->descriptorSetsDirty ? 1 : 0);
+        ++s_bindSetDiagCount;
+    }
+
     // Store in pending list (replace if same set index already recorded)
     bool replaced = false;
     for (uint32_t i = 0; i < _impl->pendingSetCount; ++i) {
@@ -627,6 +655,18 @@ void CCD3D12CommandBuffer::flushDescriptorSets() {
     auto *boundLayout = static_cast<CCD3D12PipelineLayout *>(_impl->boundPipelineLayout);
     if (!boundLayout) return;
 
+    static uint32_t s_flushDiagCount = 0;
+    const bool flushDiag = s_flushDiagCount < 3000;
+    const uint32_t flushId = s_flushDiagCount++;
+    if (flushDiag) {
+        const char *shaderName = "<null>";
+        if (_impl->boundPipelineState && _impl->boundPipelineState->getShader()) {
+            shaderName = _impl->boundPipelineState->getShader()->getName().c_str();
+        }
+        drawDiagLog("[FLUSH] #%u shader='%s' boundLayout=%p pendingSets=%u\n",
+                    flushId, shaderName, _impl->boundPipelineLayout, _impl->pendingSetCount);
+    }
+
     auto *d3dDevice = static_cast<ID3D12Device *>(device->getD3D12DeviceHandle());
     auto *heapPool = device->getGPUDescriptorHeapPool();
     auto *samplerPool = device->getSamplerDescriptorHeapPool();
@@ -659,6 +699,17 @@ void CCD3D12CommandBuffer::flushDescriptorSets() {
         const auto samplerCount = d3d12Set->getSamplerDescriptorCount();
         const auto cbvRootIndex = boundLayout->getCbvSrvUavRootParameterIndex(setIdx);
         const auto samplerRootIndex = boundLayout->getSamplerRootParameterIndex(setIdx);
+        if (flushDiag) {
+            drawDiagLog("  [FLUSH-SET] #%u setIndex=%u set=%p layout=%p cbvCount=%u samplerCount=%u cbvRoot=%d samplerRoot=%d\n",
+                        flushId,
+                        setIdx,
+                        d3d12Set,
+                        d3d12Set->getLayout(),
+                        cbvCount,
+                        samplerCount,
+                        cbvRootIndex,
+                        samplerRootIndex);
+        }
 
         // Copy CBV/SRV/UAV descriptors to GPU heap
         if (cbvCount > 0 && cbvRootIndex >= 0) {
@@ -672,6 +723,15 @@ void CCD3D12CommandBuffer::flushDescriptorSets() {
                 d3dDevice->CopyDescriptorsSimple(cbvCount, dstStart, srcStart, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
                 cbvHeap = static_cast<ID3D12DescriptorHeap *>(heapPool->getHeap(alloc.heapIndex));
                 cbvEntries.push_back({static_cast<UINT>(cbvRootIndex), {alloc.gpuHandle}});
+                if (flushDiag) {
+                    drawDiagLog("    [FLUSH-CBV] #%u setIndex=%u root=%d gpuHandle=0x%llx count=%u heapIndex=%u\n",
+                                flushId,
+                                setIdx,
+                                cbvRootIndex,
+                                static_cast<unsigned long long>(alloc.gpuHandle),
+                                cbvCount,
+                                alloc.heapIndex);
+                }
             }
         }
 
@@ -686,6 +746,15 @@ void CCD3D12CommandBuffer::flushDescriptorSets() {
                 d3dDevice->CopyDescriptorsSimple(samplerCount, dstStart, srcStart, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
                 samplerHeap = static_cast<ID3D12DescriptorHeap *>(samplerPool->getHeap(alloc.heapIndex));
                 samplerEntries.push_back({static_cast<UINT>(samplerRootIndex), {alloc.gpuHandle}});
+                if (flushDiag) {
+                    drawDiagLog("    [FLUSH-SAMP] #%u setIndex=%u root=%d gpuHandle=0x%llx count=%u heapIndex=%u\n",
+                                flushId,
+                                setIdx,
+                                samplerRootIndex,
+                                static_cast<unsigned long long>(alloc.gpuHandle),
+                                samplerCount,
+                                alloc.heapIndex);
+                }
             }
         }
     }
@@ -852,6 +921,36 @@ void CCD3D12CommandBuffer::draw(const DrawInfo &info) {
     const uint32_t instanceCount = std::max<uint32_t>(info.instanceCount, 1);
     const uint32_t firstInstance = info.firstInstance;
     auto *d3d12PSO = static_cast<CCD3D12PipelineState *>(_impl->boundPipelineState);
+    static uint32_t s_drawDiagCount = 0;
+    const uint32_t drawId = s_drawDiagCount++;
+    if (drawId < 3000) {
+        const char *shaderName = "<null>";
+        if (_impl->boundPipelineState && _impl->boundPipelineState->getShader()) {
+            shaderName = _impl->boundPipelineState->getShader()->getName().c_str();
+        }
+        const auto *blendTarget0 = (_impl->boundPipelineState && !_impl->boundPipelineState->getBlendState().targets.empty())
+                                       ? &_impl->boundPipelineState->getBlendState().targets[0]
+                                       : nullptr;
+        drawDiagLog("[DRAW] #%u shader='%s' indexCount=%u vertexCount=%u instanceCount=%u firstIndex=%u vertexOffset=%d firstInstance=%u pso=%p layout=%p pendingSets=%u dirtyAfterFlush=%d fallback=%d blend0=%u src=%u dst=%u srcA=%u dstA=%u\n",
+                    drawId,
+                    shaderName,
+                    info.indexCount,
+                    info.vertexCount,
+                    instanceCount,
+                    info.firstIndex,
+                    info.vertexOffset,
+                    firstInstance,
+                    _impl->boundPipelineState,
+                    _impl->boundPipelineLayout,
+                    _impl->pendingSetCount,
+                    _impl->descriptorSetsDirty ? 1 : 0,
+                    (d3d12PSO && d3d12PSO->isDiagnosticFallback()) ? 1 : 0,
+                    blendTarget0 ? blendTarget0->blend : 0U,
+                    blendTarget0 ? static_cast<uint32_t>(blendTarget0->blendSrc) : 0U,
+                    blendTarget0 ? static_cast<uint32_t>(blendTarget0->blendDst) : 0U,
+                    blendTarget0 ? static_cast<uint32_t>(blendTarget0->blendSrcAlpha) : 0U,
+                    blendTarget0 ? static_cast<uint32_t>(blendTarget0->blendDstAlpha) : 0U);
+    }
 
     if (d3d12PSO && d3d12PSO->isDiagnosticFallback()) {
         _impl->commandList->DrawInstanced(3, 1, 0, 0);
