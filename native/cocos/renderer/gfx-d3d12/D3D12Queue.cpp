@@ -34,6 +34,7 @@
     #include <wrl/client.h>
 
 namespace {
+#ifndef NDEBUG
 void dumpQueueDebugMessages(ID3D12Device *device, const char *checkpoint) {
     if (!device) {
         return;
@@ -65,6 +66,9 @@ void dumpQueueDebugMessages(ID3D12Device *device, const char *checkpoint) {
     }
     infoQueue->ClearStoredMessages();
 }
+#else
+void dumpQueueDebugMessages(ID3D12Device *, const char *) {}
+#endif
 } // namespace
 
 namespace cc {

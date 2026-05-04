@@ -30,24 +30,6 @@
 #include "base/Log.h"
 #include "gfx-base/GFXDef.h"
 
-// File diagnostic for descriptor set binding
-#include <cstdio>
-#include <cstdarg>
-namespace {
-void dsDiagLog(const char *fmt, ...) {
-    static FILE *s_file = nullptr;
-    if (!s_file) {
-        s_file = fopen("C:\\temp\\d3d12-ds-diag.log", "a");
-        if (!s_file) return;
-    }
-    va_list args;
-    va_start(args, fmt);
-    vfprintf(s_file, fmt, args);
-    fflush(s_file);
-    va_end(args);
-}
-} // anonymous namespace
-
     #ifndef NOMINMAX
         #define NOMINMAX
     #endif
@@ -416,19 +398,6 @@ void CCD3D12DescriptorSet::forceUpdate() {
 
     uint32_t cbvSrvUavOffset = 0;
     uint32_t samplerOffset = 0;
-    static uint32_t s_diagDescriptorSetLogCount = 0;
-    const bool diagLog = s_diagDescriptorSetLogCount < 24 && _layout && _layout->getDescriptorCount() > 0;
-
-    // File diagnostic: keep a larger startup window so we can capture
-    // descriptor writes after splash-screen and into real scene draws.
-    static uint32_t s_fileDiagCount = 0;
-    const bool fileDiag = s_fileDiagCount < 2000;
-    if (fileDiag) {
-        dsDiagLog("[FORCE-UPDATE] #%u: set=%p layout=%p bindings=%zu cbvSrvUavCount=%u samplerCount=%u descriptorCount=%u\n",
-                  s_fileDiagCount, this, _layout, bindings.size(),
-                  _impl->cbvSrvUavDescriptorCount, _impl->samplerDescriptorCount,
-                  _layout->getDescriptorCount());
-    }
 
     for (const auto &binding : bindings) {
         const uint32_t baseDescIdx = descriptorIndices[binding.binding];
@@ -440,14 +409,6 @@ void CCD3D12DescriptorSet::forceUpdate() {
                 case DescriptorType::UNIFORM_BUFFER:
                 case DescriptorType::DYNAMIC_UNIFORM_BUFFER: {
                     auto *gfxBuffer = _buffers[descIdx].ptr;
-                    if (fileDiag) {
-                        auto *d3d12Buf = gfxBuffer ? static_cast<CCD3D12Buffer *>(gfxBuffer) : nullptr;
-                        void *rawRes = d3d12Buf ? d3d12Buf->getD3D12ResourceHandle() : nullptr;
-                        uint64_t gpuVA = d3d12Buf ? d3d12Buf->getD3D12GPUVirtualAddress() : 0;
-                        dsDiagLog("  CBV binding=%u descIdx=%u hasBuf=%s rawRes=%p gpuVA=0x%llx heapOffset=%u\n",
-                                  binding.binding, descIdx, gfxBuffer ? "Y" : "N", rawRes,
-                                  static_cast<unsigned long long>(gpuVA), cbvSrvUavOffset);
-                    }
                     if (gfxBuffer && cbvSrvUavOffset < _impl->cbvSrvUavDescriptorCount) {
                         auto *d3d12Buffer = static_cast<CCD3D12Buffer *>(gfxBuffer);
                         auto *rawResource = static_cast<ID3D12Resource *>(d3d12Buffer->getD3D12ResourceHandle());
@@ -478,20 +439,6 @@ void CCD3D12DescriptorSet::forceUpdate() {
                                 D3D12_CPU_DESCRIPTOR_HANDLE handle;
                                 handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
                                 d3dDevice->CreateConstantBufferView(&cbvDesc, handle);
-
-                                // Verify: read back the CBV desc we just wrote
-                                if (fileDiag && cbvSrvUavOffset < 4) {
-                                    D3D12_CONSTANT_BUFFER_VIEW_DESC verifyDesc{};
-                                    UINT verifySize = 0;
-                                    d3dDevice->CheckFeatureSupport(D3D12_FEATURE_ROOT_SIGNATURE, nullptr, 0); // no-op
-                                    // Just log what we wrote
-                                    dsDiagLog("    CBV WRITE: heapOffset=%u gpuVA=0x%llx sizeInBytes=%u avail=%llu handle=0x%llx\n",
-                                              cbvSrvUavOffset,
-                                              static_cast<unsigned long long>(cbvDesc.BufferLocation),
-                                              cbvDesc.SizeInBytes,
-                                              static_cast<unsigned long long>(availableAligned),
-                                              static_cast<unsigned long long>(handle.ptr));
-                                }
                             } else {
                                 // Buffer too small for CBV (shouldn't happen with 256-byte aligned creation).
                                 // Write a null descriptor to keep heap layout consistent.
@@ -745,14 +692,6 @@ void CCD3D12DescriptorSet::forceUpdate() {
         }
     }
 
-    if (diagLog) {
-        ++s_diagDescriptorSetLogCount;
-    }
-    if (fileDiag) {
-        dsDiagLog("[FORCE-UPDATE] #%u done: final cbvSrvUavOffset=%u samplerOffset=%u\n",
-                  s_fileDiagCount, cbvSrvUavOffset, samplerOffset);
-        ++s_fileDiagCount;
-    }
     _isDirty = false;
 }
 

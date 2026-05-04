@@ -121,12 +121,6 @@ void CCD3D12Buffer::update(const void *buffer, uint32_t size) {
     auto *dst = static_cast<uint8_t *>(mappedData) + _impl->resourceOffset;
     std::memcpy(dst, buffer, copySize);
 
-    static uint32_t s_diagBufferUpdateCount = 0;
-    if (s_diagBufferUpdateCount < 48 && copySize >= sizeof(float) * 4 && _size <= 256) {
-        const auto *floats = static_cast<const float *>(buffer);
-        ++s_diagBufferUpdateCount;
-    }
-
     D3D12_RANGE writeRange{_impl->resourceOffset, _impl->resourceOffset + copySize};
     _impl->resource->Unmap(0, &writeRange);
 }

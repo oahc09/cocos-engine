@@ -59,6 +59,14 @@
 - getRTVHandle 按 texture 独立检查
 - pipelineBarrier 增加 inRenderPass 标志
 
+### D3D12 性能审查 (2026-05-03)
+- **报告**: AI/d3d12-performance-review.md
+- **Critical**: 同步submit(C1)、每帧描述符堆reset(C2)、forceUpdate无dirty追踪(C3)、文件I/O诊断泄漏(C4)
+- **Important**: Buffer全用UPLOAD堆(I1)、无帧流水线(I2)、每次纹理上传新建UploadBuffer(I3)、flushDescriptorSets堆分配(I4)、DescriptorSet各自CPU堆(I5)、全局UAV屏障(I6)
+- **最高优先级修复**: 帧流水线+异步submit → 预估30-50% FPS提升
+- **C4 已修复 (2026-05-03)**: 移除 dsDiagLog 文件I/O、D3D12Buffer 诊断计数、Queue 诊断改为 Debug-only
+- **I4+M2 已修复 (2026-05-04)**: 所有渲染热路径上的 ccstd::vector 替换为固定大小栈数组（flushDescriptorSets/bindInputAssembler/beginRenderPass/endRenderPass/blitTexture/copyTexture/resolveTexture），编译通过
+
 ### D3D12 半透明渲染修复 (2026-05-03)
 - **H1 已修复**: bindPipelineState 中添加 OMSetBlendFactor，传递 BlendState.blendColor
 - **M1 已修复**: SampleDesc.Count 从 RenderPass.getSampleCount() 获取（不再硬编码 1）

@@ -52,6 +52,9 @@ namespace gfx {
 // Maximum number of descriptor sets that can be bound simultaneously
 static constexpr uint32_t D3D12_MAX_BOUND_SETS = 4;
 
+// Maximum resource barriers per render pass transition (swapchain + color attachments + depth)
+static constexpr uint32_t MAX_PASS_BARRIERS = 16;
+
 struct CCD3D12CommandBuffer::Impl {
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator> commandAllocator;
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commandList;
@@ -252,7 +255,9 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
         return;
     }
 
-    ccstd::vector<D3D12_RESOURCE_BARRIER> prePassBarriers;
+    // Fixed-size stack array for pre-pass barriers: swapchain(1) + colors(8) + depth(1) ≤ 10
+    D3D12_RESOURCE_BARRIER prePassBarriers[MAX_PASS_BARRIERS];
+    uint32_t prePassBarrierCount = 0;
 
     // If this framebuffer renders to a swapchain, insert PRESENT → RENDER_TARGET barrier
     CCD3D12Swapchain *swapchain = d3d12Fbo->getSwapchain();
@@ -266,7 +271,9 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
             barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
             barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
             barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-            prePassBarriers.push_back(barrier);
+            if (prePassBarrierCount < MAX_PASS_BARRIERS) {
+                prePassBarriers[prePassBarrierCount++] = barrier;
+            }
 
             _impl->activeSwapchain = swapchain;
             _impl->activeSwapchainBackBuffer = backBuffer;
@@ -305,7 +312,9 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
             barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
             barrier.Transition.StateBefore = prevState;
             barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-            prePassBarriers.push_back(barrier);
+            if (prePassBarrierCount < MAX_PASS_BARRIERS) {
+                prePassBarriers[prePassBarrierCount++] = barrier;
+            }
             d3d12Tex->setCurrentState(D3D12_RESOURCE_STATE_RENDER_TARGET);
         }
     }
@@ -334,7 +343,9 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
             depthBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
             depthBarrier.Transition.StateBefore = dsPrevState;
             depthBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_DEPTH_WRITE;
-            prePassBarriers.push_back(depthBarrier);
+            if (prePassBarrierCount < MAX_PASS_BARRIERS) {
+                prePassBarriers[prePassBarrierCount++] = depthBarrier;
+            }
         }
         if (depthStencilTexture) {
             depthStencilTexture->setCurrentState(D3D12_RESOURCE_STATE_DEPTH_WRITE);
@@ -347,8 +358,8 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
     }
 
     // Submit all pre-pass barriers at once
-    if (!prePassBarriers.empty()) {
-        _impl->commandList->ResourceBarrier(static_cast<UINT>(prePassBarriers.size()), prePassBarriers.data());
+    if (prePassBarrierCount > 0) {
+        _impl->commandList->ResourceBarrier(prePassBarrierCount, prePassBarriers);
     }
 
     // Set render targets
@@ -423,7 +434,8 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
 }
 
 void CCD3D12CommandBuffer::endRenderPass() {
-    ccstd::vector<D3D12_RESOURCE_BARRIER> postPassBarriers;
+    D3D12_RESOURCE_BARRIER postPassBarriers[MAX_PASS_BARRIERS];
+    uint32_t postPassBarrierCount = 0;
 
     // If we transitioned a swapchain back buffer to RENDER_TARGET, transition it back to PRESENT
     if (_impl->activeSwapchainBackBuffer) {
@@ -434,7 +446,9 @@ void CCD3D12CommandBuffer::endRenderPass() {
         barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
         barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-        postPassBarriers.push_back(barrier);
+        if (postPassBarrierCount < MAX_PASS_BARRIERS) {
+            postPassBarriers[postPassBarrierCount++] = barrier;
+        }
 
         _impl->activeSwapchain = nullptr;
         _impl->activeSwapchainBackBuffer = nullptr;
@@ -454,7 +468,9 @@ void CCD3D12CommandBuffer::endRenderPass() {
             barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
             barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
             barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-            postPassBarriers.push_back(barrier);
+            if (postPassBarrierCount < MAX_PASS_BARRIERS) {
+                postPassBarriers[postPassBarrierCount++] = barrier;
+            }
             d3d12Tex->setCurrentState(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         }
     }
@@ -470,15 +486,17 @@ void CCD3D12CommandBuffer::endRenderPass() {
             depthBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
             depthBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_DEPTH_WRITE;
             depthBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_DEPTH_READ;
-            postPassBarriers.push_back(depthBarrier);
+            if (postPassBarrierCount < MAX_PASS_BARRIERS) {
+                postPassBarriers[postPassBarrierCount++] = depthBarrier;
+            }
             _impl->activeDepthTexture->setCurrentState(D3D12_RESOURCE_STATE_DEPTH_READ);
         }
         _impl->activeDepthStencil = nullptr;
         _impl->activeDepthTexture = nullptr;
     }
 
-    if (!postPassBarriers.empty()) {
-        _impl->commandList->ResourceBarrier(static_cast<UINT>(postPassBarriers.size()), postPassBarriers.data());
+    if (postPassBarrierCount > 0) {
+        _impl->commandList->ResourceBarrier(postPassBarrierCount, postPassBarriers);
     }
 
     _impl->inRenderPass = false;
@@ -597,15 +615,18 @@ void CCD3D12CommandBuffer::flushDescriptorSets() {
     ID3D12DescriptorHeap *boundHeaps[2] = {};
     UINT boundHeapCount = 0;
 
-    // We use the device's global GPU-visible heaps (reset per frame in begin()).
-    // Each set gets its own allocation from the pool, but they may share the same heap.
-    // Collect heap pointers and root descriptor table entries.
+    // Fixed-size stack arrays — avoid per-draw-call malloc/free.
+    // D3D12 root signature allows at most D3D12_MAX_ROOT_COST (64 DWORDs);
+    // in practice we bind ≤ 4 descriptor sets × 2 tables = 8 entries each.
+    constexpr uint32_t MAX_ROOT_TABLE_ENTRIES = 16;
     struct RootTableEntry {
         UINT rootParameterIndex;
         D3D12_GPU_DESCRIPTOR_HANDLE gpuHandle;
     };
-    ccstd::vector<RootTableEntry> cbvEntries;
-    ccstd::vector<RootTableEntry> samplerEntries;
+    RootTableEntry cbvEntries[MAX_ROOT_TABLE_ENTRIES];
+    RootTableEntry samplerEntries[MAX_ROOT_TABLE_ENTRIES];
+    uint32_t cbvEntryCount = 0;
+    uint32_t samplerEntryCount = 0;
     ID3D12DescriptorHeap *cbvHeap = nullptr;
     ID3D12DescriptorHeap *samplerHeap = nullptr;
 
@@ -631,7 +652,9 @@ void CCD3D12CommandBuffer::flushDescriptorSets() {
 
                 d3dDevice->CopyDescriptorsSimple(cbvCount, dstStart, srcStart, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
                 cbvHeap = static_cast<ID3D12DescriptorHeap *>(heapPool->getHeap(alloc.heapIndex));
-                cbvEntries.push_back({static_cast<UINT>(cbvRootIndex), {alloc.gpuHandle}});
+                if (cbvEntryCount < MAX_ROOT_TABLE_ENTRIES) {
+                    cbvEntries[cbvEntryCount++] = {static_cast<UINT>(cbvRootIndex), {alloc.gpuHandle}};
+                }
             }
         }
 
@@ -645,7 +668,9 @@ void CCD3D12CommandBuffer::flushDescriptorSets() {
                 dstStart.ptr = reinterpret_cast<SIZE_T>(alloc.cpuHandle);
                 d3dDevice->CopyDescriptorsSimple(samplerCount, dstStart, srcStart, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
                 samplerHeap = static_cast<ID3D12DescriptorHeap *>(samplerPool->getHeap(alloc.heapIndex));
-                samplerEntries.push_back({static_cast<UINT>(samplerRootIndex), {alloc.gpuHandle}});
+                if (samplerEntryCount < MAX_ROOT_TABLE_ENTRIES) {
+                    samplerEntries[samplerEntryCount++] = {static_cast<UINT>(samplerRootIndex), {alloc.gpuHandle}};
+                }
             }
         }
     }
@@ -670,11 +695,11 @@ void CCD3D12CommandBuffer::flushDescriptorSets() {
     }
 
     // Set all root descriptor tables
-    for (const auto &entry : cbvEntries) {
-        _impl->commandList->SetGraphicsRootDescriptorTable(entry.rootParameterIndex, entry.gpuHandle);
+    for (uint32_t i = 0; i < cbvEntryCount; ++i) {
+        _impl->commandList->SetGraphicsRootDescriptorTable(cbvEntries[i].rootParameterIndex, cbvEntries[i].gpuHandle);
     }
-    for (const auto &entry : samplerEntries) {
-        _impl->commandList->SetGraphicsRootDescriptorTable(entry.rootParameterIndex, entry.gpuHandle);
+    for (uint32_t i = 0; i < samplerEntryCount; ++i) {
+        _impl->commandList->SetGraphicsRootDescriptorTable(samplerEntries[i].rootParameterIndex, samplerEntries[i].gpuHandle);
     }
 }
 
@@ -684,12 +709,12 @@ void CCD3D12CommandBuffer::bindInputAssembler(InputAssembler *ia) {
     _impl->boundIA = ia;
     auto *d3d12IA = static_cast<CCD3D12InputAssembler *>(ia);
 
-    // Set vertex buffers
+    // Set vertex buffers — use stack array (max vertex attributes = 16 per caps)
     const uint32_t vbCount = d3d12IA->getVertexBufferCount();
     if (vbCount > 0) {
-        ccstd::vector<D3D12_VERTEX_BUFFER_VIEW> vbViews(vbCount);
-        d3d12IA->fillVertexBufferViews(vbViews.data());
-        _impl->commandList->IASetVertexBuffers(0, vbCount, vbViews.data());
+        D3D12_VERTEX_BUFFER_VIEW vbViews[16];
+        d3d12IA->fillVertexBufferViews(vbViews);
+        _impl->commandList->IASetVertexBuffers(0, vbCount, vbViews);
     }
 
     // Set index buffer
@@ -1014,7 +1039,8 @@ void CCD3D12CommandBuffer::blitTexture(Texture *srcTexture, Texture *dstTexture,
                 static_cast<unsigned>(count), static_cast<int>(filter));
 
     // Transition src to COPY_SOURCE, dst to COPY_DEST
-    ccstd::vector<D3D12_RESOURCE_BARRIER> preBarriers;
+    D3D12_RESOURCE_BARRIER preBarriers[4];
+    uint32_t preBarrierCount = 0;
 
     D3D12_RESOURCE_STATES srcPrevState = srcD3D12->getCurrentState();
     if (srcPrevState != D3D12_RESOURCE_STATE_COPY_SOURCE) {
@@ -1025,7 +1051,7 @@ void CCD3D12CommandBuffer::blitTexture(Texture *srcTexture, Texture *dstTexture,
         b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         b.Transition.StateBefore = srcPrevState;
         b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-        preBarriers.push_back(b);
+        if (preBarrierCount < 4) preBarriers[preBarrierCount++] = b;
     }
 
     D3D12_RESOURCE_STATES dstPrevState = dstD3D12->getCurrentState();
@@ -1037,11 +1063,11 @@ void CCD3D12CommandBuffer::blitTexture(Texture *srcTexture, Texture *dstTexture,
         b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         b.Transition.StateBefore = dstPrevState;
         b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-        preBarriers.push_back(b);
+        if (preBarrierCount < 4) preBarriers[preBarrierCount++] = b;
     }
 
-    if (!preBarriers.empty()) {
-        _impl->commandList->ResourceBarrier(static_cast<UINT>(preBarriers.size()), preBarriers.data());
+    if (preBarrierCount > 0) {
+        _impl->commandList->ResourceBarrier(preBarrierCount, preBarriers);
     }
     srcD3D12->setCurrentState(D3D12_RESOURCE_STATE_COPY_SOURCE);
     dstD3D12->setCurrentState(D3D12_RESOURCE_STATE_COPY_DEST);
@@ -1096,7 +1122,8 @@ void CCD3D12CommandBuffer::blitTexture(Texture *srcTexture, Texture *dstTexture,
     }
 
     // Transition back to shader resource
-    ccstd::vector<D3D12_RESOURCE_BARRIER> postBarriers;
+    D3D12_RESOURCE_BARRIER postBarriers[4];
+    uint32_t postBarrierCount = 0;
 
     D3D12_RESOURCE_STATES srcPostState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     if (hasFlag(srcInfo.usage, TextureUsageBit::COLOR_ATTACHMENT)) {
@@ -1110,7 +1137,7 @@ void CCD3D12CommandBuffer::blitTexture(Texture *srcTexture, Texture *dstTexture,
         b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
         b.Transition.StateAfter = srcPostState;
-        postBarriers.push_back(b);
+        if (postBarrierCount < 4) postBarriers[postBarrierCount++] = b;
     }
 
     D3D12_RESOURCE_STATES dstPostState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
@@ -1125,11 +1152,11 @@ void CCD3D12CommandBuffer::blitTexture(Texture *srcTexture, Texture *dstTexture,
         b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
         b.Transition.StateAfter = dstPostState;
-        postBarriers.push_back(b);
+        if (postBarrierCount < 4) postBarriers[postBarrierCount++] = b;
     }
 
-    if (!postBarriers.empty()) {
-        _impl->commandList->ResourceBarrier(static_cast<UINT>(postBarriers.size()), postBarriers.data());
+    if (postBarrierCount > 0) {
+        _impl->commandList->ResourceBarrier(postBarrierCount, postBarriers);
     }
     srcD3D12->setCurrentState(srcPostState);
     dstD3D12->setCurrentState(dstPostState);
@@ -1156,7 +1183,8 @@ void CCD3D12CommandBuffer::copyTexture(Texture *srcTexture, Texture *dstTexture,
                 srcInfo.width, srcInfo.height, dstInfo.width, dstInfo.height, count);
 
     // Transition src to COPY_SOURCE, dst to COPY_DEST
-    ccstd::vector<D3D12_RESOURCE_BARRIER> preBarriers;
+    D3D12_RESOURCE_BARRIER preBarriers[4];
+    uint32_t preBarrierCount = 0;
 
     D3D12_RESOURCE_STATES srcPrevState = srcD3D12->getCurrentState();
     if (srcPrevState != D3D12_RESOURCE_STATE_COPY_SOURCE) {
@@ -1167,7 +1195,7 @@ void CCD3D12CommandBuffer::copyTexture(Texture *srcTexture, Texture *dstTexture,
         b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         b.Transition.StateBefore = srcPrevState;
         b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-        preBarriers.push_back(b);
+        if (preBarrierCount < 4) preBarriers[preBarrierCount++] = b;
     }
 
     D3D12_RESOURCE_STATES dstPrevState = dstD3D12->getCurrentState();
@@ -1179,11 +1207,11 @@ void CCD3D12CommandBuffer::copyTexture(Texture *srcTexture, Texture *dstTexture,
         b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         b.Transition.StateBefore = dstPrevState;
         b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-        preBarriers.push_back(b);
+        if (preBarrierCount < 4) preBarriers[preBarrierCount++] = b;
     }
 
-    if (!preBarriers.empty()) {
-        _impl->commandList->ResourceBarrier(static_cast<UINT>(preBarriers.size()), preBarriers.data());
+    if (preBarrierCount > 0) {
+        _impl->commandList->ResourceBarrier(preBarrierCount, preBarriers);
     }
     srcD3D12->setCurrentState(D3D12_RESOURCE_STATE_COPY_SOURCE);
     dstD3D12->setCurrentState(D3D12_RESOURCE_STATE_COPY_DEST);
@@ -1228,7 +1256,8 @@ void CCD3D12CommandBuffer::copyTexture(Texture *srcTexture, Texture *dstTexture,
     }
 
     // Transition src and dst back to reasonable states after copy
-    ccstd::vector<D3D12_RESOURCE_BARRIER> postBarriers;
+    D3D12_RESOURCE_BARRIER postBarriers[4];
+    uint32_t postBarrierCount = 0;
 
     // Src back to shader resource
     D3D12_RESOURCE_STATES srcPostState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
@@ -1245,7 +1274,7 @@ void CCD3D12CommandBuffer::copyTexture(Texture *srcTexture, Texture *dstTexture,
         b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
         b.Transition.StateAfter = srcPostState;
-        postBarriers.push_back(b);
+        if (postBarrierCount < 4) postBarriers[postBarrierCount++] = b;
     }
 
     // Dst back to shader resource (or render target)
@@ -1263,11 +1292,11 @@ void CCD3D12CommandBuffer::copyTexture(Texture *srcTexture, Texture *dstTexture,
         b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
         b.Transition.StateAfter = dstPostState;
-        postBarriers.push_back(b);
+        if (postBarrierCount < 4) postBarriers[postBarrierCount++] = b;
     }
 
-    if (!postBarriers.empty()) {
-        _impl->commandList->ResourceBarrier(static_cast<UINT>(postBarriers.size()), postBarriers.data());
+    if (postBarrierCount > 0) {
+        _impl->commandList->ResourceBarrier(postBarrierCount, postBarriers);
     }
     srcD3D12->setCurrentState(srcPostState);
     dstD3D12->setCurrentState(dstPostState);
@@ -1300,7 +1329,8 @@ void CCD3D12CommandBuffer::resolveTexture(Texture *srcTexture, Texture *dstTextu
                 dstInfo.width, dstInfo.height, count);
 
     // Transition src to RESOLVE_SOURCE, dst to RESOLVE_DEST
-    ccstd::vector<D3D12_RESOURCE_BARRIER> preBarriers;
+    D3D12_RESOURCE_BARRIER preBarriers[4];
+    uint32_t preBarrierCount = 0;
 
     D3D12_RESOURCE_STATES srcPrevState = srcD3D12->getCurrentState();
     if (srcPrevState != D3D12_RESOURCE_STATE_RESOLVE_SOURCE) {
@@ -1311,7 +1341,7 @@ void CCD3D12CommandBuffer::resolveTexture(Texture *srcTexture, Texture *dstTextu
         b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         b.Transition.StateBefore = srcPrevState;
         b.Transition.StateAfter = D3D12_RESOURCE_STATE_RESOLVE_SOURCE;
-        preBarriers.push_back(b);
+        if (preBarrierCount < 4) preBarriers[preBarrierCount++] = b;
     }
 
     D3D12_RESOURCE_STATES dstPrevState = dstD3D12->getCurrentState();
@@ -1323,11 +1353,11 @@ void CCD3D12CommandBuffer::resolveTexture(Texture *srcTexture, Texture *dstTextu
         b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         b.Transition.StateBefore = dstPrevState;
         b.Transition.StateAfter = D3D12_RESOURCE_STATE_RESOLVE_DEST;
-        preBarriers.push_back(b);
+        if (preBarrierCount < 4) preBarriers[preBarrierCount++] = b;
     }
 
-    if (!preBarriers.empty()) {
-        _impl->commandList->ResourceBarrier(static_cast<UINT>(preBarriers.size()), preBarriers.data());
+    if (preBarrierCount > 0) {
+        _impl->commandList->ResourceBarrier(preBarrierCount, preBarriers);
     }
     srcD3D12->setCurrentState(D3D12_RESOURCE_STATE_RESOLVE_SOURCE);
     dstD3D12->setCurrentState(D3D12_RESOURCE_STATE_RESOLVE_DEST);
@@ -1351,7 +1381,8 @@ void CCD3D12CommandBuffer::resolveTexture(Texture *srcTexture, Texture *dstTextu
     }
 
     // Transition back to shader resource after resolve
-    ccstd::vector<D3D12_RESOURCE_BARRIER> postBarriers;
+    D3D12_RESOURCE_BARRIER postBarriers[4];
+    uint32_t postBarrierCount = 0;
 
     {
         D3D12_RESOURCE_STATES srcPostState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
@@ -1365,7 +1396,7 @@ void CCD3D12CommandBuffer::resolveTexture(Texture *srcTexture, Texture *dstTextu
         b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         b.Transition.StateBefore = D3D12_RESOURCE_STATE_RESOLVE_SOURCE;
         b.Transition.StateAfter = srcPostState;
-        postBarriers.push_back(b);
+        if (postBarrierCount < 4) postBarriers[postBarrierCount++] = b;
         srcD3D12->setCurrentState(srcPostState);
     }
     {
@@ -1380,12 +1411,12 @@ void CCD3D12CommandBuffer::resolveTexture(Texture *srcTexture, Texture *dstTextu
         b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         b.Transition.StateBefore = D3D12_RESOURCE_STATE_RESOLVE_DEST;
         b.Transition.StateAfter = dstPostState;
-        postBarriers.push_back(b);
+        if (postBarrierCount < 4) postBarriers[postBarrierCount++] = b;
         dstD3D12->setCurrentState(dstPostState);
     }
 
-    if (!postBarriers.empty()) {
-        _impl->commandList->ResourceBarrier(static_cast<UINT>(postBarriers.size()), postBarriers.data());
+    if (postBarrierCount > 0) {
+        _impl->commandList->ResourceBarrier(postBarrierCount, postBarriers);
     }
 }
 
