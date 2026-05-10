@@ -310,7 +310,10 @@ CCProgram shadow-caster-fs %{
   in highp vec2 v_clip_depth;
 
   vec4 frag () {
-    highp float clipDepth = v_clip_depth.x / v_clip_depth.y * 0.5 + 0.5;
+    highp float clipDepth = v_clip_depth.x / v_clip_depth.y;
+    #if !defined(CC_USE_D3D12)
+      clipDepth = clipDepth * 0.5 + 0.5;
+    #endif
 
     //todo: do not support linear mode spot shadow
 

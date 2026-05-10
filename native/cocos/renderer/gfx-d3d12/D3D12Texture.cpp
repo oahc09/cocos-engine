@@ -371,13 +371,29 @@ bool CCD3D12Texture::createResource(uint32_t width, uint32_t height) {
     resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
     resourceDesc.Flags = flags;
 
+    D3D12_CLEAR_VALUE clearValue{};
+    D3D12_CLEAR_VALUE *optimizedClearValue = nullptr;
+    if (hasFlag(_info.usage, TextureUsageBit::COLOR_ATTACHMENT)) {
+        clearValue.Format = format;
+        clearValue.Color[0] = 0.0F;
+        clearValue.Color[1] = 0.0F;
+        clearValue.Color[2] = 0.0F;
+        clearValue.Color[3] = 1.0F;
+        optimizedClearValue = &clearValue;
+    } else if (hasFlag(_info.usage, TextureUsageBit::DEPTH_STENCIL_ATTACHMENT)) {
+        clearValue.Format = format;
+        clearValue.DepthStencil.Depth = 1.0F;
+        clearValue.DepthStencil.Stencil = 0;
+        optimizedClearValue = &clearValue;
+    }
+
     Microsoft::WRL::ComPtr<ID3D12Resource> resource;
     HRESULT hr = d3dDevice->CreateCommittedResource(
         &heapProperties,
         D3D12_HEAP_FLAG_NONE,
         &resourceDesc,
         D3D12_RESOURCE_STATE_COMMON,
-        nullptr,
+        optimizedClearValue,
         IID_PPV_ARGS(&resource));
     if (FAILED(hr)) {
         // Log device removed reason for diagnosis

@@ -106,6 +106,18 @@ D3D12_UAV_DIMENSION toUAVDimension(TextureType type, uint32_t layerCount) {
     }
 }
 
+D3D12_SHADER_RESOURCE_VIEW_DESC makeRawBufferSRVDesc(uint64_t firstElement, uint64_t sizeInBytes) {
+    D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
+    desc.Format = DXGI_FORMAT_R32_TYPELESS;
+    desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    desc.Buffer.FirstElement = firstElement;
+    desc.Buffer.NumElements = sizeInBytes / 4U;
+    desc.Buffer.StructureByteStride = 0;
+    desc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+    return desc;
+}
+
 D3D12_TEXTURE_ADDRESS_MODE toAddressMode(Address addr) {
     switch (addr) {
         case Address::WRAP: return D3D12_TEXTURE_ADDRESS_MODE_WRAP;
@@ -344,14 +356,7 @@ void CCD3D12DescriptorSet::forceUpdate() {
         if (dummyBuf) {
             auto *rawRes = static_cast<ID3D12Resource *>(dummyBuf->getD3D12ResourceHandle());
             if (rawRes) {
-                D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-                srvDesc.Format = DXGI_FORMAT_UNKNOWN;
-                srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-                srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-                srvDesc.Buffer.FirstElement = 0;
-                srvDesc.Buffer.NumElements = 1;
-                srvDesc.Buffer.StructureByteStride = 0;
-                srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+                D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = makeRawBufferSRVDesc(0, 4U);
                 d3dDevice->CreateShaderResourceView(rawRes, &srvDesc, handle);
                 return;
             }
@@ -471,14 +476,8 @@ void CCD3D12DescriptorSet::forceUpdate() {
                         auto *d3d12Buffer = static_cast<CCD3D12Buffer *>(gfxBuffer);
                         auto *rawResource = static_cast<ID3D12Resource *>(d3d12Buffer->getD3D12ResourceHandle());
                         if (rawResource) {
-                            D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-                            srvDesc.Format = DXGI_FORMAT_UNKNOWN;
-                            srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-                            srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-                            srvDesc.Buffer.FirstElement = 0;
-                            srvDesc.Buffer.NumElements = gfxBuffer->getSize() / 4;
-                            srvDesc.Buffer.StructureByteStride = 0;
-                            srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+                            const uint64_t firstElement = d3d12Buffer->getD3D12ResourceOffset() / 4U;
+                            D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = makeRawBufferSRVDesc(firstElement, gfxBuffer->getSize());
 
                             D3D12_CPU_DESCRIPTOR_HANDLE handle;
                             handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
@@ -820,17 +819,10 @@ void CCD3D12DescriptorSet::applyDynamicOffsets(uint32_t dynamicOffsetCount, cons
                         auto *rawResource = static_cast<ID3D12Resource *>(d3d12Buffer->getD3D12ResourceHandle());
                         if (rawResource) {
                             const uint32_t dynamicOffset = dynamicOffsetIndex < dynamicOffsetCount ? dynamicOffsets[dynamicOffsetIndex] : 0;
-                            const uint32_t firstElement = dynamicOffset / 4U;
+                            const uint64_t firstElement = (static_cast<uint64_t>(d3d12Buffer->getD3D12ResourceOffset()) + dynamicOffset) / 4U;
                             const uint32_t availableSize = gfxBuffer->getSize() > dynamicOffset ? (gfxBuffer->getSize() - dynamicOffset) : 0U;
 
-                            D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-                            srvDesc.Format = DXGI_FORMAT_UNKNOWN;
-                            srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-                            srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-                            srvDesc.Buffer.FirstElement = firstElement;
-                            srvDesc.Buffer.NumElements = availableSize / 4U;
-                            srvDesc.Buffer.StructureByteStride = 0;
-                            srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+                            D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = makeRawBufferSRVDesc(firstElement, availableSize);
 
                             D3D12_CPU_DESCRIPTOR_HANDLE handle;
                             handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;

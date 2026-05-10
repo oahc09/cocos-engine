@@ -396,7 +396,7 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
     psoDesc.DepthStencilState.DepthEnable = ds.depthTest ? TRUE : FALSE;
     psoDesc.DepthStencilState.DepthWriteMask = ds.depthWrite ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
     psoDesc.DepthStencilState.DepthFunc = toD3D12ComparisonFunc(ds.depthFunc);
-    psoDesc.DepthStencilState.StencilEnable = ds.stencilTestFront ? TRUE : FALSE;
+    psoDesc.DepthStencilState.StencilEnable = (ds.stencilTestFront || ds.stencilTestBack) ? TRUE : FALSE;
     psoDesc.DepthStencilState.StencilReadMask = static_cast<UINT8>(ds.stencilReadMaskFront);
     psoDesc.DepthStencilState.StencilWriteMask = static_cast<UINT8>(ds.stencilWriteMaskFront);
 
@@ -440,6 +440,19 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
         _impl->semanticNames.clear();
         _impl->semanticNames.reserve(shaderAttributes.size());
 
+        // D3D12 classifies vertex input by slot, not by attribute. Keep all
+        // elements in the same slot on a single step mode; instanced streams
+        // win when conditional attributes leave mixed metadata in the IA.
+        bool slotIsInstanced[256] = {};
+        for (const auto &shaderAttr : shaderAttributes) {
+            for (const auto &attr : _inputState.attributes) {
+                if (attr.name == shaderAttr.name) {
+                    slotIsInstanced[attr.stream] = slotIsInstanced[attr.stream] || attr.isInstanced;
+                    break;
+                }
+            }
+        }
+
         for (const auto &shaderAttr : shaderAttributes) {
             D3D12_INPUT_ELEMENT_DESC elem{};
             _impl->semanticNames.push_back("TEXCOORD");
@@ -453,9 +466,9 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
                     elem.Format = toD3D12VertexFormat(attr.format);
                     elem.InputSlot = attr.stream;
                     elem.AlignedByteOffset = offsets[attr.stream];
-                    elem.InputSlotClass = attr.isInstanced ? D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA
-                                                            : D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
-                    elem.InstanceDataStepRate = attr.isInstanced ? 1 : 0;
+                    elem.InputSlotClass = slotIsInstanced[attr.stream] ? D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA
+                                                                        : D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+                    elem.InstanceDataStepRate = slotIsInstanced[attr.stream] ? 1 : 0;
                     attributeFound = true;
                     break;
                 }

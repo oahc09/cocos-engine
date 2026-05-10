@@ -53,9 +53,9 @@ void Scene::load() {
         //cjh        if (TEST) {
         //            CC_ASSERT(!_activeInHierarchy, 'Should deactivate ActionManager by default');
         //        }
-        PrefabUtils::expandNestedPrefabInstanceNode(this);
-        PrefabUtils::applyTargetOverrides(this);
-        onBatchCreated(false);
+        //PrefabUtils::expandNestedPrefabInstanceNode(this);
+        //PrefabUtils::applyTargetOverrides(this);
+        //onBatchCreated(false);
         _inited = true;
     }
     _scene = this;
@@ -67,7 +67,7 @@ void Scene::activate(bool active /* = true */) {
 #if CC_EDITOR
     this->notifyEditorAttached(active);
 #endif
-    Director::getInstance()->getNodeActivator()->activateNode(this, active);
+    //Director::getInstance()->getNodeActivator()->activateNode(this, active);
     auto *root = Root::getInstance();
     if (root != nullptr && root->getPipeline() != nullptr) {
         _globals->activate(this);

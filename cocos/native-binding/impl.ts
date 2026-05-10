@@ -23,14 +23,11 @@
 */
 import { sys } from "../core";
 import { NATIVE } from 'internal:constants';
-import { installScriptBridgeBatchCall } from '../core/scripting/batch-executor';
 
 const globalJsb: any = globalThis.jsb ?? {};
 declare const ScriptNativeBridge: any;
 
 if (NATIVE) {
-    installScriptBridgeBatchCall(globalJsb);
-
     Object.defineProperty(globalJsb, 'reflection', {
         get() {
             if (globalJsb.__bridge !== undefined) return globalJsb.__bridge;

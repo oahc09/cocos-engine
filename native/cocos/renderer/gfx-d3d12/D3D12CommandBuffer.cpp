@@ -541,6 +541,14 @@ void CCD3D12CommandBuffer::bindPipelineState(PipelineState *pso) {
         _impl->commandList->OMSetBlendFactor(blendFactor);
     }
 
+    // D3D12 treats stencil reference as dynamic command-list state.
+    // Passes such as planar-shadow rely on stencilRefFront being active.
+    {
+        const auto &ds = pso->getDepthStencilState();
+        const uint32_t stencilRef = ds.stencilTestFront ? ds.stencilRefFront : ds.stencilRefBack;
+        _impl->commandList->OMSetStencilRef(stencilRef);
+    }
+
     // Set primitive topology from PSO
     D3D12_PRIMITIVE_TOPOLOGY topology = static_cast<D3D12_PRIMITIVE_TOPOLOGY>(d3d12PSO->getD3D12PrimitiveTopology());
     _impl->commandList->IASetPrimitiveTopology(topology);
@@ -630,6 +638,18 @@ void CCD3D12CommandBuffer::flushDescriptorSets() {
     ID3D12DescriptorHeap *cbvHeap = nullptr;
     ID3D12DescriptorHeap *samplerHeap = nullptr;
 
+    struct SetBindingInfo {
+        CCD3D12DescriptorSet *set{nullptr};
+        uint32_t cbvCount{0};
+        uint32_t samplerCount{0};
+        int cbvRootIndex{-1};
+        int samplerRootIndex{-1};
+    };
+    SetBindingInfo bindings[D3D12_MAX_BOUND_SETS];
+    uint32_t bindingCount = 0;
+    uint32_t totalCbvCount = 0;
+    uint32_t totalSamplerCount = 0;
+
     for (uint32_t i = 0; i < _impl->pendingSetCount; ++i) {
         if (!_impl->pendingSets[i].valid || !_impl->pendingSets[i].set) continue;
 
@@ -641,37 +661,74 @@ void CCD3D12CommandBuffer::flushDescriptorSets() {
         const auto cbvRootIndex = boundLayout->getCbvSrvUavRootParameterIndex(setIdx);
         const auto samplerRootIndex = boundLayout->getSamplerRootParameterIndex(setIdx);
 
-        // Copy CBV/SRV/UAV descriptors to GPU heap
+        if (bindingCount < D3D12_MAX_BOUND_SETS) {
+            bindings[bindingCount++] = {d3d12Set, cbvCount, samplerCount, cbvRootIndex, samplerRootIndex};
+        }
         if (cbvCount > 0 && cbvRootIndex >= 0) {
-            auto alloc = heapPool->allocate(cbvCount);
-            auto *srcHeap = static_cast<ID3D12DescriptorHeap *>(d3d12Set->getCbvSrvUavDescriptorHeap());
-            if (alloc.isValid && srcHeap) {
+            totalCbvCount += cbvCount;
+        }
+        if (samplerCount > 0 && samplerRootIndex >= 0 && samplerPool) {
+            totalSamplerCount += samplerCount;
+        }
+    }
+
+    D3D12DescriptorHeapPool::Allocation cbvAlloc;
+    if (totalCbvCount > 0) {
+        cbvAlloc = heapPool->allocate(totalCbvCount);
+        if (cbvAlloc.isValid) {
+            cbvHeap = static_cast<ID3D12DescriptorHeap *>(heapPool->getHeap(cbvAlloc.heapIndex));
+        }
+    }
+
+    D3D12DescriptorHeapPool::Allocation samplerAlloc;
+    if (totalSamplerCount > 0 && samplerPool) {
+        samplerAlloc = samplerPool->allocate(totalSamplerCount);
+        if (samplerAlloc.isValid) {
+            samplerHeap = static_cast<ID3D12DescriptorHeap *>(samplerPool->getHeap(samplerAlloc.heapIndex));
+        }
+    }
+
+    uint32_t cbvOffset = 0;
+    uint32_t samplerOffset = 0;
+    const uint32_t cbvDescriptorSize = heapPool->getDescriptorSize();
+    const uint32_t samplerDescriptorSize = samplerPool ? samplerPool->getDescriptorSize() : 0;
+    for (uint32_t i = 0; i < bindingCount; ++i) {
+        auto &binding = bindings[i];
+
+        if (binding.cbvCount > 0 && binding.cbvRootIndex >= 0 && cbvAlloc.isValid && cbvHeap) {
+            auto *srcHeap = static_cast<ID3D12DescriptorHeap *>(binding.set->getCbvSrvUavDescriptorHeap());
+            if (srcHeap) {
                 D3D12_CPU_DESCRIPTOR_HANDLE srcStart = srcHeap->GetCPUDescriptorHandleForHeapStart();
                 D3D12_CPU_DESCRIPTOR_HANDLE dstStart{};
-                dstStart.ptr = reinterpret_cast<SIZE_T>(alloc.cpuHandle);
-
-                d3dDevice->CopyDescriptorsSimple(cbvCount, dstStart, srcStart, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-                cbvHeap = static_cast<ID3D12DescriptorHeap *>(heapPool->getHeap(alloc.heapIndex));
+                dstStart.ptr = reinterpret_cast<SIZE_T>(cbvAlloc.cpuHandle) +
+                               static_cast<SIZE_T>(cbvOffset) * cbvDescriptorSize;
+                d3dDevice->CopyDescriptorsSimple(binding.cbvCount, dstStart, srcStart, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
                 if (cbvEntryCount < MAX_ROOT_TABLE_ENTRIES) {
-                    cbvEntries[cbvEntryCount++] = {static_cast<UINT>(cbvRootIndex), {alloc.gpuHandle}};
+                    cbvEntries[cbvEntryCount++] = {
+                        static_cast<UINT>(binding.cbvRootIndex),
+                        {cbvAlloc.gpuHandle + static_cast<uint64_t>(cbvOffset) * cbvDescriptorSize},
+                    };
                 }
             }
+            cbvOffset += binding.cbvCount;
         }
 
-        // Copy Sampler descriptors to GPU heap
-        if (samplerCount > 0 && samplerRootIndex >= 0 && samplerPool) {
-            auto alloc = samplerPool->allocate(samplerCount);
-            auto *srcHeap = static_cast<ID3D12DescriptorHeap *>(d3d12Set->getSamplerDescriptorHeap());
-            if (alloc.isValid && srcHeap) {
+        if (binding.samplerCount > 0 && binding.samplerRootIndex >= 0 && samplerAlloc.isValid && samplerHeap) {
+            auto *srcHeap = static_cast<ID3D12DescriptorHeap *>(binding.set->getSamplerDescriptorHeap());
+            if (srcHeap) {
                 D3D12_CPU_DESCRIPTOR_HANDLE srcStart = srcHeap->GetCPUDescriptorHandleForHeapStart();
                 D3D12_CPU_DESCRIPTOR_HANDLE dstStart{};
-                dstStart.ptr = reinterpret_cast<SIZE_T>(alloc.cpuHandle);
-                d3dDevice->CopyDescriptorsSimple(samplerCount, dstStart, srcStart, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
-                samplerHeap = static_cast<ID3D12DescriptorHeap *>(samplerPool->getHeap(alloc.heapIndex));
+                dstStart.ptr = reinterpret_cast<SIZE_T>(samplerAlloc.cpuHandle) +
+                               static_cast<SIZE_T>(samplerOffset) * samplerDescriptorSize;
+                d3dDevice->CopyDescriptorsSimple(binding.samplerCount, dstStart, srcStart, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
                 if (samplerEntryCount < MAX_ROOT_TABLE_ENTRIES) {
-                    samplerEntries[samplerEntryCount++] = {static_cast<UINT>(samplerRootIndex), {alloc.gpuHandle}};
+                    samplerEntries[samplerEntryCount++] = {
+                        static_cast<UINT>(binding.samplerRootIndex),
+                        {samplerAlloc.gpuHandle + static_cast<uint64_t>(samplerOffset) * samplerDescriptorSize},
+                    };
                 }
             }
+            samplerOffset += binding.samplerCount;
         }
     }
 

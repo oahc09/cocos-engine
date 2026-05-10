@@ -39,7 +39,11 @@ float CCGetLinearDepth(vec3 worldPos) {
   //////////////////////////////////////////////////////////Helper Functions
   bool GetShadowNDCPos(out vec3 shadowNDCPos, vec4 shadowPosWithDepthBias)
   {
-  	shadowNDCPos = shadowPosWithDepthBias.xyz / shadowPosWithDepthBias.w * 0.5 + 0.5;
+  	shadowNDCPos = shadowPosWithDepthBias.xyz / shadowPosWithDepthBias.w;
+    shadowNDCPos.xy = shadowNDCPos.xy * 0.5 + 0.5;
+    #if !defined(CC_USE_D3D12)
+      shadowNDCPos.z = shadowNDCPos.z * 0.5 + 0.5;
+    #endif
   	if (shadowNDCPos.x < 0.0 || shadowNDCPos.x > 1.0 ||
   		shadowNDCPos.y < 0.0 || shadowNDCPos.y > 1.0 ||
   		shadowNDCPos.z < 0.0 || shadowNDCPos.z > 1.0) {
@@ -127,7 +131,10 @@ float CCGetLinearDepth(vec3 worldPos) {
   vec4 ApplyShadowDepthBias_PerspectiveLinearDepth(vec4 shadowPos, float viewspaceDepthBias, vec3 worldPos)
   {
     // reverse operation for GetShadowNDCPos
-    shadowPos.z = CCGetLinearDepth(worldPos, viewspaceDepthBias) * 2.0 - 1.0;
+    shadowPos.z = CCGetLinearDepth(worldPos, viewspaceDepthBias);
+    #if !defined(CC_USE_D3D12)
+      shadowPos.z = shadowPos.z * 2.0 - 1.0;
+    #endif
     shadowPos.z *= shadowPos.w;
     return shadowPos;
   }
@@ -280,7 +287,11 @@ float CCGetLinearDepth(vec3 worldPos) {
       for (int i = 0; i < NUMCASCADES; i++) {
         if (i == level) {
           vec4 shadowPos = cc_matCSMViewProj[i] * vec4(worldPos.xyz, 1.0);
-          vec3 clipPos = shadowPos.xyz / shadowPos.w * 0.5 + 0.5;
+          vec3 clipPos = shadowPos.xyz / shadowPos.w;
+          clipPos.xy = clipPos.xy * 0.5 + 0.5;
+          #if !defined(CC_USE_D3D12)
+            clipPos.z = clipPos.z * 0.5 + 0.5;
+          #endif
           if (clipPos.x >= layerThreshold && clipPos.x <= (1.0 - layerThreshold) &&
               clipPos.y >= layerThreshold && clipPos.y <= (1.0 - layerThreshold) &&
               clipPos.z >= 0.0 && clipPos.z <= 1.0) {
@@ -295,7 +306,11 @@ float CCGetLinearDepth(vec3 worldPos) {
       highp float layerThreshold = cc_csmViewDir0[0].w;
       for (int i = 0; i < NUMCASCADES; i++) {
         vec4 shadowPos = cc_matCSMViewProj[i] * vec4(worldPos.xyz, 1.0);
-        vec3 clipPos = shadowPos.xyz / shadowPos.w * 0.5 + 0.5;
+        vec3 clipPos = shadowPos.xyz / shadowPos.w;
+        clipPos.xy = clipPos.xy * 0.5 + 0.5;
+        #if !defined(CC_USE_D3D12)
+          clipPos.z = clipPos.z * 0.5 + 0.5;
+        #endif
         if (clipPos.x >= layerThreshold && clipPos.x <= (1.0 - layerThreshold) &&
             clipPos.y >= layerThreshold && clipPos.y <= (1.0 - layerThreshold) &&
             clipPos.z >= 0.0 && clipPos.z <= 1.0 && i == level) {
@@ -316,7 +331,11 @@ float CCGetLinearDepth(vec3 worldPos) {
       highp float layerThreshold = cc_csmViewDir0[0].w;
       for (int i = 0; i < NUMCASCADES; i++) {
         vec4 shadowPos = cc_matCSMViewProj[i] * vec4(worldPos.xyz, 1.0);
-        vec3 clipPos = shadowPos.xyz / shadowPos.w * 0.5 + 0.5;
+        vec3 clipPos = shadowPos.xyz / shadowPos.w;
+        clipPos.xy = clipPos.xy * 0.5 + 0.5;
+        #if !defined(CC_USE_D3D12)
+          clipPos.z = clipPos.z * 0.5 + 0.5;
+        #endif
         if (clipPos.x >= layerThreshold && clipPos.x <= (1.0 - layerThreshold) &&
             clipPos.y >= layerThreshold && clipPos.y <= (1.0 - layerThreshold) &&
             clipPos.z >= 0.0 && clipPos.z <= 1.0 && level < 0) {

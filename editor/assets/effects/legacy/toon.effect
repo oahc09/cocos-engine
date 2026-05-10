@@ -351,7 +351,10 @@ CCProgram shadow-caster-fs %{
       if (baseColor.ALPHA_TEST_CHANNEL < colorScaleAndCutoff.w) discard;
     #endif
 
-    highp float clipDepth = v_clip_depth.x / v_clip_depth.y * 0.5 + 0.5;
+    highp float clipDepth = v_clip_depth.x / v_clip_depth.y;
+    #if !defined(CC_USE_D3D12)
+      clipDepth = clipDepth * 0.5 + 0.5;
+    #endif
     // spot use linear
     #if CC_SHADOWMAP_USE_LINEAR_DEPTH
       if (IS_SPOT_LIGHT(cc_shadowLPNNInfo.x)) {

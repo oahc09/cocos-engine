@@ -150,6 +150,17 @@ bool CCD3D12Device::doInit(const DeviceInfo &info) {
     // Initialize format feature support table via D3D12 API
     initFormatFeatures();
 
+    _features[toNumber(Feature::ELEMENT_INDEX_UINT)] = true;
+    _features[toNumber(Feature::INSTANCED_ARRAYS)] = true;
+    _features[toNumber(Feature::MULTIPLE_RENDER_TARGETS)] = true;
+    _features[toNumber(Feature::BLEND_MINMAX)] = true;
+    _features[toNumber(Feature::COMPUTE_SHADER)] = true;
+    _features[toNumber(Feature::INPUT_ATTACHMENT_BENEFIT)] = false;
+    _features[toNumber(Feature::SUBPASS_COLOR_INPUT)] = false;
+    _features[toNumber(Feature::SUBPASS_DEPTH_STENCIL_INPUT)] = false;
+    _features[toNumber(Feature::RASTERIZATION_ORDER_NOCOHERENT)] = false;
+    _features[toNumber(Feature::MULTI_SAMPLE_RESOLVE_DEPTH_STENCIL)] = false;
+
     // Initialize device capabilities
     initCapabilities();
 
@@ -624,9 +635,12 @@ void CCD3D12Device::initFormatFeatures() {
     const auto F_FULL = FormatFeature::SAMPLED_TEXTURE | FormatFeature::RENDER_TARGET |
                          FormatFeature::LINEAR_FILTER | FormatFeature::STORAGE_TEXTURE |
                          FormatFeature::VERTEX_ATTRIBUTE;
-    // No render target (32-bit float types may not support render target on all HW)
+    // No render target.
     const auto F_NO_RT = FormatFeature::SAMPLED_TEXTURE | FormatFeature::STORAGE_TEXTURE |
                           FormatFeature::VERTEX_ATTRIBUTE;
+    // Single-channel 32-bit float is renderable and is used by shadow maps when available.
+    const auto F_R32F = FormatFeature::SAMPLED_TEXTURE | FormatFeature::RENDER_TARGET |
+                         FormatFeature::STORAGE_TEXTURE | FormatFeature::VERTEX_ATTRIBUTE;
     // Standard: SAMPLED_TEXTURE | RENDER_TARGET | LINEAR_FILTER | STORAGE_TEXTURE (no vertex)
     const auto F_STD = FormatFeature::SAMPLED_TEXTURE | FormatFeature::RENDER_TARGET |
                         FormatFeature::LINEAR_FILTER | FormatFeature::STORAGE_TEXTURE;
@@ -673,7 +687,7 @@ void CCD3D12Device::initFormatFeatures() {
     _formatFeatures[toNumber(Format::RGBA16UI)]    = F_FULL;
 
     // --- 32-bit float ---
-    _formatFeatures[toNumber(Format::R32F)]        = F_NO_RT;
+    _formatFeatures[toNumber(Format::R32F)]        = F_R32F;
     _formatFeatures[toNumber(Format::RG32F)]       = F_NO_RT;
     _formatFeatures[toNumber(Format::RGB32F)]      = F_NO_RT;
     _formatFeatures[toNumber(Format::RGBA32F)]     = F_NO_RT;
@@ -754,9 +768,11 @@ void CCD3D12Device::initCapabilities() {
     _caps.supportVariableRateShading = false;
     _caps.supportSubPassShading = false;
 
-    // D3D12 uses [-1,1] clip space (OpenGL convention can be toggled but default is D3D)
+    // D3D12 uses the same render-target sampling orientation as Metal/WGPU while
+    // keeping D3D-style clip space. This keeps CSM atlas writes and shadow-map
+    // sampling on the same Y convention.
     _caps.clipSpaceMinZ = 0.F;
-    _caps.screenSpaceSignY = 1.F;
+    _caps.screenSpaceSignY = -1.F;
     _caps.clipSpaceSignY = 1.F;
 }
 
@@ -868,13 +884,17 @@ bool CCD3D12Device::initializeD3D12Context() {
         }
     }
 
-    // Setup ID3D12InfoQueue to capture all D3D12 debug layer messages
+    // Setup ID3D12InfoQueue to capture actionable D3D12 debug layer messages.
     {
         Microsoft::WRL::ComPtr<ID3D12InfoQueue> infoQueue;
         if (SUCCEEDED(_impl->d3dDevice->QueryInterface(IID_PPV_ARGS(&infoQueue)))) {
+            D3D12_MESSAGE_SEVERITY denySeverities[] = {
+                D3D12_MESSAGE_SEVERITY_INFO,
+                D3D12_MESSAGE_SEVERITY_MESSAGE,
+            };
             D3D12_INFO_QUEUE_FILTER filter{};
-            filter.DenyList.NumSeverities = 0;
-            filter.DenyList.pSeverityList = nullptr; // allow all severities
+            filter.DenyList.NumSeverities = _countof(denySeverities);
+            filter.DenyList.pSeverityList = denySeverities;
             infoQueue->PushStorageFilter(&filter);
             infoQueue->SetMessageCountLimit(4096);
         }

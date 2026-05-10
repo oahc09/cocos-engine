@@ -22,7 +22,7 @@
  THE SOFTWARE.
 */
 
-import { IMat4Like, Mat4, Quat, Vec3 } from '../core/math';
+import { IMat4Like, Mat4 } from '../core/math';
 
 declare const jsb: any;
 
@@ -37,67 +37,4 @@ export const fillMat4WithTempFloatArray = function fillMat4WithTempFloatArray (o
         _tempFloatArray[12], _tempFloatArray[13], _tempFloatArray[14], _tempFloatArray[15]
     );
 };
-
-export function resolveNodeVec3Args (
-    val: Readonly<Vec3> | number,
-    y: number | undefined,
-    z: number | undefined,
-    currentZ: number,
-): { x: number; y: number; z: number } {
-    if (y === undefined && z === undefined) {
-        const vec = val as Readonly<Vec3>;
-        return { x: vec.x, y: vec.y, z: vec.z };
-    }
-
-    if (z === undefined) {
-        return { x: val as number, y: y as number, z: currentZ };
-    }
-
-    return { x: val as number, y: y as number, z };
-}
-
-export function resolveNodeRTSArgs (
-    rot?: Quat | Vec3,
-    pos?: Vec3,
-    scale?: Vec3,
-): {
-    rotation: Quat | null;
-    position: { x: number; y: number; z: number } | null;
-    scale: { x: number; y: number; z: number } | null;
-} {
-    let rotation: Quat | null = null;
-    if (rot) {
-        if (rot instanceof Quat) {
-            rotation = new Quat(rot.x, rot.y, rot.z, rot.w);
-        } else {
-            rotation = new Quat();
-            Quat.fromEuler(rotation, rot.x, rot.y, rot.z);
-        }
-    }
-
-    return {
-        rotation,
-        position: pos ? { x: pos.x, y: pos.y, z: pos.z } : null,
-        scale: scale ? { x: scale.x, y: scale.y, z: scale.z } : null,
-    };
-}
-
-export function resolveNodeQuatArgs (
-    val: Readonly<Quat> | number,
-    y: number | undefined,
-    z: number | undefined,
-    w: number | undefined,
-    currentW: number,
-): { x: number; y: number; z: number; w: number } {
-    if (y === undefined && z === undefined && w === undefined) {
-        const quat = val as Readonly<Quat>;
-        return { x: quat.x, y: quat.y, z: quat.z, w: quat.w };
-    }
-
-    return {
-        x: val as number,
-        y: y as number,
-        z: z as number,
-        w: w === undefined ? currentW : w,
-    };
-}
+//

@@ -47,7 +47,7 @@ void dumpQueueDebugMessages(ID3D12Device *device, const char *checkpoint) {
     if (msgCount == 0) {
         return;
     }
-    CC_LOG_INFO("[QUEUE-DIAG] %s: %llu pending messages", checkpoint, static_cast<unsigned long long>(msgCount));
+    bool emittedHeader = false;
     for (UINT64 i = 0; i < msgCount; ++i) {
         SIZE_T msgSize = 0;
         infoQueue->GetMessage(i, nullptr, &msgSize);
@@ -57,6 +57,13 @@ void dumpQueueDebugMessages(ID3D12Device *device, const char *checkpoint) {
         ccstd::vector<uint8_t> storage(msgSize);
         auto *msg = reinterpret_cast<D3D12_MESSAGE *>(storage.data());
         if (SUCCEEDED(infoQueue->GetMessage(i, msg, &msgSize))) {
+            if (msg->Severity > D3D12_MESSAGE_SEVERITY_WARNING) {
+                continue;
+            }
+            if (!emittedHeader) {
+                CC_LOG_INFO("[QUEUE-DIAG] %s: %llu pending messages", checkpoint, static_cast<unsigned long long>(msgCount));
+                emittedHeader = true;
+            }
             CC_LOG_INFO("[QUEUE-DIAG]   ID=%u severity=%d: %.*s",
                         static_cast<unsigned>(msg->ID),
                         static_cast<int>(msg->Severity),

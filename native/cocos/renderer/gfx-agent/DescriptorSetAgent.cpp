@@ -100,14 +100,13 @@ void DescriptorSetAgent::forceUpdate() {
 
 void DescriptorSetAgent::bindBuffer(uint32_t binding, Buffer *buffer, uint32_t index, AccessFlags flags) {
     DescriptorSet::bindBuffer(binding, buffer, index, flags);
-    auto *actorBuffer = buffer ? static_cast<BufferAgent *>(buffer)->getActor() : nullptr;
 
     ENQUEUE_MESSAGE_5(
         DeviceAgent::getInstance()->getMessageQueue(),
         DescriptorSetBindBuffer,
         actor, getActor(),
         binding, binding,
-        buffer, actorBuffer,
+        buffer, static_cast<BufferAgent *>(buffer)->getActor(),
         index, index,
         flags, flags,
         {
@@ -117,14 +116,13 @@ void DescriptorSetAgent::bindBuffer(uint32_t binding, Buffer *buffer, uint32_t i
 
 void DescriptorSetAgent::bindTexture(uint32_t binding, Texture *texture, uint32_t index, AccessFlags flags) {
     DescriptorSet::bindTexture(binding, texture, index, flags);
-    auto *actorTexture = texture ? static_cast<TextureAgent *>(texture)->getActor() : nullptr;
 
     ENQUEUE_MESSAGE_5(
         DeviceAgent::getInstance()->getMessageQueue(),
         DescriptorSetBindTexture,
         actor, getActor(),
         binding, binding,
-        texture, actorTexture,
+        texture, static_cast<TextureAgent *>(texture)->getActor(),
         index, index,
         flags, flags,
         {

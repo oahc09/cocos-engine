@@ -313,7 +313,7 @@ void Engine::tick() {
         prevTime = std::chrono::steady_clock::now();
         if (_xr) _xr->beginRenderFrame();
         _scheduler->update(dt);
-        Director::getInstance()->tick(dt);
+        // Director::getInstance()->tick(dt);
 
         se::ScriptEngine::getInstance()->handlePromiseExceptions();
         events::Tick::broadcast(dt);

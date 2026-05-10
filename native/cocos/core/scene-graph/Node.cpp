@@ -88,6 +88,9 @@ Node::~Node() {
 }
 
 void Node::onBatchCreated(bool dontChildPrefab) {
+    // onBatchCreated was implemented in TS, so code should never go here.
+    CC_ABORT();
+    emit<BatchCreated>(dontChildPrefab);
     invalidateChildren(TransformBit::TRS);
     auto len = static_cast<int32_t>(_children.size());
     for (int32_t i = 0; i < len; ++i) {
@@ -149,7 +152,8 @@ void Node::onHierarchyChangedBase(Node *oldParent) { // NOLINT(misc-unused-param
 
     bool shouldActiveNow = isActive() && !!(newParent && newParent->isActiveInHierarchy());
     if (isActiveInHierarchy() != shouldActiveNow) {
-        Director::getInstance()->getNodeActivator()->activateNode(this, shouldActiveNow);
+        // Director::getInstance()->getNodeActivator()->activateNode(this, shouldActiveNow); // TODO(xwx): use TS temporarily
+        emit<ActiveNode>(shouldActiveNow);
     }
 }
 
@@ -161,7 +165,8 @@ void Node::setActive(bool isActive) {
         if (parent) {
             bool couldActiveInScene = parent->isActiveInHierarchy();
             if (couldActiveInScene) {
-                Director::getInstance()->getNodeActivator()->activateNode(this, isActive);
+                // Director::getInstance()->getNodeActivator()->activateNode(this, isActive); // TODO(xwx): use TS temporarily
+                emit<ActiveNode>(isActive);
             }
         }
     }
