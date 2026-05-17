@@ -87,7 +87,12 @@ struct CCD3D12CommandBuffer::Impl {
     ID3D12Resource *activeSwapchainBackBuffer{nullptr};
     ID3D12Resource *activeDepthStencil{nullptr};
     CCD3D12Texture *activeDepthTexture{nullptr};
-    ccstd::vector<CCD3D12Texture *> activeColorTextures;
+    struct ActiveColorTarget {
+        ID3D12Resource *resource{nullptr};
+        CCD3D12Texture *texture{nullptr};
+        bool hasTextureState{false};
+    };
+    ccstd::vector<ActiveColorTarget> activeColorTargets;
     bool inRenderPass{false};
 
     // Deferred descriptor binding state — collected during bindDescriptorSet,
@@ -207,7 +212,7 @@ void CCD3D12CommandBuffer::begin(RenderPass *renderPass, uint32_t subpass, Frame
     _impl->activeSwapchainBackBuffer = nullptr;
     _impl->activeDepthStencil = nullptr;
     _impl->activeDepthTexture = nullptr;
-    _impl->activeColorTextures.clear();
+    _impl->activeColorTargets.clear();
     _impl->inRenderPass = false;
     // Queue::submit() has already waited for GPU completion.
     _impl->pendingUploadResources.clear();
@@ -299,27 +304,24 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
     const uint32_t fboWidth = d3d12Fbo->getWidth();
     const uint32_t fboHeight = d3d12Fbo->getHeight();
 
-    // Count color attachments from framebuffer
-    const auto &colorTextures = fbo->getColorTextures();
-    const uint32_t colorCount = static_cast<uint32_t>(colorTextures.size());
+    // Count color attachments from the D3D12 framebuffer cache. The base
+    // framebuffer stores weak texture pointers, while the D3D12 framebuffer
+    // keeps strong references for pooled transient FBO safety.
+    const uint32_t colorCount = d3d12Fbo->getColorTextureCount();
 
     // Transition non-swapchain color attachments to RENDER_TARGET
-    _impl->activeColorTextures.clear();
+    _impl->activeColorTargets.clear();
     for (uint32_t i = 0; i < colorCount; ++i) {
-        auto *tex = colorTextures[i];
-        if (!tex) continue;
-        auto *d3d12Tex = static_cast<CCD3D12Texture *>(const_cast<Texture *>(tex));
-        if (!d3d12Tex) continue;
-
-        // Track all color textures for endRenderPass state restoration
-        _impl->activeColorTextures.push_back(d3d12Tex);
-
-        if (d3d12Tex->isSwapchainColorTexture()) continue;
-
-        auto *resource = static_cast<ID3D12Resource *>(d3d12Tex->getD3D12ResourceHandle());
+        auto *d3d12Tex = d3d12Fbo->getColorTexture(i);
+        auto *resource = static_cast<ID3D12Resource *>(d3d12Fbo->getColorResource(i));
         if (!resource) continue;
 
-        D3D12_RESOURCE_STATES prevState = d3d12Tex->getCurrentState();
+        const bool hasTextureState = d3d12Tex && d3d12Fbo->hasColorTextureState(i);
+        _impl->activeColorTargets.push_back({resource, d3d12Tex, hasTextureState});
+
+        if (d3d12Tex && d3d12Tex->isSwapchainColorTexture()) continue;
+
+        D3D12_RESOURCE_STATES prevState = hasTextureState ? d3d12Tex->getCurrentState() : D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         if (prevState != D3D12_RESOURCE_STATE_RENDER_TARGET) {
             D3D12_RESOURCE_BARRIER barrier{};
             barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -331,7 +333,9 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
             if (prePassBarrierCount < MAX_PASS_BARRIERS) {
                 prePassBarriers[prePassBarrierCount++] = barrier;
             }
-            d3d12Tex->setCurrentState(D3D12_RESOURCE_STATE_RENDER_TARGET);
+            if (hasTextureState) {
+                d3d12Tex->setCurrentState(D3D12_RESOURCE_STATE_RENDER_TARGET);
+            }
         }
     }
 
@@ -352,8 +356,8 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
     D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle{};
     dsvHandle.ptr = dsvPair.ptr;
     bool hasDSV = (dsvPair.ptr != 0);
-    auto *depthStencilTexture = static_cast<CCD3D12Texture *>(fbo->getDepthStencilTexture());
-    auto *depthStencilResource = depthStencilTexture ? static_cast<ID3D12Resource *>(depthStencilTexture->getD3D12ResourceHandle()) : nullptr;
+    auto *depthStencilTexture = d3d12Fbo->getDepthStencilTexture();
+    auto *depthStencilResource = static_cast<ID3D12Resource *>(d3d12Fbo->getDepthStencilResource());
     if (hasDSV && depthStencilResource) {
         D3D12_RESOURCE_STATES dsPrevState = depthStencilTexture ? depthStencilTexture->getCurrentState() : D3D12_RESOURCE_STATE_COMMON;
         if (dsPrevState != D3D12_RESOURCE_STATE_DEPTH_WRITE) {
@@ -477,11 +481,15 @@ void CCD3D12CommandBuffer::endRenderPass() {
 
     // Transition non-swapchain color attachments from RENDER_TARGET to SHADER_RESOURCE
     // (the next pass will likely read them as textures)
-    for (auto *d3d12Tex : _impl->activeColorTextures) {
-        if (!d3d12Tex || d3d12Tex->isSwapchainColorTexture()) continue;
-        auto *resource = static_cast<ID3D12Resource *>(d3d12Tex->getD3D12ResourceHandle());
+    for (const auto &target : _impl->activeColorTargets) {
+        auto *d3d12Tex = target.texture;
+        if (d3d12Tex && d3d12Tex->isSwapchainColorTexture()) continue;
+        auto *resource = target.resource;
         if (!resource) continue;
-        if (d3d12Tex->getCurrentState() == D3D12_RESOURCE_STATE_RENDER_TARGET) {
+        const bool shouldTransition = target.hasTextureState
+                                          ? (d3d12Tex && d3d12Tex->getCurrentState() == D3D12_RESOURCE_STATE_RENDER_TARGET)
+                                          : true;
+        if (shouldTransition) {
             D3D12_RESOURCE_BARRIER barrier{};
             barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
             barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
@@ -492,10 +500,12 @@ void CCD3D12CommandBuffer::endRenderPass() {
             if (postPassBarrierCount < MAX_PASS_BARRIERS) {
                 postPassBarriers[postPassBarrierCount++] = barrier;
             }
-            d3d12Tex->setCurrentState(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            if (target.hasTextureState && d3d12Tex) {
+                d3d12Tex->setCurrentState(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            }
         }
     }
-    _impl->activeColorTextures.clear();
+    _impl->activeColorTargets.clear();
 
     // Transition depth-stencil back from DEPTH_WRITE
     if (_impl->activeDepthStencil) {

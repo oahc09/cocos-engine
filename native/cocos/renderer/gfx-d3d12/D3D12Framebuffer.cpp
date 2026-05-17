@@ -28,7 +28,6 @@
 #include "D3D12Texture.h"
 #include "D3D12RenderPass.h"
 #include "base/Log.h"
-#include "base/Ptr.h"
 
     #ifndef NOMINMAX
         #define NOMINMAX
@@ -49,7 +48,11 @@ struct CCD3D12Framebuffer::Impl {
     // Store CPU descriptor handles
     ccstd::vector<D3D12_CPU_DESCRIPTOR_HANDLE> rtvHandles;
     D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle{};
-    ccstd::vector<IntrusivePtr<CCD3D12Texture>> repairedColorTextures;
+    ccstd::vector<CCD3D12Texture *> colorTextures;
+    ccstd::vector<bool> colorHasTextureState;
+    CCD3D12Texture *depthStencilTexture{nullptr};
+    ccstd::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> colorResources;
+    Microsoft::WRL::ComPtr<ID3D12Resource> depthStencilResource;
 
     uint32_t width{0};
     uint32_t height{0};
@@ -69,6 +72,18 @@ void CCD3D12Framebuffer::doInit(const FramebufferInfo &info) {
     if (!_impl) return;
     _swapchain = nullptr;
     _isOffscreen = true;
+    _impl->rtvHeap.Reset();
+    _impl->dsvHeap.Reset();
+    _impl->rtvHandles.clear();
+    _impl->dsvHandle = D3D12_CPU_DESCRIPTOR_HANDLE{};
+    _impl->colorTextures.clear();
+    _impl->colorHasTextureState.clear();
+    _impl->colorResources.clear();
+    _impl->depthStencilTexture = nullptr;
+    _impl->depthStencilResource.Reset();
+    _impl->width = 0;
+    _impl->height = 0;
+    _impl->rtvDescriptorSize = 0;
 
     auto *device = CCD3D12Device::getInstance();
     auto *d3dDevice = static_cast<ID3D12Device *>(device ? device->getD3D12DeviceHandle() : nullptr);
@@ -78,9 +93,16 @@ void CCD3D12Framebuffer::doInit(const FramebufferInfo &info) {
     }
 
     const uint32_t colorCount = static_cast<uint32_t>(_colorTextures.size());
+    _impl->colorTextures.resize(colorCount);
+    _impl->colorHasTextureState.assign(colorCount, false);
+    _impl->colorResources.resize(colorCount);
+    for (uint32_t i = 0; i < colorCount; ++i) {
+        _impl->colorTextures[i] = static_cast<CCD3D12Texture *>(_colorTextures[i]);
+    }
+    _impl->depthStencilTexture = static_cast<CCD3D12Texture *>(_depthStencilTexture);
 
     // Determine dimensions from first color texture or depth texture
-    Texture *sizeRef = colorCount > 0 ? _colorTextures[0] : _depthStencilTexture;
+    Texture *sizeRef = colorCount > 0 ? _impl->colorTextures[0] : _impl->depthStencilTexture;
     if (sizeRef) {
         _impl->width = sizeRef->getWidth();
         _impl->height = sizeRef->getHeight();
@@ -103,36 +125,42 @@ void CCD3D12Framebuffer::doInit(const FramebufferInfo &info) {
 
         _impl->rtvDescriptorSize = d3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
         _impl->rtvHandles.resize(colorCount);
-        _impl->repairedColorTextures.resize(colorCount);
 
         D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = _impl->rtvHeap->GetCPUDescriptorHandleForHeapStart();
         for (uint32_t i = 0; i < colorCount; ++i) {
             auto handleSlot = rtvHandle;
             rtvHandle.ptr += _impl->rtvDescriptorSize;
 
-            auto *texture = static_cast<CCD3D12Texture *>(_colorTextures[i]);
+            auto *texture = _impl->colorTextures[i];
             if (!texture) continue;
 
-            if (texture->isSwapchainColorTexture() && _depthStencilTexture) {
-                auto *depthTexture = static_cast<CCD3D12Texture *>(_depthStencilTexture);
+            if (texture->isSwapchainColorTexture() && _impl->depthStencilTexture) {
+                auto *depthTexture = _impl->depthStencilTexture;
                 const bool mixedOffscreenDepth = depthTexture &&
                                                  !depthTexture->isSwapchainColorTexture() &&
                                                  depthTexture->getD3D12OwnedResourceHandle() != nullptr &&
                                                  (depthTexture->getWidth() != texture->getWidth() ||
                                                   depthTexture->getHeight() != texture->getHeight());
                 if (mixedOffscreenDepth) {
-                    if (auto *replacement = CCD3D12Texture::findCompatibleOwnedColorTexture(
-                            depthTexture->getWidth(), depthTexture->getHeight(), texture->getFormat())) {
-                        CC_LOG_WARNING("D3D12Framebuffer: mixed swapchain color/offscreen depth repaired. "
-                                       "color[%u] swapchain %ux%u replaced with owned RT %p %ux%u.",
-                                       i, texture->getWidth(), texture->getHeight(), replacement,
-                                       replacement->getWidth(), replacement->getHeight());
-                        _impl->repairedColorTextures[i] = replacement;
-                        texture = replacement;
-                        _colorTextures[i] = replacement;
+                    auto *replacementResource = static_cast<ID3D12Resource *>(CCD3D12Texture::findUniqueOwnedColorResource(
+                        depthTexture->getWidth(), depthTexture->getHeight(), texture->getFormat()));
+                    if (replacementResource) {
+                        CC_LOG_WARNING("D3D12Framebuffer: mixed swapchain color/offscreen depth repaired with owned RT. "
+                                       "color[%u] swapchain %ux%u replaced with owned RT resource %p %ux%u.",
+                                       i, texture->getWidth(), texture->getHeight(), replacementResource,
+                                       depthTexture->getWidth(), depthTexture->getHeight());
+                        _impl->colorTextures[i] = nullptr;
+                        _impl->colorResources[i] = replacementResource;
+                        d3dDevice->CreateRenderTargetView(replacementResource, nullptr, handleSlot);
+                        _impl->rtvHandles[i] = handleSlot;
+                        if (i == 0) {
+                            _impl->width = depthTexture->getWidth();
+                            _impl->height = depthTexture->getHeight();
+                        }
+                        continue;
                     } else {
                         CC_LOG_WARNING("D3D12Framebuffer: mixed swapchain color/offscreen depth detected. "
-                                       "color[%u]=%ux%u depth=%ux%u format=%u, but no unique owned RT was found.",
+                                       "color[%u]=%ux%u depth=%ux%u format=%u, but no unique owned color RT resource was found.",
                                        i, texture->getWidth(), texture->getHeight(),
                                        depthTexture->getWidth(), depthTexture->getHeight(),
                                        static_cast<unsigned>(texture->getFormat()));
@@ -155,13 +183,15 @@ void CCD3D12Framebuffer::doInit(const FramebufferInfo &info) {
                 continue;
             }
 
+            _impl->colorResources[i] = resource;
+            _impl->colorHasTextureState[i] = true;
             d3dDevice->CreateRenderTargetView(resource, nullptr, handleSlot);
             _impl->rtvHandles[i] = handleSlot;
         }
     }
 
     // Create DSV descriptor heap and depth-stencil view
-    if (_depthStencilTexture) {
+    if (_impl->depthStencilTexture) {
         D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDesc{};
         dsvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
         dsvHeapDesc.NumDescriptors = 1;
@@ -175,10 +205,11 @@ void CCD3D12Framebuffer::doInit(const FramebufferInfo &info) {
             return;
         }
 
-        auto *depthTexture = static_cast<CCD3D12Texture *>(_depthStencilTexture);
+        auto *depthTexture = _impl->depthStencilTexture;
         if (depthTexture) {
             auto *resource = static_cast<ID3D12Resource *>(depthTexture->getD3D12ResourceHandle());
             if (resource) {
+                _impl->depthStencilResource = resource;
                 _impl->dsvHandle = _impl->dsvHeap->GetCPUDescriptorHandleForHeapStart();
                 d3dDevice->CreateDepthStencilView(resource, nullptr, _impl->dsvHandle);
             } else {
@@ -196,7 +227,11 @@ void CCD3D12Framebuffer::doDestroy() {
         _impl->rtvHeap.Reset();
         _impl->dsvHeap.Reset();
         _impl->rtvHandles.clear();
-        _impl->repairedColorTextures.clear();
+        _impl->colorTextures.clear();
+        _impl->colorHasTextureState.clear();
+        _impl->colorResources.clear();
+        _impl->depthStencilTexture = nullptr;
+        _impl->depthStencilResource.Reset();
         _impl->dsvHandle = D3D12_CPU_DESCRIPTOR_HANDLE{};
         _impl->width = 0;
         _impl->height = 0;
@@ -208,12 +243,8 @@ CCD3D12Framebuffer::DescriptorPair CCD3D12Framebuffer::getRTVHandle(uint32_t ind
     if (!_impl) return {};
     if (index >= _impl->rtvHandles.size()) return {};
 
-    // Check if THIS specific color attachment is a swapchain texture.
-    // Previously we checked only _swapchain (which is set if ANY attachment
-    // is a swapchain texture), causing non-swapchain attachments in MRT
-    // to incorrectly get the swapchain RTV handle.
-    if (index < static_cast<uint32_t>(_colorTextures.size())) {
-        auto *texture = static_cast<CCD3D12Texture *>(_colorTextures[index]);
+    if (index < _impl->colorTextures.size()) {
+        auto *texture = _impl->colorTextures[index];
         if (texture && texture->isSwapchainColorTexture()) {
             auto *sw = static_cast<CCD3D12Swapchain *>(texture->getSwapchain());
             if (sw) {
@@ -238,6 +269,32 @@ uint32_t CCD3D12Framebuffer::getWidth() const {
 
 uint32_t CCD3D12Framebuffer::getHeight() const {
     return _impl ? _impl->height : 0;
+}
+
+uint32_t CCD3D12Framebuffer::getColorTextureCount() const {
+    return _impl ? static_cast<uint32_t>(_impl->colorTextures.size()) : 0;
+}
+
+CCD3D12Texture *CCD3D12Framebuffer::getColorTexture(uint32_t index) const {
+    if (!_impl || index >= _impl->colorTextures.size()) return nullptr;
+    return _impl->colorTextures[index];
+}
+
+CCD3D12Texture *CCD3D12Framebuffer::getDepthStencilTexture() const {
+    return _impl ? _impl->depthStencilTexture : nullptr;
+}
+
+void *CCD3D12Framebuffer::getColorResource(uint32_t index) const {
+    if (!_impl || index >= _impl->colorResources.size()) return nullptr;
+    return _impl->colorResources[index].Get();
+}
+
+void *CCD3D12Framebuffer::getDepthStencilResource() const {
+    return _impl ? _impl->depthStencilResource.Get() : nullptr;
+}
+
+bool CCD3D12Framebuffer::hasColorTextureState(uint32_t index) const {
+    return _impl && index < _impl->colorHasTextureState.size() && _impl->colorHasTextureState[index];
 }
 
 CCD3D12Swapchain *CCD3D12Framebuffer::getSwapchain() const {

@@ -45,21 +45,50 @@ struct CCD3D12Texture::Impl {
 };
 
 namespace {
-std::vector<CCD3D12Texture *> &ownedColorRenderTargets() {
-    static std::vector<CCD3D12Texture *> textures;
+struct OwnedColorResourceEntry {
+    CCD3D12Texture *owner{nullptr};
+    Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+    uint32_t width{0};
+    uint32_t height{0};
+    Format format{Format::UNKNOWN};
+};
+
+std::vector<OwnedColorResourceEntry> &ownedColorRenderTargets() {
+    static std::vector<OwnedColorResourceEntry> textures;
     return textures;
 }
 
 void registerOwnedColorRenderTarget(CCD3D12Texture *texture) {
+    if (!texture) {
+        return;
+    }
+    auto *resource = static_cast<ID3D12Resource *>(texture->getD3D12OwnedResourceHandle());
+    if (!resource) {
+        return;
+    }
+
     auto &textures = ownedColorRenderTargets();
-    if (std::find(textures.begin(), textures.end(), texture) == textures.end()) {
-        textures.emplace_back(texture);
+    const auto found = std::find_if(textures.begin(), textures.end(),
+                                    [texture](const OwnedColorResourceEntry &entry) {
+                                        return entry.owner == texture;
+                                    });
+    if (found == textures.end()) {
+        textures.push_back({texture, resource, texture->getWidth(), texture->getHeight(), texture->getFormat()});
+    } else {
+        found->resource = resource;
+        found->width = texture->getWidth();
+        found->height = texture->getHeight();
+        found->format = texture->getFormat();
     }
 }
 
 void unregisterOwnedColorRenderTarget(CCD3D12Texture *texture) {
     auto &textures = ownedColorRenderTargets();
-    textures.erase(std::remove(textures.begin(), textures.end(), texture), textures.end());
+    textures.erase(std::remove_if(textures.begin(), textures.end(),
+                                  [texture](const OwnedColorResourceEntry &entry) {
+                                      return entry.owner == texture;
+                                  }),
+                   textures.end());
 }
 
 DXGI_FORMAT toD3D12Format(Format format) {
@@ -371,21 +400,22 @@ bool CCD3D12Texture::isSwapchainColorTexture() const {
            getD3D12OwnedResourceHandle() == nullptr;
 }
 
-CCD3D12Texture *CCD3D12Texture::findCompatibleOwnedColorTexture(uint32_t width, uint32_t height, Format format) {
-    CCD3D12Texture *match = nullptr;
-    for (auto *texture : ownedColorRenderTargets()) {
-        if (!texture || texture->getWidth() != width || texture->getHeight() != height || texture->getFormat() != format) {
+void *CCD3D12Texture::findUniqueOwnedColorResource(uint32_t width, uint32_t height, Format format) {
+    ID3D12Resource *match = nullptr;
+    for (const auto &entry : ownedColorRenderTargets()) {
+        if (entry.width != width || entry.height != height || entry.format != format) {
             continue;
         }
-        if (texture->isSwapchainColorTexture() || texture->getD3D12OwnedResourceHandle() == nullptr) {
+        auto *resource = entry.resource.Get();
+        if (!resource) {
             continue;
         }
-        if (match && match != texture) {
-            CC_LOG_WARNING("D3D12Texture: multiple compatible owned color RTs found for %ux%u format=%u; skip framebuffer repair.",
+        if (match && match != resource) {
+            CC_LOG_WARNING("D3D12Texture: multiple owned color RTs match %ux%u format=%u; skip unsafe repair.",
                            width, height, static_cast<unsigned>(format));
             return nullptr;
         }
-        match = texture;
+        match = resource;
     }
     return match;
 }

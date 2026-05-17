@@ -31,6 +31,7 @@ namespace cc {
 namespace gfx {
 
 class CCD3D12Swapchain;
+class CCD3D12Texture;
 
 class CC_DLL CCD3D12Framebuffer final : public Framebuffer {
 public:
@@ -47,6 +48,12 @@ public:
     DescriptorPair getDSVHandle() const;
     uint32_t getWidth() const;
     uint32_t getHeight() const;
+    uint32_t getColorTextureCount() const;
+    CCD3D12Texture *getColorTexture(uint32_t index) const;
+    CCD3D12Texture *getDepthStencilTexture() const;
+    void *getColorResource(uint32_t index) const;
+    void *getDepthStencilResource() const;
+    bool hasColorTextureState(uint32_t index) const;
     CCD3D12Swapchain *getSwapchain() const;
     bool isOffscreen() const;
 

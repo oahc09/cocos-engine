@@ -50,7 +50,7 @@ public:
     // Returns true if this texture wraps a swapchain back buffer (color attachment)
     bool isSwapchainColorTexture() const;
 
-    static CCD3D12Texture *findCompatibleOwnedColorTexture(uint32_t width, uint32_t height, Format format);
+    static void *findUniqueOwnedColorResource(uint32_t width, uint32_t height, Format format);
 
     // Returns the parent swapchain for swapchain textures, nullptr otherwise
     Swapchain *getSwapchain() const { return _isSwapchainTexture ? _swapchain : nullptr; }
