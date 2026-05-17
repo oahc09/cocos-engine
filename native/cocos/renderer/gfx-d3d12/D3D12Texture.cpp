@@ -35,6 +35,7 @@
     #include <dxgiformat.h>
     #include <wrl/client.h>
     #include <algorithm>
+    #include <unordered_map>
     #include <vector>
 
 namespace cc {
@@ -51,11 +52,22 @@ struct OwnedColorResourceEntry {
     uint32_t width{0};
     uint32_t height{0};
     Format format{Format::UNKNOWN};
+    uint64_t serial{0};
 };
 
 std::vector<OwnedColorResourceEntry> &ownedColorRenderTargets() {
     static std::vector<OwnedColorResourceEntry> textures;
     return textures;
+}
+
+uint64_t &ownedColorRenderTargetSerial() {
+    static uint64_t serial{0};
+    return serial;
+}
+
+std::unordered_map<ID3D12Resource *, D3D12_RESOURCE_STATES> &trackedResourceStates() {
+    static std::unordered_map<ID3D12Resource *, D3D12_RESOURCE_STATES> states;
+    return states;
 }
 
 void registerOwnedColorRenderTarget(CCD3D12Texture *texture) {
@@ -68,17 +80,19 @@ void registerOwnedColorRenderTarget(CCD3D12Texture *texture) {
     }
 
     auto &textures = ownedColorRenderTargets();
+    const uint64_t serial = ++ownedColorRenderTargetSerial();
     const auto found = std::find_if(textures.begin(), textures.end(),
                                     [texture](const OwnedColorResourceEntry &entry) {
                                         return entry.owner == texture;
                                     });
     if (found == textures.end()) {
-        textures.push_back({texture, resource, texture->getWidth(), texture->getHeight(), texture->getFormat()});
+        textures.push_back({texture, resource, texture->getWidth(), texture->getHeight(), texture->getFormat(), serial});
     } else {
         found->resource = resource;
         found->width = texture->getWidth();
         found->height = texture->getHeight();
         found->format = texture->getFormat();
+        found->serial = serial;
     }
 }
 
@@ -86,6 +100,9 @@ void unregisterOwnedColorRenderTarget(CCD3D12Texture *texture) {
     auto &textures = ownedColorRenderTargets();
     textures.erase(std::remove_if(textures.begin(), textures.end(),
                                   [texture](const OwnedColorResourceEntry &entry) {
+                                      if (entry.owner == texture && entry.resource) {
+                                          trackedResourceStates().erase(entry.resource.Get());
+                                      }
                                       return entry.owner == texture;
                                   }),
                    textures.end());
@@ -313,7 +330,7 @@ void CCD3D12Texture::doInit(const TextureViewInfo &info) {
     } else {
         _impl->resource = static_cast<ID3D12Resource *>(texture->getD3D12OwnedResourceHandle());
     }
-    _currentState = texture->getCurrentState();
+    setCurrentState(texture->getCurrentState());
 }
 
 void CCD3D12Texture::doInit(const SwapchainTextureInfo &info) {
@@ -339,6 +356,7 @@ void CCD3D12Texture::doInit(const SwapchainTextureInfo &info) {
 void CCD3D12Texture::doDestroy() {
     unregisterOwnedColorRenderTarget(this);
     if (_impl) {
+        clearTrackedResourceState(_impl->resource.Get());
         _impl->resource.Reset();
     }
     _isSwapchainTexture = false;
@@ -400,8 +418,43 @@ bool CCD3D12Texture::isSwapchainColorTexture() const {
            getD3D12OwnedResourceHandle() == nullptr;
 }
 
-void *CCD3D12Texture::findUniqueOwnedColorResource(uint32_t width, uint32_t height, Format format) {
-    ID3D12Resource *match = nullptr;
+D3D12_RESOURCE_STATES CCD3D12Texture::getTrackedResourceState(void *resource, D3D12_RESOURCE_STATES fallback) {
+    auto *d3dResource = static_cast<ID3D12Resource *>(resource);
+    if (!d3dResource) {
+        return fallback;
+    }
+    const auto &states = trackedResourceStates();
+    const auto iter = states.find(d3dResource);
+    return iter != states.end() ? iter->second : fallback;
+}
+
+void CCD3D12Texture::setTrackedResourceState(void *resource, D3D12_RESOURCE_STATES state) {
+    auto *d3dResource = static_cast<ID3D12Resource *>(resource);
+    if (!d3dResource) {
+        return;
+    }
+    trackedResourceStates()[d3dResource] = state;
+}
+
+void CCD3D12Texture::clearTrackedResourceState(void *resource) {
+    auto *d3dResource = static_cast<ID3D12Resource *>(resource);
+    if (!d3dResource) {
+        return;
+    }
+    trackedResourceStates().erase(d3dResource);
+}
+
+void CCD3D12Texture::setCurrentState(D3D12_RESOURCE_STATES state) {
+    _currentState = state;
+    if (_impl && _impl->resource) {
+        setTrackedResourceState(_impl->resource.Get(), state);
+    }
+}
+
+void *CCD3D12Texture::findLatestOwnedColorResource(uint32_t width, uint32_t height, Format format) {
+    ID3D12Resource *latestMatch = nullptr;
+    uint64_t latestSerial = 0;
+    uint32_t matchCount = 0;
     for (const auto &entry : ownedColorRenderTargets()) {
         if (entry.width != width || entry.height != height || entry.format != format) {
             continue;
@@ -410,14 +463,19 @@ void *CCD3D12Texture::findUniqueOwnedColorResource(uint32_t width, uint32_t heig
         if (!resource) {
             continue;
         }
-        if (match && match != resource) {
-            CC_LOG_WARNING("D3D12Texture: multiple owned color RTs match %ux%u format=%u; skip unsafe repair.",
-                           width, height, static_cast<unsigned>(format));
-            return nullptr;
+        ++matchCount;
+        if (!latestMatch || entry.serial >= latestSerial) {
+            latestMatch = resource;
+            latestSerial = entry.serial;
         }
-        match = resource;
     }
-    return match;
+    static ID3D12Resource *lastWarnedMultipleMatch{nullptr};
+    if (matchCount > 1 && latestMatch != lastWarnedMultipleMatch) {
+        CC_LOG_WARNING("D3D12Texture: multiple owned color RTs match %ux%u format=%u; using latest registered resource %p.",
+                       width, height, static_cast<unsigned>(format), latestMatch);
+        lastWarnedMultipleMatch = latestMatch;
+    }
+    return latestMatch;
 }
 
 bool CCD3D12Texture::createResource(uint32_t width, uint32_t height) {
@@ -546,8 +604,9 @@ bool CCD3D12Texture::createResource(uint32_t width, uint32_t height) {
         return false;
     }
 
+    clearTrackedResourceState(_impl->resource.Get());
     _impl->resource = resource;
-    _currentState = D3D12_RESOURCE_STATE_COMMON;
+    setCurrentState(D3D12_RESOURCE_STATE_COMMON);
     if (hasFlag(_info.usage, TextureUsageBit::COLOR_ATTACHMENT) &&
         !hasFlag(_info.usage, TextureUsageBit::DEPTH_STENCIL_ATTACHMENT) &&
         !_isSwapchainTexture) {

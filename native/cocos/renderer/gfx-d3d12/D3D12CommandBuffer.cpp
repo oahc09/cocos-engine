@@ -304,9 +304,9 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
     const uint32_t fboWidth = d3d12Fbo->getWidth();
     const uint32_t fboHeight = d3d12Fbo->getHeight();
 
-    // Count color attachments from the D3D12 framebuffer cache. The base
-    // framebuffer stores weak texture pointers, while the D3D12 framebuffer
-    // keeps strong references for pooled transient FBO safety.
+    // Count color attachments from the D3D12 framebuffer cache. Repaired
+    // offscreen targets may only have a cached ID3D12Resource, not a live
+    // CCD3D12Texture actor.
     const uint32_t colorCount = d3d12Fbo->getColorTextureCount();
 
     // Transition non-swapchain color attachments to RENDER_TARGET
@@ -321,7 +321,9 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
 
         if (d3d12Tex && d3d12Tex->isSwapchainColorTexture()) continue;
 
-        D3D12_RESOURCE_STATES prevState = hasTextureState ? d3d12Tex->getCurrentState() : D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        D3D12_RESOURCE_STATES prevState = hasTextureState
+                                               ? d3d12Tex->getCurrentState()
+                                               : CCD3D12Texture::getTrackedResourceState(resource, D3D12_RESOURCE_STATE_COMMON);
         if (prevState != D3D12_RESOURCE_STATE_RENDER_TARGET) {
             D3D12_RESOURCE_BARRIER barrier{};
             barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -335,6 +337,8 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
             }
             if (hasTextureState) {
                 d3d12Tex->setCurrentState(D3D12_RESOURCE_STATE_RENDER_TARGET);
+            } else {
+                CCD3D12Texture::setTrackedResourceState(resource, D3D12_RESOURCE_STATE_RENDER_TARGET);
             }
         }
     }
@@ -486,9 +490,11 @@ void CCD3D12CommandBuffer::endRenderPass() {
         if (d3d12Tex && d3d12Tex->isSwapchainColorTexture()) continue;
         auto *resource = target.resource;
         if (!resource) continue;
+        const D3D12_RESOURCE_STATES trackedState =
+            CCD3D12Texture::getTrackedResourceState(resource, D3D12_RESOURCE_STATE_RENDER_TARGET);
         const bool shouldTransition = target.hasTextureState
                                           ? (d3d12Tex && d3d12Tex->getCurrentState() == D3D12_RESOURCE_STATE_RENDER_TARGET)
-                                          : true;
+                                          : (trackedState == D3D12_RESOURCE_STATE_RENDER_TARGET);
         if (shouldTransition) {
             D3D12_RESOURCE_BARRIER barrier{};
             barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -502,6 +508,8 @@ void CCD3D12CommandBuffer::endRenderPass() {
             }
             if (target.hasTextureState && d3d12Tex) {
                 d3d12Tex->setCurrentState(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            } else {
+                CCD3D12Texture::setTrackedResourceState(resource, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             }
         }
     }

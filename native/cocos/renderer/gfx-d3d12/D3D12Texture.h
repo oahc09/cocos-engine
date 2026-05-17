@@ -50,14 +50,17 @@ public:
     // Returns true if this texture wraps a swapchain back buffer (color attachment)
     bool isSwapchainColorTexture() const;
 
-    static void *findUniqueOwnedColorResource(uint32_t width, uint32_t height, Format format);
+    static void *findLatestOwnedColorResource(uint32_t width, uint32_t height, Format format);
 
     // Returns the parent swapchain for swapchain textures, nullptr otherwise
     Swapchain *getSwapchain() const { return _isSwapchainTexture ? _swapchain : nullptr; }
 
-    // D3D12 resource state tracking — used by pipelineBarrier
+    // D3D12 resource state tracking - used by pipelineBarrier
     D3D12_RESOURCE_STATES getCurrentState() const { return _currentState; }
-    void setCurrentState(D3D12_RESOURCE_STATES state) { _currentState = state; }
+    void setCurrentState(D3D12_RESOURCE_STATES state);
+    static D3D12_RESOURCE_STATES getTrackedResourceState(void *resource, D3D12_RESOURCE_STATES fallback);
+    static void setTrackedResourceState(void *resource, D3D12_RESOURCE_STATES state);
+    static void clearTrackedResourceState(void *resource);
 
 protected:
     void doInit(const TextureInfo &info) override;

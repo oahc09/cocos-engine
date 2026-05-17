@@ -62,6 +62,8 @@ protected:
     void doDestroy() override;
 
 private:
+    void refreshRepairedColorResource(uint32_t index) const;
+
     struct Impl;
     std::unique_ptr<Impl> _impl;
     CCD3D12Swapchain *_swapchain{nullptr};
