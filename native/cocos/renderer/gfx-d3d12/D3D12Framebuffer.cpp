@@ -65,6 +65,8 @@ CCD3D12Framebuffer::~CCD3D12Framebuffer() {
 void CCD3D12Framebuffer::doInit(const FramebufferInfo &info) {
     (void)info;
     if (!_impl) return;
+    _swapchain = nullptr;
+    _isOffscreen = true;
 
     auto *device = CCD3D12Device::getInstance();
     auto *d3dDevice = static_cast<ID3D12Device *>(device ? device->getD3D12DeviceHandle() : nullptr);
@@ -102,29 +104,55 @@ void CCD3D12Framebuffer::doInit(const FramebufferInfo &info) {
 
         D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = _impl->rtvHeap->GetCPUDescriptorHandleForHeapStart();
         for (uint32_t i = 0; i < colorCount; ++i) {
+            auto handleSlot = rtvHandle;
+            rtvHandle.ptr += _impl->rtvDescriptorSize;
+
             auto *texture = static_cast<CCD3D12Texture *>(_colorTextures[i]);
             if (!texture) continue;
+
+            if (texture->isSwapchainColorTexture() && _depthStencilTexture) {
+                auto *depthTexture = static_cast<CCD3D12Texture *>(_depthStencilTexture);
+                const bool mixedOffscreenDepth = depthTexture &&
+                                                 !depthTexture->isSwapchainColorTexture() &&
+                                                 depthTexture->getD3D12OwnedResourceHandle() != nullptr &&
+                                                 (depthTexture->getWidth() != texture->getWidth() ||
+                                                  depthTexture->getHeight() != texture->getHeight());
+                if (mixedOffscreenDepth) {
+                    if (auto *replacement = CCD3D12Texture::findCompatibleOwnedColorTexture(
+                            depthTexture->getWidth(), depthTexture->getHeight(), texture->getFormat())) {
+                        CC_LOG_WARNING("D3D12Framebuffer: repairing mixed swapchain/offscreen attachments. "
+                                       "color[%u] swapchain %ux%u replaced with owned RT %p %ux%u.",
+                                       i, texture->getWidth(), texture->getHeight(), replacement,
+                                       replacement->getWidth(), replacement->getHeight());
+                        texture = replacement;
+                        _colorTextures[i] = replacement;
+                    } else {
+                        CC_LOG_WARNING("D3D12Framebuffer: mixed swapchain/offscreen attachments detected, "
+                                       "but no unique owned color RT found. color[%u]=%ux%u depth=%ux%u format=%u.",
+                                       i, texture->getWidth(), texture->getHeight(),
+                                       depthTexture->getWidth(), depthTexture->getHeight(),
+                                       static_cast<unsigned>(texture->getFormat()));
+                    }
+                }
+            }
 
             // Detect swapchain color textures — their RTVs are managed by the swapchain
             if (texture->isSwapchainColorTexture()) {
                 _swapchain = static_cast<CCD3D12Swapchain *>(texture->getSwapchain());
+                _isOffscreen = false;
                 // Leave placeholder handle; getRTVHandle() returns swapchain's RTV dynamically
                 _impl->rtvHandles[i] = D3D12_CPU_DESCRIPTOR_HANDLE{};
-                rtvHandle.ptr += _impl->rtvDescriptorSize;
                 continue;
             }
 
-            auto *resource = static_cast<ID3D12Resource *>(texture->getD3D12ResourceHandle());
+            auto *resource = static_cast<ID3D12Resource *>(texture->getD3D12OwnedResourceHandle());
             if (!resource) {
                 CC_LOG_WARNING("D3D12Framebuffer: color texture %u has no D3D12 resource.", i);
-                rtvHandle.ptr += _impl->rtvDescriptorSize;
                 continue;
             }
 
-            d3dDevice->CreateRenderTargetView(resource, nullptr, rtvHandle);
-            _impl->rtvHandles[i] = rtvHandle;
-
-            rtvHandle.ptr += _impl->rtvDescriptorSize;
+            d3dDevice->CreateRenderTargetView(resource, nullptr, handleSlot);
+            _impl->rtvHandles[i] = handleSlot;
         }
     }
 
@@ -208,7 +236,11 @@ uint32_t CCD3D12Framebuffer::getHeight() const {
 }
 
 CCD3D12Swapchain *CCD3D12Framebuffer::getSwapchain() const {
-    return _swapchain;
+    return _isOffscreen ? nullptr : _swapchain;
+}
+
+bool CCD3D12Framebuffer::isOffscreen() const {
+    return _isOffscreen;
 }
 
 } // namespace gfx

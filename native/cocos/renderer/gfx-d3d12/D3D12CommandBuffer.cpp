@@ -55,6 +55,22 @@ static constexpr uint32_t D3D12_MAX_BOUND_SETS = 4;
 // Maximum resource barriers per render pass transition (swapchain + color attachments + depth)
 static constexpr uint32_t MAX_PASS_BARRIERS = 16;
 
+namespace {
+D3D12_RESOURCE_STATES getPostTransferTextureState(const TextureInfo &info) {
+    if (hasFlag(info.usage, TextureUsageBit::SAMPLED)) {
+        return D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    }
+    if (hasFlag(info.usage, TextureUsageBit::DEPTH_STENCIL_ATTACHMENT)) {
+        return D3D12_RESOURCE_STATE_DEPTH_READ;
+    }
+    if (hasFlag(info.usage, TextureUsageBit::COLOR_ATTACHMENT)) {
+        return D3D12_RESOURCE_STATE_RENDER_TARGET;
+    }
+    return D3D12_RESOURCE_STATE_COMMON;
+}
+} // namespace
+
 struct CCD3D12CommandBuffer::Impl {
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator> commandAllocator;
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commandList;
@@ -324,6 +340,11 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
     for (uint32_t i = 0; i < colorCount && i < MAX_ATTACHMENTS; ++i) {
         auto handle = d3d12Fbo->getRTVHandle(i);
         rtvHandles[i].ptr = handle.ptr;
+        if (handle.ptr == 0) {
+            CC_LOG_WARNING("D3D12 beginRenderPass: RTV handle[%u] is NULL (swapchain=%s, colorCount=%u). "
+                           "Off-screen RT will not be bound!",
+                           i, swapchain ? "yes" : "no", colorCount);
+        }
     }
 
     // Get DSV handle
@@ -1055,6 +1076,7 @@ void CCD3D12CommandBuffer::copyBuffersToTexture(const uint8_t *const *buffers, T
         srcBox.back = copyDepth;
 
         _impl->commandList->CopyTextureRegion(&dstLoc, region.texOffset.x, region.texOffset.y, region.texOffset.z, &srcLoc, &srcBox);
+        d3d12Texture->markMipLevelUploaded(mipLevel);
 
         // Transfer ownership to the pending list — keeps resource alive until
         // the next begin() call, by which point the GPU has finished execution.
@@ -1062,12 +1084,7 @@ void CCD3D12CommandBuffer::copyBuffersToTexture(const uint8_t *const *buffers, T
     }
 
     // Transition back to appropriate state after copy
-    D3D12_RESOURCE_STATES postCopyState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-    if (hasFlag(d3d12Texture->getInfo().usage, TextureUsageBit::COLOR_ATTACHMENT)) {
-        postCopyState = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    } else if (hasFlag(d3d12Texture->getInfo().usage, TextureUsageBit::DEPTH_STENCIL_ATTACHMENT)) {
-        postCopyState = D3D12_RESOURCE_STATE_DEPTH_WRITE;
-    }
+    D3D12_RESOURCE_STATES postCopyState = getPostTransferTextureState(textureInfo);
     D3D12_RESOURCE_BARRIER toPostCopy{};
     toPostCopy.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     toPostCopy.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
@@ -1182,10 +1199,7 @@ void CCD3D12CommandBuffer::blitTexture(Texture *srcTexture, Texture *dstTexture,
     D3D12_RESOURCE_BARRIER postBarriers[4];
     uint32_t postBarrierCount = 0;
 
-    D3D12_RESOURCE_STATES srcPostState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-    if (hasFlag(srcInfo.usage, TextureUsageBit::COLOR_ATTACHMENT)) {
-        srcPostState = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    }
+    D3D12_RESOURCE_STATES srcPostState = getPostTransferTextureState(srcInfo);
     {
         D3D12_RESOURCE_BARRIER b{};
         b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -1197,10 +1211,7 @@ void CCD3D12CommandBuffer::blitTexture(Texture *srcTexture, Texture *dstTexture,
         if (postBarrierCount < 4) postBarriers[postBarrierCount++] = b;
     }
 
-    D3D12_RESOURCE_STATES dstPostState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-    if (hasFlag(dstInfo.usage, TextureUsageBit::COLOR_ATTACHMENT)) {
-        dstPostState = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    }
+    D3D12_RESOURCE_STATES dstPostState = getPostTransferTextureState(dstInfo);
     {
         D3D12_RESOURCE_BARRIER b{};
         b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -1317,12 +1328,7 @@ void CCD3D12CommandBuffer::copyTexture(Texture *srcTexture, Texture *dstTexture,
     uint32_t postBarrierCount = 0;
 
     // Src back to shader resource
-    D3D12_RESOURCE_STATES srcPostState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-    if (hasFlag(srcInfo.usage, TextureUsageBit::COLOR_ATTACHMENT)) {
-        srcPostState = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    } else if (hasFlag(srcInfo.usage, TextureUsageBit::DEPTH_STENCIL_ATTACHMENT)) {
-        srcPostState = D3D12_RESOURCE_STATE_DEPTH_WRITE;
-    }
+    D3D12_RESOURCE_STATES srcPostState = getPostTransferTextureState(srcInfo);
     {
         D3D12_RESOURCE_BARRIER b{};
         b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -1335,12 +1341,7 @@ void CCD3D12CommandBuffer::copyTexture(Texture *srcTexture, Texture *dstTexture,
     }
 
     // Dst back to shader resource (or render target)
-    D3D12_RESOURCE_STATES dstPostState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-    if (hasFlag(dstInfo.usage, TextureUsageBit::COLOR_ATTACHMENT)) {
-        dstPostState = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    } else if (hasFlag(dstInfo.usage, TextureUsageBit::DEPTH_STENCIL_ATTACHMENT)) {
-        dstPostState = D3D12_RESOURCE_STATE_DEPTH_WRITE;
-    }
+    D3D12_RESOURCE_STATES dstPostState = getPostTransferTextureState(dstInfo);
     {
         D3D12_RESOURCE_BARRIER b{};
         b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -1442,10 +1443,7 @@ void CCD3D12CommandBuffer::resolveTexture(Texture *srcTexture, Texture *dstTextu
     uint32_t postBarrierCount = 0;
 
     {
-        D3D12_RESOURCE_STATES srcPostState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        if (hasFlag(srcInfo.usage, TextureUsageBit::COLOR_ATTACHMENT)) {
-            srcPostState = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        }
+        D3D12_RESOURCE_STATES srcPostState = getPostTransferTextureState(srcInfo);
         D3D12_RESOURCE_BARRIER b{};
         b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
@@ -1457,10 +1455,7 @@ void CCD3D12CommandBuffer::resolveTexture(Texture *srcTexture, Texture *dstTextu
         srcD3D12->setCurrentState(srcPostState);
     }
     {
-        D3D12_RESOURCE_STATES dstPostState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        if (hasFlag(dstInfo.usage, TextureUsageBit::COLOR_ATTACHMENT)) {
-            dstPostState = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        }
+        D3D12_RESOURCE_STATES dstPostState = getPostTransferTextureState(dstInfo);
         D3D12_RESOURCE_BARRIER b{};
         b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;

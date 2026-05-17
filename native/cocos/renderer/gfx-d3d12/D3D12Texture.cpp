@@ -34,6 +34,8 @@
     #include <d3d12.h>
     #include <dxgiformat.h>
     #include <wrl/client.h>
+    #include <algorithm>
+    #include <vector>
 
 namespace cc {
 namespace gfx {
@@ -43,6 +45,23 @@ struct CCD3D12Texture::Impl {
 };
 
 namespace {
+std::vector<CCD3D12Texture *> &ownedColorRenderTargets() {
+    static std::vector<CCD3D12Texture *> textures;
+    return textures;
+}
+
+void registerOwnedColorRenderTarget(CCD3D12Texture *texture) {
+    auto &textures = ownedColorRenderTargets();
+    if (std::find(textures.begin(), textures.end(), texture) == textures.end()) {
+        textures.emplace_back(texture);
+    }
+}
+
+void unregisterOwnedColorRenderTarget(CCD3D12Texture *texture) {
+    auto &textures = ownedColorRenderTargets();
+    textures.erase(std::remove(textures.begin(), textures.end(), texture), textures.end());
+}
+
 DXGI_FORMAT toD3D12Format(Format format) {
     switch (format) {
         case Format::R8:
@@ -232,23 +251,50 @@ CCD3D12Texture::~CCD3D12Texture() {
 
 void CCD3D12Texture::doInit(const TextureInfo &info) {
     (void)info;
-    createResource(_info.width, _info.height);
+    unregisterOwnedColorRenderTarget(this);
+    _isSwapchainTexture = false;
+    _swapchain = nullptr;
+    _isTextureView = false;
+    _uploadedMipMask = 0;
+    _hash = Texture::computeHash(this);
+    if (!createResource(_info.width, _info.height)) {
+        CC_LOG_ERROR("D3D12Texture: createResource failed for format=%u, %ux%u, usage=0x%x. "
+                     "RTV/SRV creation will fail downstream.",
+                     static_cast<unsigned>(_info.format), _info.width, _info.height,
+                     static_cast<uint32_t>(_info.usage));
+        return;
+    }
     // createResource() uses CreateCommittedResource(..., D3D12_RESOURCE_STATE_COMMON, ...),
     // so tracked state must start from COMMON until an explicit barrier changes it.
     _currentState = D3D12_RESOURCE_STATE_COMMON;
 }
 
 void CCD3D12Texture::doInit(const TextureViewInfo &info) {
+    unregisterOwnedColorRenderTarget(this);
     auto *texture = static_cast<CCD3D12Texture *>(info.texture);
     if (!texture) {
         return;
     }
-    _impl->resource = static_cast<ID3D12Resource *>(texture->getD3D12ResourceHandle());
+    _isSwapchainTexture = texture->isSwapchainColorTexture();
+    _swapchain = _isSwapchainTexture ? texture->getSwapchain() : nullptr;
+    _uploadedMipMask = texture->_uploadedMipMask;
+    _hash = Texture::computeHash(this);
+    if (_isSwapchainTexture) {
+        _impl->resource.Reset();
+    } else {
+        _impl->resource = static_cast<ID3D12Resource *>(texture->getD3D12OwnedResourceHandle());
+    }
     _currentState = texture->getCurrentState();
 }
 
 void CCD3D12Texture::doInit(const SwapchainTextureInfo &info) {
     (void)info;
+    unregisterOwnedColorRenderTarget(this);
+    _isTextureView = false;
+    _isSwapchainTexture = hasFlag(_info.usage, TextureUsageBit::COLOR_ATTACHMENT) &&
+                          !hasFlag(_info.usage, TextureUsageBit::DEPTH_STENCIL_ATTACHMENT);
+    _uploadedMipMask = 0;
+    _hash = Texture::computeHash(this);
     if (hasFlag(_info.usage, TextureUsageBit::DEPTH_STENCIL_ATTACHMENT)) {
         createResource(_info.width, _info.height);
         // Depth resource is created in COMMON and transitioned on first use.
@@ -262,17 +308,25 @@ void CCD3D12Texture::doInit(const SwapchainTextureInfo &info) {
 }
 
 void CCD3D12Texture::doDestroy() {
+    unregisterOwnedColorRenderTarget(this);
     if (_impl) {
         _impl->resource.Reset();
     }
+    _isSwapchainTexture = false;
+    _swapchain = nullptr;
+    _uploadedMipMask = 0;
 }
 
 void CCD3D12Texture::doResize(uint32_t width, uint32_t height, uint32_t size) {
     (void)size;
-    if (_isTextureView || _swapchain) {
+    if (_isTextureView || _isSwapchainTexture) {
         return;
     }
     createResource(width, height);
+    // Resizing recreates the underlying ID3D12Resource in COMMON state.
+    // Keep the tracked state in sync so the next render pass uses a valid
+    // transition source state for render textures.
+    _currentState = D3D12_RESOURCE_STATE_COMMON;
 }
 
 void *CCD3D12Texture::getD3D12ResourceHandle() const {
@@ -283,8 +337,57 @@ void *CCD3D12Texture::getD3D12ResourceHandle() const {
     return _impl ? _impl->resource.Get() : nullptr;
 }
 
+void *CCD3D12Texture::getD3D12OwnedResourceHandle() const {
+    return _impl ? _impl->resource.Get() : nullptr;
+}
+
+void CCD3D12Texture::markMipLevelUploaded(uint32_t mipLevel) {
+    if (mipLevel < 64) {
+        _uploadedMipMask |= (uint64_t{1} << mipLevel);
+    }
+}
+
+uint32_t CCD3D12Texture::getValidSRVMipLevels() const {
+    if (_info.levelCount <= 1) {
+        return _info.levelCount;
+    }
+    if (_uploadedMipMask == 0) {
+        return 1;
+    }
+
+    uint32_t validMipLevels = 0;
+    const uint32_t maxTrackedMips = std::min<uint32_t>(_info.levelCount, 64);
+    for (uint32_t i = 0; i < maxTrackedMips; ++i) {
+        if ((_uploadedMipMask & (uint64_t{1} << i)) == 0) {
+            break;
+        }
+        ++validMipLevels;
+    }
+    return std::max<uint32_t>(validMipLevels, 1);
+}
+
 bool CCD3D12Texture::isSwapchainColorTexture() const {
-    return _swapchain != nullptr && !hasFlag(_info.usage, TextureUsageBit::DEPTH_STENCIL_ATTACHMENT);
+    return _isSwapchainTexture && _swapchain != nullptr && !hasFlag(_info.usage, TextureUsageBit::DEPTH_STENCIL_ATTACHMENT) &&
+           getD3D12OwnedResourceHandle() == nullptr;
+}
+
+CCD3D12Texture *CCD3D12Texture::findCompatibleOwnedColorTexture(uint32_t width, uint32_t height, Format format) {
+    CCD3D12Texture *match = nullptr;
+    for (auto *texture : ownedColorRenderTargets()) {
+        if (!texture || texture->getWidth() != width || texture->getHeight() != height || texture->getFormat() != format) {
+            continue;
+        }
+        if (texture->isSwapchainColorTexture() || texture->getD3D12OwnedResourceHandle() == nullptr) {
+            continue;
+        }
+        if (match && match != texture) {
+            CC_LOG_WARNING("D3D12Texture: multiple compatible owned color RTs found for %ux%u format=%u; skip auto repair.",
+                           width, height, static_cast<unsigned>(format));
+            return nullptr;
+        }
+        match = texture;
+    }
+    return match;
 }
 
 bool CCD3D12Texture::createResource(uint32_t width, uint32_t height) {
@@ -414,6 +517,12 @@ bool CCD3D12Texture::createResource(uint32_t width, uint32_t height) {
     }
 
     _impl->resource = resource;
+    _currentState = D3D12_RESOURCE_STATE_COMMON;
+    if (hasFlag(_info.usage, TextureUsageBit::COLOR_ATTACHMENT) &&
+        !hasFlag(_info.usage, TextureUsageBit::DEPTH_STENCIL_ATTACHMENT) &&
+        !_isSwapchainTexture) {
+        registerOwnedColorRenderTarget(this);
+    }
     return true;
 }
 

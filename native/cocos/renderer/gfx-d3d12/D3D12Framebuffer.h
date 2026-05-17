@@ -48,6 +48,7 @@ public:
     uint32_t getWidth() const;
     uint32_t getHeight() const;
     CCD3D12Swapchain *getSwapchain() const;
+    bool isOffscreen() const;
 
 protected:
     void doInit(const FramebufferInfo &info) override;
@@ -57,6 +58,7 @@ private:
     struct Impl;
     std::unique_ptr<Impl> _impl;
     CCD3D12Swapchain *_swapchain{nullptr};
+    bool _isOffscreen{true};
 };
 
 } // namespace gfx

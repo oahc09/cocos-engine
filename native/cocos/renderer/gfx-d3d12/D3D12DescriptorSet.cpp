@@ -510,19 +510,20 @@ void CCD3D12DescriptorSet::forceUpdate() {
                             srvDesc.Format = toSRVFormat(texInfo.format);
                             srvDesc.ViewDimension = toSRVDimension(texInfo.type, texInfo.layerCount, texInfo.samples != SampleCount::X1);
                             srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                            const uint32_t validMipLevels = d3d12Texture->getValidSRVMipLevels();
                             if (srvDesc.ViewDimension == D3D12_SRV_DIMENSION_TEXTURE2D) {
-                                srvDesc.Texture2D.MipLevels = texInfo.levelCount;
+                                srvDesc.Texture2D.MipLevels = validMipLevels;
                                 srvDesc.Texture2D.MostDetailedMip = 0;
                             } else if (srvDesc.ViewDimension == D3D12_SRV_DIMENSION_TEXTURE2DARRAY) {
-                                srvDesc.Texture2DArray.MipLevels = texInfo.levelCount;
+                                srvDesc.Texture2DArray.MipLevels = validMipLevels;
                                 srvDesc.Texture2DArray.MostDetailedMip = 0;
                                 srvDesc.Texture2DArray.FirstArraySlice = 0;
                                 srvDesc.Texture2DArray.ArraySize = texInfo.layerCount;
                             } else if (srvDesc.ViewDimension == D3D12_SRV_DIMENSION_TEXTURECUBE) {
-                                srvDesc.TextureCube.MipLevels = texInfo.levelCount;
+                                srvDesc.TextureCube.MipLevels = validMipLevels;
                                 srvDesc.TextureCube.MostDetailedMip = 0;
                             } else if (srvDesc.ViewDimension == D3D12_SRV_DIMENSION_TEXTURE3D) {
-                                srvDesc.Texture3D.MipLevels = texInfo.levelCount;
+                                srvDesc.Texture3D.MipLevels = validMipLevels;
                                 srvDesc.Texture3D.MostDetailedMip = 0;
                             }
 
@@ -572,19 +573,20 @@ void CCD3D12DescriptorSet::forceUpdate() {
                             srvDesc.Format = toSRVFormat(texInfo.format);
                             srvDesc.ViewDimension = toSRVDimension(texInfo.type, texInfo.layerCount, texInfo.samples != SampleCount::X1);
                             srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                            const uint32_t validMipLevels = d3d12Texture->getValidSRVMipLevels();
                             if (srvDesc.ViewDimension == D3D12_SRV_DIMENSION_TEXTURE2D) {
-                                srvDesc.Texture2D.MipLevels = texInfo.levelCount;
+                                srvDesc.Texture2D.MipLevels = validMipLevels;
                                 srvDesc.Texture2D.MostDetailedMip = 0;
                             } else if (srvDesc.ViewDimension == D3D12_SRV_DIMENSION_TEXTURE2DARRAY) {
-                                srvDesc.Texture2DArray.MipLevels = texInfo.levelCount;
+                                srvDesc.Texture2DArray.MipLevels = validMipLevels;
                                 srvDesc.Texture2DArray.MostDetailedMip = 0;
                                 srvDesc.Texture2DArray.FirstArraySlice = 0;
                                 srvDesc.Texture2DArray.ArraySize = texInfo.layerCount;
                             } else if (srvDesc.ViewDimension == D3D12_SRV_DIMENSION_TEXTURECUBE) {
-                                srvDesc.TextureCube.MipLevels = texInfo.levelCount;
+                                srvDesc.TextureCube.MipLevels = validMipLevels;
                                 srvDesc.TextureCube.MostDetailedMip = 0;
                             } else if (srvDesc.ViewDimension == D3D12_SRV_DIMENSION_TEXTURE3D) {
-                                srvDesc.Texture3D.MipLevels = texInfo.levelCount;
+                                srvDesc.Texture3D.MipLevels = validMipLevels;
                                 srvDesc.Texture3D.MostDetailedMip = 0;
                             }
 
@@ -664,7 +666,7 @@ void CCD3D12DescriptorSet::forceUpdate() {
                             srvDesc.ViewDimension = toSRVDimension(texInfo.type, texInfo.layerCount, texInfo.samples != SampleCount::X1);
                             srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
                             if (srvDesc.ViewDimension == D3D12_SRV_DIMENSION_TEXTURE2D) {
-                                srvDesc.Texture2D.MipLevels = texInfo.levelCount;
+                                srvDesc.Texture2D.MipLevels = d3d12Texture->getValidSRVMipLevels();
                             }
 
                             D3D12_CPU_DESCRIPTOR_HANDLE handle;

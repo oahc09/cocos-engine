@@ -547,6 +547,7 @@ void CCD3D12Device::copyBuffersToTexture(const uint8_t *const *buffers, Texture 
             region.texOffset.z,
             &srcLocation,
             &srcBox);
+        d3d12Texture->markMipLevelUploaded(mipLevel);
 
         // Transfer ownership to the vector — keeps resource alive until
         // after waitForGpu() below.

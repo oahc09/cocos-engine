@@ -43,12 +43,17 @@ public:
     ~CCD3D12Texture() override;
 
     void *getD3D12ResourceHandle() const;
+    void *getD3D12OwnedResourceHandle() const;
+    void markMipLevelUploaded(uint32_t mipLevel);
+    uint32_t getValidSRVMipLevels() const;
 
     // Returns true if this texture wraps a swapchain back buffer (color attachment)
     bool isSwapchainColorTexture() const;
 
+    static CCD3D12Texture *findCompatibleOwnedColorTexture(uint32_t width, uint32_t height, Format format);
+
     // Returns the parent swapchain for swapchain textures, nullptr otherwise
-    Swapchain *getSwapchain() const { return _swapchain; }
+    Swapchain *getSwapchain() const { return _isSwapchainTexture ? _swapchain : nullptr; }
 
     // D3D12 resource state tracking — used by pipelineBarrier
     D3D12_RESOURCE_STATES getCurrentState() const { return _currentState; }
@@ -67,6 +72,8 @@ private:
     struct Impl;
     std::unique_ptr<Impl> _impl;
 
+    bool _isSwapchainTexture{false};
+    uint64_t _uploadedMipMask{0};
     D3D12_RESOURCE_STATES _currentState = D3D12_RESOURCE_STATE_COMMON;
 };
 
