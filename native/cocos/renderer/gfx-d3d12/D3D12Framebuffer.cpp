@@ -28,6 +28,7 @@
 #include "D3D12Texture.h"
 #include "D3D12RenderPass.h"
 #include "base/Log.h"
+#include "base/Ptr.h"
 
     #ifndef NOMINMAX
         #define NOMINMAX
@@ -48,6 +49,7 @@ struct CCD3D12Framebuffer::Impl {
     // Store CPU descriptor handles
     ccstd::vector<D3D12_CPU_DESCRIPTOR_HANDLE> rtvHandles;
     D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle{};
+    ccstd::vector<IntrusivePtr<CCD3D12Texture>> repairedColorTextures;
 
     uint32_t width{0};
     uint32_t height{0};
@@ -101,6 +103,7 @@ void CCD3D12Framebuffer::doInit(const FramebufferInfo &info) {
 
         _impl->rtvDescriptorSize = d3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
         _impl->rtvHandles.resize(colorCount);
+        _impl->repairedColorTextures.resize(colorCount);
 
         D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = _impl->rtvHeap->GetCPUDescriptorHandleForHeapStart();
         for (uint32_t i = 0; i < colorCount; ++i) {
@@ -120,15 +123,16 @@ void CCD3D12Framebuffer::doInit(const FramebufferInfo &info) {
                 if (mixedOffscreenDepth) {
                     if (auto *replacement = CCD3D12Texture::findCompatibleOwnedColorTexture(
                             depthTexture->getWidth(), depthTexture->getHeight(), texture->getFormat())) {
-                        CC_LOG_WARNING("D3D12Framebuffer: repairing mixed swapchain/offscreen attachments. "
+                        CC_LOG_WARNING("D3D12Framebuffer: mixed swapchain color/offscreen depth repaired. "
                                        "color[%u] swapchain %ux%u replaced with owned RT %p %ux%u.",
                                        i, texture->getWidth(), texture->getHeight(), replacement,
                                        replacement->getWidth(), replacement->getHeight());
+                        _impl->repairedColorTextures[i] = replacement;
                         texture = replacement;
                         _colorTextures[i] = replacement;
                     } else {
-                        CC_LOG_WARNING("D3D12Framebuffer: mixed swapchain/offscreen attachments detected, "
-                                       "but no unique owned color RT found. color[%u]=%ux%u depth=%ux%u format=%u.",
+                        CC_LOG_WARNING("D3D12Framebuffer: mixed swapchain color/offscreen depth detected. "
+                                       "color[%u]=%ux%u depth=%ux%u format=%u, but no unique owned RT was found.",
                                        i, texture->getWidth(), texture->getHeight(),
                                        depthTexture->getWidth(), depthTexture->getHeight(),
                                        static_cast<unsigned>(texture->getFormat()));
@@ -192,6 +196,7 @@ void CCD3D12Framebuffer::doDestroy() {
         _impl->rtvHeap.Reset();
         _impl->dsvHeap.Reset();
         _impl->rtvHandles.clear();
+        _impl->repairedColorTextures.clear();
         _impl->dsvHandle = D3D12_CPU_DESCRIPTOR_HANDLE{};
         _impl->width = 0;
         _impl->height = 0;

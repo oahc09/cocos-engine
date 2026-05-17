@@ -381,7 +381,7 @@ CCD3D12Texture *CCD3D12Texture::findCompatibleOwnedColorTexture(uint32_t width, 
             continue;
         }
         if (match && match != texture) {
-            CC_LOG_WARNING("D3D12Texture: multiple compatible owned color RTs found for %ux%u format=%u; skip auto repair.",
+            CC_LOG_WARNING("D3D12Texture: multiple compatible owned color RTs found for %ux%u format=%u; skip framebuffer repair.",
                            width, height, static_cast<unsigned>(format));
             return nullptr;
         }
