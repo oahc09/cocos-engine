@@ -150,17 +150,6 @@ struct CCD3D12CommandBuffer::Impl {
     // the start of the next begin() call, by which point the Queue has
     // already waited for the previous frame's GPU work to complete.
     ccstd::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> pendingUploadResources;
-
-    // Deferred buffer writes: updateBuffer() records data here instead of
-    // Map/memcpy-ing immediately. The writes are flushed at draw-time so that
-    // consecutive updates to the same UPLOAD-heap buffer do not overwrite each
-    // other before the GPU executes earlier draws.
-    // This matches GLES3 glBufferSubData / Vulkan vkCmdUpdateBuffer semantics.
-    struct DeferredBufferWrite {
-        CCD3D12Buffer *buffer{nullptr};
-        ccstd::vector<uint8_t> data;
-    };
-    ccstd::vector<DeferredBufferWrite> deferredBufferWrites;
 };
 
 CCD3D12CommandBuffer::CCD3D12CommandBuffer()
@@ -1024,82 +1013,82 @@ void CCD3D12CommandBuffer::updateBuffer(Buffer *buff, const void *data, uint32_t
     const uint32_t copySize = std::min(size, buff->getSize());
     if (copySize == 0) return;
 
+    // For uniform buffers, record a GPU CopyBufferRegion command so that
+    // consecutive updates to the same buffer (CSM levels, forward-add lights)
+    // execute in command-list order. GLES3 glBufferSubData and Vulkan
+    // vkCmdUpdateBuffer are GPU commands; D3D12 Map/memcpy is a CPU operation
+    // that overwrites in-place during recording — later levels overwrite
+    // earlier levels before the GPU executes.
     if (!buff->isBufferView() && hasFlag(buff->getUsage(), BufferUsageBit::UNIFORM)) {
         auto *device = CCD3D12Device::getInstance();
         auto *d3dDevice = static_cast<ID3D12Device *>(device ? device->getD3D12DeviceHandle() : nullptr);
         if (d3dDevice) {
-            const uint64_t resourceSize = static_cast<uint64_t>((std::max(copySize, buff->getSize()) + 255U) & ~255U);
+            const uint64_t alignedSize = (static_cast<uint64_t>(copySize) + 255ULL) & ~255ULL;
 
-            D3D12_HEAP_PROPERTIES heapProperties{};
-            heapProperties.Type = D3D12_HEAP_TYPE_UPLOAD;
-            heapProperties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
-            heapProperties.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-            heapProperties.CreationNodeMask = 1;
-            heapProperties.VisibleNodeMask = 1;
+            D3D12_HEAP_PROPERTIES uploadHeap{};
+            uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
 
-            D3D12_RESOURCE_DESC resourceDesc{};
-            resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-            resourceDesc.Width = resourceSize;
-            resourceDesc.Height = 1;
-            resourceDesc.DepthOrArraySize = 1;
-            resourceDesc.MipLevels = 1;
-            resourceDesc.Format = DXGI_FORMAT_UNKNOWN;
-            resourceDesc.SampleDesc.Count = 1;
-            resourceDesc.SampleDesc.Quality = 0;
-            resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-            resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+            D3D12_RESOURCE_DESC stagingDesc{};
+            stagingDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            stagingDesc.Width = alignedSize;
+            stagingDesc.Height = 1;
+            stagingDesc.DepthOrArraySize = 1;
+            stagingDesc.MipLevels = 1;
+            stagingDesc.Format = DXGI_FORMAT_UNKNOWN;
+            stagingDesc.SampleDesc = {1, 0};
+            stagingDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            stagingDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
 
-            Microsoft::WRL::ComPtr<ID3D12Resource> snapshotResource;
+            Microsoft::WRL::ComPtr<ID3D12Resource> staging;
             HRESULT hr = d3dDevice->CreateCommittedResource(
-                &heapProperties,
-                D3D12_HEAP_FLAG_NONE,
-                &resourceDesc,
-                D3D12_RESOURCE_STATE_GENERIC_READ,
-                nullptr,
-                IID_PPV_ARGS(&snapshotResource));
-            if (SUCCEEDED(hr) && snapshotResource) {
-                void *mappedData = nullptr;
-                D3D12_RANGE readRange{};
-                hr = snapshotResource->Map(0, &readRange, &mappedData);
-                if (SUCCEEDED(hr) && mappedData) {
-                    std::memset(mappedData, 0, static_cast<size_t>(resourceSize));
-                    std::memcpy(mappedData, data, copySize);
-                    D3D12_RANGE writeRange{0, static_cast<SIZE_T>(copySize)};
-                    snapshotResource->Unmap(0, &writeRange);
+                &uploadHeap, D3D12_HEAP_FLAG_NONE, &stagingDesc,
+                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                IID_PPV_ARGS(&staging));
+            if (SUCCEEDED(hr) && staging) {
+                void *mapped = nullptr;
+                hr = staging->Map(0, nullptr, &mapped);
+                if (SUCCEEDED(hr) && mapped) {
+                    std::memcpy(mapped, data, copySize);
+                    D3D12_RANGE written{0, static_cast<SIZE_T>(copySize)};
+                    staging->Unmap(0, &written);
 
-                    auto previousResource = d3d12Buffer->replaceD3D12Resource(snapshotResource);
-                    if (previousResource) {
-                        _impl->pendingUploadResources.emplace_back(std::move(previousResource));
-                    }
-                    _impl->pendingUploadResources.emplace_back(std::move(snapshotResource));
-                    for (uint32_t i = 0; i < _impl->pendingSetCount; ++i) {
-                        if (_impl->pendingSets[i].valid && _impl->pendingSets[i].set) {
-                            static_cast<CCD3D12DescriptorSet *>(_impl->pendingSets[i].set)->forceUpdate();
+                    auto *dstResource = static_cast<ID3D12Resource *>(d3d12Buffer->getD3D12ResourceHandle());
+                    if (dstResource) {
+                        // Atomically swap the backing resource so that the
+                        // new data has a distinct GPU VA.  Earlier draws
+                        // that already recorded their descriptor heaps read
+                        // from the old resource (kept alive via
+                        // pendingUploadResources); subsequent draws use the
+                        // new resource after forceUpdate rebuilds the CBV.
+                        auto previous = d3d12Buffer->replaceD3D12Resource(staging);
+                        if (previous) {
+                            _impl->pendingUploadResources.emplace_back(std::move(previous));
+                        }
+                        _impl->pendingUploadResources.emplace_back(std::move(staging));
+
+                        for (uint32_t i = 0; i < _impl->pendingSetCount; ++i) {
+                            if (_impl->pendingSets[i].valid && _impl->pendingSets[i].set) {
+                                static_cast<CCD3D12DescriptorSet *>(_impl->pendingSets[i].set)->forceUpdate();
+                            }
+                        }
+                        if (_impl->pendingSetCount > 0) {
+                            _impl->descriptorSetsDirty = true;
                         }
                     }
-                    if (_impl->pendingSetCount > 0) {
-                        _impl->descriptorSetsDirty = true;
-                    }
-                    return;
                 }
-
-                CC_LOG_ERROR("D3D12CommandBuffer::updateBuffer - snapshot Map failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
-            } else {
-                CC_LOG_ERROR("D3D12CommandBuffer::updateBuffer - snapshot resource creation failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+                return;
             }
         }
     }
 
+    // Fallback for non-uniform buffers and buffer views: immediate Map/memcpy
     auto *resource = static_cast<ID3D12Resource *>(d3d12Buffer->getD3D12ResourceHandle());
     if (!resource) return;
 
     void *mappedData = nullptr;
     D3D12_RANGE readRange{};
     HRESULT hr = resource->Map(0, &readRange, &mappedData);
-    if (FAILED(hr) || !mappedData) {
-        CC_LOG_ERROR("D3D12CommandBuffer::updateBuffer - Map failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
-        return;
-    }
+    if (FAILED(hr) || !mappedData) return;
 
     auto *dst = static_cast<uint8_t *>(mappedData) + d3d12Buffer->getD3D12ResourceOffset();
     std::memcpy(dst, data, copySize);
