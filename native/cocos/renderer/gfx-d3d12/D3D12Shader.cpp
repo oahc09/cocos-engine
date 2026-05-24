@@ -205,7 +205,11 @@ bool CCD3D12Shader::compileGLSLToDXBC(ShaderStageFlagBit stage,
     // The glsl4 source from EffectAsset does NOT contain #version;
     // each desktop backend must prepend it at runtime.
     // ============================================================
-    ccstd::string processedSource = "#version 450\n#define CC_USE_D3D12 1\n" + glslSource;
+    ccstd::string processedSource = "#version 450\n";
+    if (glslSource.find("#define CC_USE_D3D12") == ccstd::string::npos) {
+        processedSource += "#define CC_USE_D3D12 1\n";
+    }
+    processedSource += glslSource;
 
     // ============================================================
     // Step 1: GLSL -> SPIR-V (using glslang directly, with error checks)

@@ -37,6 +37,7 @@
 #include "D3D12Swapchain.h"
 #include "D3D12Texture.h"
 #include "base/Log.h"
+#include "gfx-base/GFXDef.h"
 
     #ifndef NOMINMAX
         #define NOMINMAX
@@ -56,6 +57,44 @@ static constexpr uint32_t D3D12_MAX_BOUND_SETS = 4;
 static constexpr uint32_t MAX_PASS_BARRIERS = 16;
 
 namespace {
+D3D12_RECT makeSafeRenderAreaRect(const Rect &renderArea, uint32_t framebufferWidth, uint32_t framebufferHeight) {
+    const int32_t fbWidth = static_cast<int32_t>(framebufferWidth);
+    const int32_t fbHeight = static_cast<int32_t>(framebufferHeight);
+
+    int32_t left = renderArea.x;
+    int32_t top = renderArea.y;
+    int32_t right = left + static_cast<int32_t>(renderArea.width > 0 ? renderArea.width : framebufferWidth);
+    int32_t bottom = top + static_cast<int32_t>(renderArea.height > 0 ? renderArea.height : framebufferHeight);
+
+    if (left < 0) left = 0;
+    if (top < 0) top = 0;
+    if (right > fbWidth) right = fbWidth;
+    if (bottom > fbHeight) bottom = fbHeight;
+    if (right < left) right = left;
+    if (bottom < top) bottom = top;
+
+    return D3D12_RECT{
+        static_cast<LONG>(left),
+        static_cast<LONG>(top),
+        static_cast<LONG>(right),
+        static_cast<LONG>(bottom),
+    };
+}
+
+bool hasDepthComponent(Format format) {
+    if (format == Format::UNKNOWN) {
+        return true;
+    }
+    return GFX_FORMAT_INFOS[toNumber(format)].hasDepth;
+}
+
+bool hasStencilComponent(Format format) {
+    if (format == Format::UNKNOWN) {
+        return false;
+    }
+    return GFX_FORMAT_INFOS[toNumber(format)].hasStencil;
+}
+
 D3D12_RESOURCE_STATES getPostTransferTextureState(const TextureInfo &info) {
     if (hasFlag(info.usage, TextureUsageBit::SAMPLED)) {
         return D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
@@ -111,6 +150,17 @@ struct CCD3D12CommandBuffer::Impl {
     // the start of the next begin() call, by which point the Queue has
     // already waited for the previous frame's GPU work to complete.
     ccstd::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> pendingUploadResources;
+
+    // Deferred buffer writes: updateBuffer() records data here instead of
+    // Map/memcpy-ing immediately. The writes are flushed at draw-time so that
+    // consecutive updates to the same UPLOAD-heap buffer do not overwrite each
+    // other before the GPU executes earlier draws.
+    // This matches GLES3 glBufferSubData / Vulkan vkCmdUpdateBuffer semantics.
+    struct DeferredBufferWrite {
+        CCD3D12Buffer *buffer{nullptr};
+        ccstd::vector<uint8_t> data;
+    };
+    ccstd::vector<DeferredBufferWrite> deferredBufferWrites;
 };
 
 CCD3D12CommandBuffer::CCD3D12CommandBuffer()
@@ -398,6 +448,12 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
         FALSE,
         hasDSV ? &dsvHandle : nullptr);
 
+    const D3D12_RECT safeRenderArea = makeSafeRenderAreaRect(renderArea, fboWidth, fboHeight);
+    const bool hasSafeRenderArea = safeRenderArea.right > safeRenderArea.left &&
+                                   safeRenderArea.bottom > safeRenderArea.top;
+    const uint32_t clearRectCount = hasSafeRenderArea ? 1U : 0U;
+    const D3D12_RECT *clearRects = hasSafeRenderArea ? &safeRenderArea : nullptr;
+
     // Clear render targets based on loadOp from RenderPass
     // CRITICAL: Only clear when loadOp == CLEAR. For LOAD, preserve existing content.
     // This allows multiple render passes to share the same RT (e.g. 3D scene + UI overlay).
@@ -411,9 +467,9 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
             loadOp = rpColorAttachments[i].loadOp;
         }
 
-        if (loadOp == LoadOp::CLEAR && colors) {
+        if (loadOp == LoadOp::CLEAR && colors && hasSafeRenderArea) {
             float clearColor[4] = {colors[i].x, colors[i].y, colors[i].z, colors[i].w};
-            _impl->commandList->ClearRenderTargetView(rtvHandles[i], clearColor, 0, nullptr);
+            _impl->commandList->ClearRenderTargetView(rtvHandles[i], clearColor, clearRectCount, clearRects);
         }
         // LoadOp::LOAD: do nothing, preserve existing content
         // LoadOp::DISCARD: do nothing, D3D12 DISCARD optimization could be added later
@@ -423,41 +479,38 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
     if (hasDSV) {
         LoadOp depthLoadOp = LoadOp::CLEAR;
         LoadOp stencilLoadOp = LoadOp::CLEAR;
+        Format dsFormat = depthStencilTexture ? depthStencilTexture->getFormat() : Format::UNKNOWN;
         if (renderPass) {
             const auto &dsAttachment = renderPass->getDepthStencilAttachment();
+            dsFormat = dsAttachment.format;
             depthLoadOp = dsAttachment.depthLoadOp;
             stencilLoadOp = dsAttachment.stencilLoadOp;
         }
 
         D3D12_CLEAR_FLAGS clearFlags = static_cast<D3D12_CLEAR_FLAGS>(0);
-        if (depthLoadOp == LoadOp::CLEAR) {
+        if (depthLoadOp == LoadOp::CLEAR && hasDepthComponent(dsFormat)) {
             clearFlags |= D3D12_CLEAR_FLAG_DEPTH;
         }
-        if (stencilLoadOp == LoadOp::CLEAR) {
+        if (stencilLoadOp == LoadOp::CLEAR && hasStencilComponent(dsFormat)) {
             clearFlags |= D3D12_CLEAR_FLAG_STENCIL;
         }
 
-        if (clearFlags != 0) {
-            _impl->commandList->ClearDepthStencilView(dsvHandle, clearFlags, depth, stencil, 0, nullptr);
+        if (clearFlags != 0 && hasSafeRenderArea) {
+            _impl->commandList->ClearDepthStencilView(dsvHandle, clearFlags, depth, stencil, clearRectCount, clearRects);
         }
     }
 
     // Set viewport from render area
     D3D12_VIEWPORT vp{};
-    vp.TopLeftX = static_cast<float>(renderArea.x);
-    vp.TopLeftY = static_cast<float>(renderArea.y);
-    vp.Width = static_cast<float>(renderArea.width > 0 ? renderArea.width : fboWidth);
-    vp.Height = static_cast<float>(renderArea.height > 0 ? renderArea.height : fboHeight);
+    vp.TopLeftX = static_cast<float>(safeRenderArea.left);
+    vp.TopLeftY = static_cast<float>(safeRenderArea.top);
+    vp.Width = static_cast<float>(safeRenderArea.right - safeRenderArea.left);
+    vp.Height = static_cast<float>(safeRenderArea.bottom - safeRenderArea.top);
     vp.MinDepth = 0.0f;
     vp.MaxDepth = 1.0f;
     _impl->commandList->RSSetViewports(1, &vp);
 
-    D3D12_RECT scissorRect{};
-    scissorRect.left = renderArea.x;
-    scissorRect.top = renderArea.y;
-    scissorRect.right = static_cast<LONG>(renderArea.x + (renderArea.width > 0 ? renderArea.width : fboWidth));
-    scissorRect.bottom = static_cast<LONG>(renderArea.y + (renderArea.height > 0 ? renderArea.height : fboHeight));
-    _impl->commandList->RSSetScissorRects(1, &scissorRect);
+    _impl->commandList->RSSetScissorRects(1, &safeRenderArea);
 
     _impl->inRenderPass = true;
 }
@@ -516,6 +569,10 @@ void CCD3D12CommandBuffer::endRenderPass() {
     _impl->activeColorTargets.clear();
 
     // Transition depth-stencil back from DEPTH_WRITE
+    // Use DEPTH_READ | PIXEL_SHADER_RESOURCE so that depth textures used as
+    // shadow maps can be sampled as SRVs in subsequent passes (e.g. forward pass
+    // reading the shadow map).  In Vulkan/GLES this is handled by explicit
+    // pipeline barriers, but D3D12 endRenderPass must set the correct combined state.
     if (_impl->activeDepthStencil) {
         if (_impl->activeDepthTexture && _impl->activeDepthTexture->getCurrentState() == D3D12_RESOURCE_STATE_DEPTH_WRITE) {
             D3D12_RESOURCE_BARRIER depthBarrier{};
@@ -524,11 +581,11 @@ void CCD3D12CommandBuffer::endRenderPass() {
             depthBarrier.Transition.pResource = _impl->activeDepthStencil;
             depthBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
             depthBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_DEPTH_WRITE;
-            depthBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_DEPTH_READ;
+            depthBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
             if (postPassBarrierCount < MAX_PASS_BARRIERS) {
                 postPassBarriers[postPassBarrierCount++] = depthBarrier;
             }
-            _impl->activeDepthTexture->setCurrentState(D3D12_RESOURCE_STATE_DEPTH_READ);
+            _impl->activeDepthTexture->setCurrentState(D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         }
         _impl->activeDepthStencil = nullptr;
         _impl->activeDepthTexture = nullptr;
@@ -964,6 +1021,75 @@ void CCD3D12CommandBuffer::updateBuffer(Buffer *buff, const void *data, uint32_t
     if (!_impl->commandList || !buff || !data || size == 0) return;
 
     auto *d3d12Buffer = static_cast<CCD3D12Buffer *>(buff);
+    const uint32_t copySize = std::min(size, buff->getSize());
+    if (copySize == 0) return;
+
+    if (!buff->isBufferView() && hasFlag(buff->getUsage(), BufferUsageBit::UNIFORM)) {
+        auto *device = CCD3D12Device::getInstance();
+        auto *d3dDevice = static_cast<ID3D12Device *>(device ? device->getD3D12DeviceHandle() : nullptr);
+        if (d3dDevice) {
+            const uint64_t resourceSize = static_cast<uint64_t>((std::max(copySize, buff->getSize()) + 255U) & ~255U);
+
+            D3D12_HEAP_PROPERTIES heapProperties{};
+            heapProperties.Type = D3D12_HEAP_TYPE_UPLOAD;
+            heapProperties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+            heapProperties.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+            heapProperties.CreationNodeMask = 1;
+            heapProperties.VisibleNodeMask = 1;
+
+            D3D12_RESOURCE_DESC resourceDesc{};
+            resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            resourceDesc.Width = resourceSize;
+            resourceDesc.Height = 1;
+            resourceDesc.DepthOrArraySize = 1;
+            resourceDesc.MipLevels = 1;
+            resourceDesc.Format = DXGI_FORMAT_UNKNOWN;
+            resourceDesc.SampleDesc.Count = 1;
+            resourceDesc.SampleDesc.Quality = 0;
+            resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+            Microsoft::WRL::ComPtr<ID3D12Resource> snapshotResource;
+            HRESULT hr = d3dDevice->CreateCommittedResource(
+                &heapProperties,
+                D3D12_HEAP_FLAG_NONE,
+                &resourceDesc,
+                D3D12_RESOURCE_STATE_GENERIC_READ,
+                nullptr,
+                IID_PPV_ARGS(&snapshotResource));
+            if (SUCCEEDED(hr) && snapshotResource) {
+                void *mappedData = nullptr;
+                D3D12_RANGE readRange{};
+                hr = snapshotResource->Map(0, &readRange, &mappedData);
+                if (SUCCEEDED(hr) && mappedData) {
+                    std::memset(mappedData, 0, static_cast<size_t>(resourceSize));
+                    std::memcpy(mappedData, data, copySize);
+                    D3D12_RANGE writeRange{0, static_cast<SIZE_T>(copySize)};
+                    snapshotResource->Unmap(0, &writeRange);
+
+                    auto previousResource = d3d12Buffer->replaceD3D12Resource(snapshotResource);
+                    if (previousResource) {
+                        _impl->pendingUploadResources.emplace_back(std::move(previousResource));
+                    }
+                    _impl->pendingUploadResources.emplace_back(std::move(snapshotResource));
+                    for (uint32_t i = 0; i < _impl->pendingSetCount; ++i) {
+                        if (_impl->pendingSets[i].valid && _impl->pendingSets[i].set) {
+                            static_cast<CCD3D12DescriptorSet *>(_impl->pendingSets[i].set)->forceUpdate();
+                        }
+                    }
+                    if (_impl->pendingSetCount > 0) {
+                        _impl->descriptorSetsDirty = true;
+                    }
+                    return;
+                }
+
+                CC_LOG_ERROR("D3D12CommandBuffer::updateBuffer - snapshot Map failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+            } else {
+                CC_LOG_ERROR("D3D12CommandBuffer::updateBuffer - snapshot resource creation failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+            }
+        }
+    }
+
     auto *resource = static_cast<ID3D12Resource *>(d3d12Buffer->getD3D12ResourceHandle());
     if (!resource) return;
 
@@ -975,8 +1101,9 @@ void CCD3D12CommandBuffer::updateBuffer(Buffer *buff, const void *data, uint32_t
         return;
     }
 
-    std::memcpy(mappedData, data, size);
-    D3D12_RANGE writeRange{0, size};
+    auto *dst = static_cast<uint8_t *>(mappedData) + d3d12Buffer->getD3D12ResourceOffset();
+    std::memcpy(dst, data, copySize);
+    D3D12_RANGE writeRange{d3d12Buffer->getD3D12ResourceOffset(), d3d12Buffer->getD3D12ResourceOffset() + copySize};
     resource->Unmap(0, &writeRange);
 }
 

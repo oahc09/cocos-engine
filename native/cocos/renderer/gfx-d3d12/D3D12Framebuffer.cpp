@@ -39,6 +39,61 @@
 namespace cc {
 namespace gfx {
 
+namespace {
+
+DXGI_FORMAT toD3D12DSVFormat(Format format) {
+    switch (format) {
+        case Format::DEPTH:
+            return DXGI_FORMAT_D32_FLOAT;
+        case Format::DEPTH_STENCIL:
+            return DXGI_FORMAT_D24_UNORM_S8_UINT;
+        default:
+            return DXGI_FORMAT_D32_FLOAT;
+    }
+}
+
+D3D12_DEPTH_STENCIL_VIEW_DESC makeDepthStencilViewDesc(const CCD3D12Texture *texture) {
+    D3D12_DEPTH_STENCIL_VIEW_DESC desc{};
+    const auto &info = texture->getInfo();
+    const auto &viewInfo = texture->getViewInfo();
+    const bool isView = texture->isTextureView();
+    const Format format = isView ? viewInfo.format : info.format;
+    const TextureType type = isView ? viewInfo.type : info.type;
+    const uint32_t baseLevel = isView ? viewInfo.baseLevel : 0;
+    const uint32_t baseLayer = isView ? viewInfo.baseLayer : 0;
+    uint32_t layerCount = isView ? viewInfo.layerCount : info.layerCount;
+    if (layerCount == 0) {
+        layerCount = 1;
+    }
+    const bool isArrayView = info.layerCount > 1 || baseLayer > 0 ||
+                             layerCount > 1 || type == TextureType::CUBE;
+    const bool isMS = info.samples != SampleCount::X1;
+
+    desc.Format = toD3D12DSVFormat(format);
+    desc.Flags = D3D12_DSV_FLAG_NONE;
+    if (isMS) {
+        if (isArrayView) {
+            desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DMSARRAY;
+            desc.Texture2DMSArray.FirstArraySlice = baseLayer;
+            desc.Texture2DMSArray.ArraySize = layerCount;
+        } else {
+            desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DMS;
+        }
+    } else if (isArrayView) {
+        desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
+        desc.Texture2DArray.MipSlice = baseLevel;
+        desc.Texture2DArray.FirstArraySlice = baseLayer;
+        desc.Texture2DArray.ArraySize = layerCount;
+    } else {
+        desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+        desc.Texture2D.MipSlice = baseLevel;
+    }
+
+    return desc;
+}
+
+} // namespace
+
 struct CCD3D12Framebuffer::Impl {
     // RTV descriptor heap (one heap for all render targets)
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> rtvHeap;
@@ -227,7 +282,8 @@ void CCD3D12Framebuffer::doInit(const FramebufferInfo &info) {
             if (resource) {
                 _impl->depthStencilResource = resource;
                 _impl->dsvHandle = _impl->dsvHeap->GetCPUDescriptorHandleForHeapStart();
-                d3dDevice->CreateDepthStencilView(resource, nullptr, _impl->dsvHandle);
+                const auto dsvDesc = makeDepthStencilViewDesc(depthTexture);
+                d3dDevice->CreateDepthStencilView(resource, &dsvDesc, _impl->dsvHandle);
             } else {
                 CC_LOG_WARNING("D3D12Framebuffer: depth texture has no D3D12 resource.");
             }

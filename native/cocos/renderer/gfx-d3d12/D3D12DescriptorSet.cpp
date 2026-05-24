@@ -106,6 +106,68 @@ D3D12_UAV_DIMENSION toUAVDimension(TextureType type, uint32_t layerCount) {
     }
 }
 
+D3D12_SHADER_RESOURCE_VIEW_DESC makeTextureSRVDesc(const Texture *gfxTexture, const CCD3D12Texture *d3d12Texture) {
+    const auto &texInfo = gfxTexture->getInfo();
+    const auto &viewInfo = gfxTexture->getViewInfo();
+    const bool isView = gfxTexture->isTextureView();
+
+    const Format format = isView ? viewInfo.format : texInfo.format;
+    const TextureType type = isView ? viewInfo.type : texInfo.type;
+    const uint32_t baseLevel = isView ? viewInfo.baseLevel : 0;
+    const uint32_t baseLayer = isView ? viewInfo.baseLayer : 0;
+    uint32_t layerCount = isView ? viewInfo.layerCount : texInfo.layerCount;
+    if (layerCount == 0) {
+        layerCount = 1;
+    }
+    uint32_t mipLevels = isView ? viewInfo.levelCount : d3d12Texture->getValidSRVMipLevels();
+    if (mipLevels == 0) {
+        mipLevels = 1;
+    }
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
+    desc.Format = toSRVFormat(format);
+    desc.ViewDimension = toSRVDimension(type, layerCount, texInfo.samples != SampleCount::X1);
+    desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+
+    switch (desc.ViewDimension) {
+        case D3D12_SRV_DIMENSION_TEXTURE2D:
+            desc.Texture2D.MostDetailedMip = baseLevel;
+            desc.Texture2D.MipLevels = mipLevels;
+            break;
+        case D3D12_SRV_DIMENSION_TEXTURE2DARRAY:
+            desc.Texture2DArray.MostDetailedMip = baseLevel;
+            desc.Texture2DArray.MipLevels = mipLevels;
+            desc.Texture2DArray.FirstArraySlice = baseLayer;
+            desc.Texture2DArray.ArraySize = layerCount;
+            break;
+        case D3D12_SRV_DIMENSION_TEXTURE2DMSARRAY:
+            desc.Texture2DMSArray.FirstArraySlice = baseLayer;
+            desc.Texture2DMSArray.ArraySize = layerCount;
+            break;
+        case D3D12_SRV_DIMENSION_TEXTURECUBE:
+            desc.TextureCube.MostDetailedMip = baseLevel;
+            desc.TextureCube.MipLevels = mipLevels;
+            break;
+        case D3D12_SRV_DIMENSION_TEXTURECUBEARRAY:
+            desc.TextureCubeArray.MostDetailedMip = baseLevel;
+            desc.TextureCubeArray.MipLevels = mipLevels;
+            desc.TextureCubeArray.First2DArrayFace = baseLayer;
+            desc.TextureCubeArray.NumCubes = layerCount / 6;
+            if (desc.TextureCubeArray.NumCubes == 0) {
+                desc.TextureCubeArray.NumCubes = 1;
+            }
+            break;
+        case D3D12_SRV_DIMENSION_TEXTURE3D:
+            desc.Texture3D.MostDetailedMip = baseLevel;
+            desc.Texture3D.MipLevels = mipLevels;
+            break;
+        default:
+            break;
+    }
+
+    return desc;
+}
+
 D3D12_SHADER_RESOURCE_VIEW_DESC makeRawBufferSRVDesc(uint64_t firstElement, uint64_t sizeInBytes) {
     D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
     desc.Format = DXGI_FORMAT_R32_TYPELESS;
@@ -505,28 +567,7 @@ void CCD3D12DescriptorSet::forceUpdate() {
                         auto *d3d12Texture = static_cast<CCD3D12Texture *>(gfxTexture);
                         auto *rawResource = static_cast<ID3D12Resource *>(d3d12Texture->getD3D12ResourceHandle());
                         if (rawResource) {
-                            const auto &texInfo = gfxTexture->getInfo();
-                            D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-                            srvDesc.Format = toSRVFormat(texInfo.format);
-                            srvDesc.ViewDimension = toSRVDimension(texInfo.type, texInfo.layerCount, texInfo.samples != SampleCount::X1);
-                            srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-                            const uint32_t validMipLevels = d3d12Texture->getValidSRVMipLevels();
-                            if (srvDesc.ViewDimension == D3D12_SRV_DIMENSION_TEXTURE2D) {
-                                srvDesc.Texture2D.MipLevels = validMipLevels;
-                                srvDesc.Texture2D.MostDetailedMip = 0;
-                            } else if (srvDesc.ViewDimension == D3D12_SRV_DIMENSION_TEXTURE2DARRAY) {
-                                srvDesc.Texture2DArray.MipLevels = validMipLevels;
-                                srvDesc.Texture2DArray.MostDetailedMip = 0;
-                                srvDesc.Texture2DArray.FirstArraySlice = 0;
-                                srvDesc.Texture2DArray.ArraySize = texInfo.layerCount;
-                            } else if (srvDesc.ViewDimension == D3D12_SRV_DIMENSION_TEXTURECUBE) {
-                                srvDesc.TextureCube.MipLevels = validMipLevels;
-                                srvDesc.TextureCube.MostDetailedMip = 0;
-                            } else if (srvDesc.ViewDimension == D3D12_SRV_DIMENSION_TEXTURE3D) {
-                                srvDesc.Texture3D.MipLevels = validMipLevels;
-                                srvDesc.Texture3D.MostDetailedMip = 0;
-                            }
-
+                            const auto srvDesc = makeTextureSRVDesc(gfxTexture, d3d12Texture);
                             D3D12_CPU_DESCRIPTOR_HANDLE handle;
                             handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
                             d3dDevice->CreateShaderResourceView(rawResource, &srvDesc, handle);
@@ -568,28 +609,7 @@ void CCD3D12DescriptorSet::forceUpdate() {
                         auto *d3d12Texture = static_cast<CCD3D12Texture *>(gfxTexture);
                         auto *rawResource = static_cast<ID3D12Resource *>(d3d12Texture->getD3D12ResourceHandle());
                         if (rawResource) {
-                            const auto &texInfo = gfxTexture->getInfo();
-                            D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-                            srvDesc.Format = toSRVFormat(texInfo.format);
-                            srvDesc.ViewDimension = toSRVDimension(texInfo.type, texInfo.layerCount, texInfo.samples != SampleCount::X1);
-                            srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-                            const uint32_t validMipLevels = d3d12Texture->getValidSRVMipLevels();
-                            if (srvDesc.ViewDimension == D3D12_SRV_DIMENSION_TEXTURE2D) {
-                                srvDesc.Texture2D.MipLevels = validMipLevels;
-                                srvDesc.Texture2D.MostDetailedMip = 0;
-                            } else if (srvDesc.ViewDimension == D3D12_SRV_DIMENSION_TEXTURE2DARRAY) {
-                                srvDesc.Texture2DArray.MipLevels = validMipLevels;
-                                srvDesc.Texture2DArray.MostDetailedMip = 0;
-                                srvDesc.Texture2DArray.FirstArraySlice = 0;
-                                srvDesc.Texture2DArray.ArraySize = texInfo.layerCount;
-                            } else if (srvDesc.ViewDimension == D3D12_SRV_DIMENSION_TEXTURECUBE) {
-                                srvDesc.TextureCube.MipLevels = validMipLevels;
-                                srvDesc.TextureCube.MostDetailedMip = 0;
-                            } else if (srvDesc.ViewDimension == D3D12_SRV_DIMENSION_TEXTURE3D) {
-                                srvDesc.Texture3D.MipLevels = validMipLevels;
-                                srvDesc.Texture3D.MostDetailedMip = 0;
-                            }
-
+                            const auto srvDesc = makeTextureSRVDesc(gfxTexture, d3d12Texture);
                             D3D12_CPU_DESCRIPTOR_HANDLE handle;
                             handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
                             d3dDevice->CreateShaderResourceView(rawResource, &srvDesc, handle);
@@ -660,15 +680,7 @@ void CCD3D12DescriptorSet::forceUpdate() {
                         auto *d3d12Texture = static_cast<CCD3D12Texture *>(gfxTexture);
                         auto *rawResource = static_cast<ID3D12Resource *>(d3d12Texture->getD3D12ResourceHandle());
                         if (rawResource) {
-                            const auto &texInfo = gfxTexture->getInfo();
-                            D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-                            srvDesc.Format = toSRVFormat(texInfo.format);
-                            srvDesc.ViewDimension = toSRVDimension(texInfo.type, texInfo.layerCount, texInfo.samples != SampleCount::X1);
-                            srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-                            if (srvDesc.ViewDimension == D3D12_SRV_DIMENSION_TEXTURE2D) {
-                                srvDesc.Texture2D.MipLevels = d3d12Texture->getValidSRVMipLevels();
-                            }
-
+                            const auto srvDesc = makeTextureSRVDesc(gfxTexture, d3d12Texture);
                             D3D12_CPU_DESCRIPTOR_HANDLE handle;
                             handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
                             d3dDevice->CreateShaderResourceView(rawResource, &srvDesc, handle);

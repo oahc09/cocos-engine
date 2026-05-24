@@ -26,6 +26,8 @@
 
 #include "gfx-base/GFXBuffer.h"
 #include <memory>
+#include <d3d12.h>
+#include <wrl/client.h>
 
 namespace cc {
 namespace gfx {
@@ -40,6 +42,7 @@ public:
     void *getD3D12ResourceHandle() const;
     uint64_t getD3D12GPUVirtualAddress() const;
     uint32_t getD3D12ResourceOffset() const;
+    Microsoft::WRL::ComPtr<ID3D12Resource> replaceD3D12Resource(Microsoft::WRL::ComPtr<ID3D12Resource> resource);
 
 protected:
     void doInit(const BufferInfo &info) override;

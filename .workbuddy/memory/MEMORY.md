@@ -67,6 +67,14 @@
 - **C4 已修复 (2026-05-03)**: 移除 dsDiagLog 文件I/O、D3D12Buffer 诊断计数、Queue 诊断改为 Debug-only
 - **I4+M2 已修复 (2026-05-04)**: 所有渲染热路径上的 ccstd::vector 替换为固定大小栈数组（flushDescriptorSets/bindInputAssembler/beginRenderPass/endRenderPass/blitTexture/copyTexture/resolveTexture），编译通过
 
+### D3D12 Shadow 修复 (2026-05-23)
+- **根因**: PipelineUBO::updateMultiCameraUBO resize camera buffer 后只更新 globalDSMgr，漏绑 pipeline descriptor set
+  - 多相机(3个)触发 _cameraBuffer resize(2304B)，旧 _cameraBufferView 被 delete
+  - pipeline descriptor set 中 UBOCamera binding 变成悬垂指针
+  - forceUpdate() 用悬垂指针创建 CBV → 指向已销毁资源 → shader 读到零值 → shadowEnable=0
+- **修复**: resize 分支中增加 `_pipeline->getDescriptorSet()->bindBuffer(UBOCamera::BINDING, _cameraBufferView)`
+- **教训**: buffer resize 后必须同步所有 descriptor set 的 binding，不能只更新一个
+
 ### D3D12 半透明渲染修复 (2026-05-03)
 - **H1 已修复**: bindPipelineState 中添加 OMSetBlendFactor，传递 BlendState.blendColor
 - **M1 已修复**: SampleDesc.Count 从 RenderPass.getSampleCount() 获取（不再硬编码 1）
