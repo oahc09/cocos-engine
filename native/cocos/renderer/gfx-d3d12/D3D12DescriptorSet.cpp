@@ -42,7 +42,17 @@ namespace gfx {
 namespace {
 
 // Map engine Format to DXGI_FORMAT for SRV/UAV descriptors
-DXGI_FORMAT toSRVFormat(Format format) {
+DXGI_FORMAT toSRVFormat(Format format, DXGI_FORMAT resourceFormat) {
+    if (format == Format::DEPTH) {
+        return DXGI_FORMAT_R32_FLOAT;
+    }
+    if (format == Format::DEPTH_STENCIL) {
+        return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+    }
+    if (resourceFormat != DXGI_FORMAT_UNKNOWN) {
+        return resourceFormat;
+    }
+
     switch (format) {
         case Format::R8:          return DXGI_FORMAT_R8_UNORM;
         case Format::R8SN:        return DXGI_FORMAT_R8_SNORM;
@@ -68,9 +78,7 @@ DXGI_FORMAT toSRVFormat(Format format) {
         case Format::RGBA32F:     return DXGI_FORMAT_R32G32B32A32_FLOAT;
         case Format::RGB10A2:     return DXGI_FORMAT_R10G10B10A2_UNORM;
         case Format::R11G11B10F:  return DXGI_FORMAT_R11G11B10_FLOAT;
-        case Format::DEPTH:       return DXGI_FORMAT_R32_FLOAT;         // depth-only SRV
-        case Format::DEPTH_STENCIL: return DXGI_FORMAT_R24_UNORM_X8_TYPELESS; // needs SRV with R24_UNORM_X8
-        default:                  return DXGI_FORMAT_R8G8B8A8_UNORM;     // safe fallback
+        default:                  return DXGI_FORMAT_UNKNOWN;
     }
 }
 
@@ -119,13 +127,15 @@ D3D12_SHADER_RESOURCE_VIEW_DESC makeTextureSRVDesc(const Texture *gfxTexture, co
     if (layerCount == 0) {
         layerCount = 1;
     }
-    uint32_t mipLevels = isView ? viewInfo.levelCount : d3d12Texture->getValidSRVMipLevels();
+    uint32_t mipLevels = isView ? viewInfo.levelCount : texInfo.levelCount;
     if (mipLevels == 0) {
         mipLevels = 1;
     }
 
     D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
-    desc.Format = toSRVFormat(format);
+    auto *resource = static_cast<ID3D12Resource *>(d3d12Texture->getD3D12ResourceHandle());
+    const DXGI_FORMAT resourceFormat = resource ? resource->GetDesc().Format : DXGI_FORMAT_UNKNOWN;
+    desc.Format = toSRVFormat(format, resourceFormat);
     desc.ViewDimension = toSRVDimension(type, layerCount, texInfo.samples != SampleCount::X1);
     desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 
@@ -212,13 +222,15 @@ D3D12_FILTER toSamplerFilter(const SamplerInfo &info) {
         return comparison ? D3D12_FILTER_COMPARISON_ANISOTROPIC : D3D12_FILTER_ANISOTROPIC;
     }
 
-    const bool point = info.minFilter == Filter::POINT &&
-                       info.magFilter == Filter::POINT &&
-                       info.mipFilter == Filter::POINT;
-    if (point) {
-        return comparison ? D3D12_FILTER_COMPARISON_MIN_MAG_MIP_POINT : D3D12_FILTER_MIN_MAG_MIP_POINT;
-    }
-    return comparison ? D3D12_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR : D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    const auto toFilterType = [](Filter filter) {
+        return filter == Filter::LINEAR ? D3D12_FILTER_TYPE_LINEAR : D3D12_FILTER_TYPE_POINT;
+    };
+    const auto reductionType = comparison ? D3D12_FILTER_REDUCTION_TYPE_COMPARISON
+                                          : D3D12_FILTER_REDUCTION_TYPE_STANDARD;
+    return D3D12_ENCODE_BASIC_FILTER(toFilterType(info.minFilter),
+                                     toFilterType(info.magFilter),
+                                     toFilterType(info.mipFilter),
+                                     reductionType);
 }
 
 D3D12_SAMPLER_DESC makeSamplerDesc(const SamplerInfo &info) {
@@ -232,7 +244,7 @@ D3D12_SAMPLER_DESC makeSamplerDesc(const SamplerInfo &info) {
                               ? D3D12_COMPARISON_FUNC_NEVER
                               : toComparisonFunc(info.cmpFunc);
     desc.MinLOD = 0.0f;
-    desc.MaxLOD = D3D12_FLOAT32_MAX;
+    desc.MaxLOD = info.mipFilter == Filter::NONE ? 0.0f : D3D12_FLOAT32_MAX;
     desc.MipLODBias = 0.0f;
     return desc;
 }
@@ -658,7 +670,12 @@ void CCD3D12DescriptorSet::forceUpdate() {
                             if (rawResource) {
                                 const auto &texInfo = gfxTexture->getInfo();
                                 D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
-                                uavDesc.Format = toSRVFormat(texInfo.format);
+                                uavDesc.Format = rawResource->GetDesc().Format;
+                                if (uavDesc.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB) {
+                                    uavDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+                                } else if (uavDesc.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB) {
+                                    uavDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+                                }
                                 uavDesc.ViewDimension = toUAVDimension(texInfo.type, texInfo.layerCount);
                                 d3dDevice->CreateUnorderedAccessView(rawResource, nullptr, &uavDesc, handle);
                             } else {

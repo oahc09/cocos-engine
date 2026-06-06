@@ -31,6 +31,9 @@
     #endif
     #include <cstring>
     #include <d3d12.h>
+    #include <limits>
+    #include <unordered_map>
+    #include <vector>
     #include <wrl/client.h>
 
 namespace cc {
@@ -39,7 +42,11 @@ namespace gfx {
 struct CCD3D12QueryPool::Impl {
     Microsoft::WRL::ComPtr<ID3D12QueryHeap> queryHeap;
     Microsoft::WRL::ComPtr<ID3D12Resource> readbackBuffer;
+    std::vector<uint32_t> completedIds;
+    std::unordered_map<uint32_t, uint32_t> activeIndices;
 };
+
+static constexpr uint32_t INVALID_D3D12_QUERY_INDEX = std::numeric_limits<uint32_t>::max();
 
 CCD3D12QueryPool::CCD3D12QueryPool()
 : _impl(std::make_unique<Impl>()) {
@@ -54,45 +61,30 @@ void CCD3D12QueryPool::doInit(const QueryPoolInfo &info) {
         return;
     }
 
-    // --- DIAG: Pre-flight check ---
-    {
-        HRESULT drr = devicePtr->GetDeviceRemovedReason();
-        CC_LOG_INFO("[DIAG] QueryPool::doInit START: DeviceRemovedReason=0x%08x (%s)",
-                     static_cast<unsigned>(drr), SUCCEEDED(drr) ? "OK" : "HUNG!");
+    D3D12_QUERY_HEAP_TYPE heapType{};
+    switch (_type) {
+        case QueryType::OCCLUSION:
+            heapType = D3D12_QUERY_HEAP_TYPE_OCCLUSION;
+            break;
+        case QueryType::TIMESTAMP:
+            heapType = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+            break;
+        case QueryType::PIPELINE_STATISTICS:
+            CC_LOG_ERROR("D3D12QueryPool: pipeline statistics are not supported by the scalar GFX query result API.");
+            return;
     }
-
-    // Determine query type
-    D3D12_QUERY_HEAP_TYPE heapType = D3D12_QUERY_HEAP_TYPE_OCCLUSION;
-    D3D12_QUERY_TYPE queryType = D3D12_QUERY_TYPE_OCCLUSION;
-
-    if (_type == QueryType::OCCLUSION) {
-        heapType = D3D12_QUERY_HEAP_TYPE_OCCLUSION;
-        queryType = D3D12_QUERY_TYPE_OCCLUSION;
-    }
-    // Pipeline statistics or timestamp queries can be added later.
 
     // Create query heap
     D3D12_QUERY_HEAP_DESC heapDesc{};
     heapDesc.Count = _maxQueryObjects;
     heapDesc.NodeMask = 0;
-
-    if (heapType == D3D12_QUERY_HEAP_TYPE_OCCLUSION) {
-        heapDesc.Type = D3D12_QUERY_HEAP_TYPE_OCCLUSION;
-    }
+    heapDesc.Type = heapType;
 
     HRESULT hr = devicePtr->CreateQueryHeap(&heapDesc, IID_PPV_ARGS(&_impl->queryHeap));
     if (FAILED(hr)) {
-        CC_LOG_ERROR("[DIAG] D3D12QueryPool CreateQueryHeap FAILED. HRESULT=0x%08x, count=%u",
+        CC_LOG_ERROR("D3D12QueryPool CreateQueryHeap failed. HRESULT=0x%08x, count=%u",
                      static_cast<unsigned>(hr), _maxQueryObjects);
         return;
-    }
-    CC_LOG_INFO("[DIAG] QueryPool CreateQueryHeap OK (count=%u).", _maxQueryObjects);
-
-    // --- DIAG: Check after query heap creation ---
-    {
-        HRESULT drr = devicePtr->GetDeviceRemovedReason();
-        CC_LOG_INFO("[DIAG] QueryPool after CreateQueryHeap: DeviceRemovedReason=0x%08x (%s)",
-                     static_cast<unsigned>(drr), SUCCEEDED(drr) ? "OK" : "HUNG!");
     }
 
     // Create readback buffer for fetching results
@@ -128,22 +120,11 @@ void CCD3D12QueryPool::doInit(const QueryPoolInfo &info) {
         IID_PPV_ARGS(&_impl->readbackBuffer));
 
     if (FAILED(hr)) {
-        HRESULT drr = devicePtr->GetDeviceRemovedReason();
-        CC_LOG_ERROR("[DIAG] D3D12QueryPool CreateCommittedResource(readback) FAILED. "
-                     "HRESULT=0x%08x, DeviceRemovedReason=0x%08x, bufferSize=%llu",
-                     static_cast<unsigned>(hr), static_cast<unsigned>(drr),
+        CC_LOG_ERROR("D3D12QueryPool CreateCommittedResource(readback) failed. "
+                     "HRESULT=0x%08x, bufferSize=%llu",
+                     static_cast<unsigned>(hr),
                      static_cast<unsigned long long>(bufferSize));
         return;
-    }
-
-    CC_LOG_INFO("[DIAG] QueryPool readback buffer OK (size=%llu bytes).",
-                 static_cast<unsigned long long>(bufferSize));
-
-    // --- DIAG: Check after readback buffer creation ---
-    {
-        HRESULT drr = devicePtr->GetDeviceRemovedReason();
-        CC_LOG_INFO("[DIAG] QueryPool after readback buffer: DeviceRemovedReason=0x%08x (%s)",
-                     static_cast<unsigned>(drr), SUCCEEDED(drr) ? "OK" : "HUNG!");
     }
 
     CC_LOG_INFO("D3D12 QueryPool initialized: type=%u, maxQueries=%u", static_cast<unsigned>(_type), _maxQueryObjects);
@@ -158,8 +139,62 @@ void *CCD3D12QueryPool::getD3D12QueryHeap() const {
     return _impl ? _impl->queryHeap.Get() : nullptr;
 }
 
+uint32_t CCD3D12QueryPool::beginD3D12Query(uint32_t id) {
+    if (!_impl || !_impl->queryHeap) {
+        return INVALID_D3D12_QUERY_INDEX;
+    }
+
+    auto existing = _impl->activeIndices.find(id);
+    if (existing != _impl->activeIndices.end()) {
+        return existing->second;
+    }
+
+    const uint32_t queryIndex = static_cast<uint32_t>(_impl->completedIds.size() + _impl->activeIndices.size());
+    if (queryIndex >= _maxQueryObjects) {
+        CC_LOG_WARNING("D3D12QueryPool: query id %u ignored because max query count %u was reached.", id, _maxQueryObjects);
+        return INVALID_D3D12_QUERY_INDEX;
+    }
+
+    _impl->activeIndices[id] = queryIndex;
+    return queryIndex;
+}
+
+uint32_t CCD3D12QueryPool::endD3D12Query(uint32_t id) {
+    if (!_impl || !_impl->queryHeap) {
+        return INVALID_D3D12_QUERY_INDEX;
+    }
+
+    auto iter = _impl->activeIndices.find(id);
+    if (iter == _impl->activeIndices.end()) {
+        CC_LOG_WARNING("D3D12QueryPool: endQuery for id %u has no matching beginQuery.", id);
+        return INVALID_D3D12_QUERY_INDEX;
+    }
+
+    const uint32_t queryIndex = iter->second;
+    _impl->activeIndices.erase(iter);
+    _impl->completedIds.push_back(id);
+    return queryIndex;
+}
+
+void CCD3D12QueryPool::resetD3D12Queries() {
+    if (!_impl) {
+        return;
+    }
+
+    _impl->completedIds.clear();
+    _impl->activeIndices.clear();
+    std::lock_guard<std::mutex> lock(_mutex);
+    _results.clear();
+}
+
 void CCD3D12QueryPool::fetchResults() {
     if (!_impl->queryHeap || !_impl->readbackBuffer) {
+        return;
+    }
+
+    if (_impl->completedIds.empty()) {
+        std::lock_guard<std::mutex> lock(_mutex);
+        _results.clear();
         return;
     }
 
@@ -191,15 +226,17 @@ void CCD3D12QueryPool::fetchResults() {
         return;
     }
 
-    D3D12_QUERY_TYPE queryType = (_type == QueryType::OCCLUSION)
-                                     ? D3D12_QUERY_TYPE_OCCLUSION
-                                     : D3D12_QUERY_TYPE_OCCLUSION; // extend for other types
+    const D3D12_QUERY_TYPE queryType = _type == QueryType::TIMESTAMP
+                                           ? D3D12_QUERY_TYPE_TIMESTAMP
+                                           : D3D12_QUERY_TYPE_OCCLUSION;
+
+    const uint32_t queryCount = static_cast<uint32_t>(_impl->completedIds.size());
 
     cmdList->ResolveQueryData(
         _impl->queryHeap.Get(),
         queryType,
         0, // start index
-        _maxQueryObjects,
+        queryCount,
         _impl->readbackBuffer.Get(),
         0); // aligned offset
 
@@ -242,7 +279,7 @@ void CCD3D12QueryPool::fetchResults() {
 
     // Map readback buffer and read results
     void *mappedData = nullptr;
-    D3D12_RANGE readRange{0, static_cast<SIZE_T>(_maxQueryObjects) * sizeof(uint64_t)};
+    D3D12_RANGE readRange{0, static_cast<SIZE_T>(queryCount) * sizeof(uint64_t)};
     hr = _impl->readbackBuffer->Map(0, &readRange, &mappedData);
     if (FAILED(hr) || !mappedData) {
         CC_LOG_ERROR("D3D12QueryPool fetchResults: Map readback buffer failed.");
@@ -253,10 +290,8 @@ void CCD3D12QueryPool::fetchResults() {
     {
         std::lock_guard<std::mutex> lock(_mutex);
         _results.clear();
-        for (uint32_t i = 0; i < _maxQueryObjects; ++i) {
-            if (results[i] != 0) { // Only store non-zero results (query was used)
-                _results[i] = results[i];
-            }
+        for (uint32_t i = 0; i < queryCount; ++i) {
+            _results[_impl->completedIds[i]] = results[i];
         }
     }
 

@@ -158,6 +158,8 @@ void CCD3D12InputAssembler::doInit(const InputAssemblerInfo &info) {
 
     // Build D3D12_INPUT_ELEMENT_DESC array
     _impl->inputElements.resize(info.attributes.size());
+    _impl->semanticNames.clear();
+    _impl->semanticNames.reserve(info.attributes.size());
     for (size_t i = 0; i < info.attributes.size(); ++i) {
         const auto &attr = info.attributes[i];
         auto &element = _impl->inputElements[i];
@@ -166,14 +168,8 @@ void CCD3D12InputAssembler::doInit(const InputAssemblerInfo &info) {
         uint32_t semanticIndex = 0;
         extractSemantic(attr.name, semanticName, semanticIndex);
 
-        // We need to store the semantic name string persistently
-        // D3D12_INPUT_ELEMENT_DESC.SemanticName is a const char* that must remain valid
-        // We store them in a separate vector - but since inputElements may reallocate,
-        // we use a stable storage approach: allocate strings on heap
-        // Actually, let's use a different approach - store strings in the Impl struct
-        // For simplicity, we'll use static strings for common semantics and heap for others
-
-        element.SemanticName = nullptr; // will be set below
+        _impl->semanticNames.emplace_back(semanticName);
+        element.SemanticName = _impl->semanticNames.back().c_str();
         element.SemanticIndex = semanticIndex;
         element.Format = gfxFormatToDXGI(attr.format);
         element.InputSlot = attr.stream;
@@ -188,25 +184,6 @@ void CCD3D12InputAssembler::doInit(const InputAssemblerInfo &info) {
                            static_cast<unsigned>(attr.format), attr.name.c_str());
         }
 
-        // Allocate persistent semantic name string
-        // Use a simple approach: store in a vector<string> in Impl
-        // We'll add a semanticNames vector
-        (void)semanticName; // Will fix below
-    }
-
-    // Store semantic names persistently
-    // We need to add semanticNames vector to Impl... Let me restructure.
-    // Actually we need to do this differently. Let me store the names separately.
-
-    // Store semantic names persistently in Impl (D3D12_INPUT_ELEMENT_DESC.SemanticName must remain valid)
-    _impl->semanticNames.resize(info.attributes.size());
-    for (size_t i = 0; i < info.attributes.size(); ++i) {
-        char semanticName[64] = {};
-        uint32_t semanticIndex = 0;
-        extractSemantic(info.attributes[i].name, semanticName, semanticIndex);
-        _impl->semanticNames[i] = semanticName;
-        _impl->inputElements[i].SemanticName = _impl->semanticNames[i].c_str();
-        _impl->inputElements[i].SemanticIndex = semanticIndex;
     }
 
     // Build vertex buffer views

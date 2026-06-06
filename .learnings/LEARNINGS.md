@@ -20,3 +20,26 @@ For D3D12-only shadow issues, first compare D3D12 shader/binding/depth behavior 
 - Tags: d3d12, debugging, shadow
 
 ---
+
+## [LRN-20260606-002] correction
+
+**Logged**: 2026-06-06T16:30:00+08:00
+**Priority**: high
+**Status**: pending
+**Area**: renderer
+
+### Summary
+Do not treat a confirmed D3D12 sampler semantic defect as the complete root cause without validating the original rendering symptom in a new capture.
+
+### Details
+The `mipFilter == NONE` mapping defect was real and the resulting sampler state changed in the next RDC, but the offscreen black region remained. The latest capture shows the material sampler legitimately requests mip filtering and the visible artifact also follows the albedo eye pattern, so the original completion claim was premature.
+
+### Suggested Action
+For rendering fixes, require both state-level evidence and a new-capture visual regression check before claiming the user-visible issue is resolved.
+
+### Metadata
+- Source: user_feedback
+- Related Files: native/cocos/renderer/gfx-d3d12/D3D12DescriptorSet.cpp
+- Tags: d3d12, renderdoc, verification, correction
+
+---

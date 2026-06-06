@@ -38,6 +38,11 @@ public:
     // Returns the D3D12 PSO as opaque pointer. Caller should cast to ID3D12PipelineState*.
     void *getID3D12PipelineState() const;
 
+    // Returns a cached PSO variant for D3D12 states that are dynamic in GFX
+    // but immutable in a native D3D12 graphics PSO.
+    void *getDynamicID3D12PipelineState(float depthBias, float depthBiasClamp, float slopeScaledDepthBias,
+                                        uint32_t stencilReadMask, uint32_t stencilWriteMask);
+
     // Returns the D3D12_PRIMITIVE_TOPOLOGY for command list IA setup
     uint32_t getD3D12PrimitiveTopology() const;
 
@@ -46,9 +51,6 @@ public:
 
     // True when the PSO root signature matches the PipelineLayout root signature.
     bool usesPipelineLayoutRootSignature() const;
-
-    // True when this PSO is using the built-in diagnostic fallback shader.
-    bool isDiagnosticFallback() const;
 
 protected:
     void doInit(const PipelineStateInfo &info) override;

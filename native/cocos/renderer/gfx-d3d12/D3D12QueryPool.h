@@ -41,6 +41,10 @@ public:
     /** Read back query results from GPU to CPU. Call from Device::getQueryPoolResults. */
     void fetchResults();
 
+    uint32_t beginD3D12Query(uint32_t id);
+    uint32_t endD3D12Query(uint32_t id);
+    void resetD3D12Queries();
+
 protected:
     void doInit(const QueryPoolInfo &info) override;
     void doDestroy() override;

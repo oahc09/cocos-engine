@@ -70,6 +70,7 @@
     #include "profiler/DebugRenderer.h"
 #endif
 #include "profiler/Profiler.h"
+#include "CocosTracer.h"
 
 namespace {
 
@@ -333,6 +334,7 @@ void Engine::tick() {
     }
 
     CC_PROFILER_END_FRAME;
+    CocosTracer::getInstance()->onEngineTick();
 }
 
 void Engine::doRestart() {

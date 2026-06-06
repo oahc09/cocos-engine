@@ -155,6 +155,9 @@ void CCD3D12Queue::submit(CommandBuffer *const *cmdBuffs, uint32_t count) {
     for (uint32_t i = 0; i < count; ++i) {
         if (!cmdBuffs[i]) continue;
         auto *d3d12CmdBuf = static_cast<CCD3D12CommandBuffer *>(cmdBuffs[i]);
+        if (d3d12CmdBuf->getType() != CommandBufferType::PRIMARY) {
+            continue;
+        }
         auto *cmdList = static_cast<ID3D12CommandList *>(d3d12CmdBuf->getD3D12CommandList());
         if (cmdList) {
             commandLists.push_back(cmdList);

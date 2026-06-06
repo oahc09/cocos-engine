@@ -35,9 +35,12 @@
         #define NOMINMAX
     #endif
     #include <d3d12.h>
+    #include <cstring>
     #include <dxgiformat.h>
-    #include <wrl/client.h>
     #include <d3dcompiler.h>
+    #include <map>
+    #include <tuple>
+    #include <wrl/client.h>
 
 namespace cc {
 namespace gfx {
@@ -248,11 +251,15 @@ DXGI_FORMAT toD3D12VertexFormat(Format fmt) {
 } // namespace
 
 struct CCD3D12PipelineState::Impl {
+    using DynamicPipelineKey = std::tuple<INT, uint32_t, uint32_t, UINT8, UINT8>;
+
     Microsoft::WRL::ComPtr<ID3D12PipelineState> pipelineState;
     ID3D12RootSignature *rootSignature{nullptr};
     D3D12_PRIMITIVE_TOPOLOGY primitiveTopology{D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST};
     bool usesPipelineLayoutRootSignature{false};
-    bool diagnosticFallback{false};
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC baseDesc{};
+    ccstd::vector<D3D12_INPUT_ELEMENT_DESC> inputElements;
+    std::map<DynamicPipelineKey, Microsoft::WRL::ComPtr<ID3D12PipelineState>> dynamicPipelineStates;
     // Per-PSO persistent storage for InputLayout semantic names.
     // Must outlive the PSO because D3D12_INPUT_ELEMENT_DESC::SemanticName is a raw pointer.
     ccstd::vector<ccstd::string> semanticNames;
@@ -273,7 +280,9 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
     _impl->pipelineState.Reset();
     _impl->rootSignature = nullptr;
     _impl->usesPipelineLayoutRootSignature = false;
-    _impl->diagnosticFallback = false;
+    _impl->baseDesc = {};
+    _impl->inputElements.clear();
+    _impl->dynamicPipelineStates.clear();
 
     auto *device = CCD3D12Device::getInstance();
     auto *d3dDevice = static_cast<ID3D12Device *>(device ? device->getD3D12DeviceHandle() : nullptr);
@@ -337,27 +346,6 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
     psoDesc.BlendState.AlphaToCoverageEnable = blend.isA2C ? TRUE : FALSE;
     psoDesc.BlendState.IndependentBlendEnable = blend.isIndepend ? TRUE : FALSE;
 
-    // Diagnostic: log blend state for this PSO
-    {
-        const char *shaderName = _shader ? _shader->getName().c_str() : "<null>";
-        bool anyBlendEnabled = false;
-        for (size_t i = 0; i < blend.targets.size(); ++i) {
-            if (blend.targets[i].blend) { anyBlendEnabled = true; break; }
-        }
-        CC_LOG_INFO("[D3D12-PSO] BlendState: shader='%s' isA2C=%u isIndepend=%u targets=%zu anyBlend=%s",
-                     shaderName, blend.isA2C, blend.isIndepend,
-                     static_cast<unsigned>(blend.targets.size()),
-                     anyBlendEnabled ? "YES" : "NO");
-        for (size_t i = 0; i < blend.targets.size() && i < 4; ++i) {
-            const auto &t = blend.targets[i];
-            CC_LOG_INFO("[D3D12-PSO]   target[%zu]: blend=%u src=%u dst=%u op=%u srcA=%u dstA=%u opA=%u mask=0x%x",
-                         i, t.blend, static_cast<unsigned>(t.blendSrc), static_cast<unsigned>(t.blendDst),
-                         static_cast<unsigned>(t.blendEq), static_cast<unsigned>(t.blendSrcAlpha),
-                         static_cast<unsigned>(t.blendDstAlpha), static_cast<unsigned>(t.blendAlphaEq),
-                         static_cast<unsigned>(t.blendColorMask));
-        }
-    }
-
     UINT numRenderTargets = 0;
     for (UINT i = 0; i < D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i) {
         auto &rtBlend = psoDesc.BlendState.RenderTarget[i];
@@ -397,8 +385,16 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
     psoDesc.DepthStencilState.DepthWriteMask = ds.depthWrite ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
     psoDesc.DepthStencilState.DepthFunc = toD3D12ComparisonFunc(ds.depthFunc);
     psoDesc.DepthStencilState.StencilEnable = (ds.stencilTestFront || ds.stencilTestBack) ? TRUE : FALSE;
-    psoDesc.DepthStencilState.StencilReadMask = static_cast<UINT8>(ds.stencilReadMaskFront);
-    psoDesc.DepthStencilState.StencilWriteMask = static_cast<UINT8>(ds.stencilWriteMaskFront);
+    const bool useFrontStencilMask = ds.stencilTestFront || !ds.stencilTestBack;
+    psoDesc.DepthStencilState.StencilReadMask = static_cast<UINT8>(
+        useFrontStencilMask ? ds.stencilReadMaskFront : ds.stencilReadMaskBack);
+    psoDesc.DepthStencilState.StencilWriteMask = static_cast<UINT8>(
+        useFrontStencilMask ? ds.stencilWriteMaskFront : ds.stencilWriteMaskBack);
+    if (ds.stencilTestFront && ds.stencilTestBack &&
+        (ds.stencilReadMaskFront != ds.stencilReadMaskBack ||
+         ds.stencilWriteMaskFront != ds.stencilWriteMaskBack)) {
+        CC_LOG_WARNING("D3D12PipelineState: front/back stencil masks differ; D3D12 uses one shared mask.");
+    }
 
     // Front face stencil
     psoDesc.DepthStencilState.FrontFace.StencilFailOp = toD3D12StencilOp(ds.stencilFailOpFront);
@@ -433,7 +429,8 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
     // skinned variants, etc.) conditionally remove attributes via macros; using
     // the raw IA order as TEXCOORD0..N makes later inputs shift and corrupts VS
     // data.
-    ccstd::vector<D3D12_INPUT_ELEMENT_DESC> inputElements;
+    auto &inputElements = _impl->inputElements;
+    inputElements.clear();
     const AttributeList &shaderAttributes = _shader ? _shader->getAttributes() : _inputState.attributes;
     if (!shaderAttributes.empty()) {
         inputElements.reserve(shaderAttributes.size());
@@ -523,46 +520,11 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
 
     HRESULT hr = d3dDevice->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&_impl->pipelineState));
     if (FAILED(hr)) {
-        CC_LOG_ERROR("D3D12PipelineState: CreateGraphicsPipelineState failed. HRESULT=0x%08x. "
-                     "Retrying with cleared InputLayout.",
+        CC_LOG_ERROR("D3D12PipelineState: CreateGraphicsPipelineState failed. HRESULT=0x%08x",
                      static_cast<unsigned>(hr));
-
-        // Retry: keep the real shader bytecode but clear InputLayout.
-        // The primary PSO may fail because the engine's vertex attribute format/stride
-        // doesn't exactly match the HLSL shader's input signature (e.g., RG32F vs float3).
-        // By clearing InputLayout, the shader runs with vertex ID only semantics and
-        // descriptors (cbuffer/textures) still bind correctly through the root signature.
-        {
-            psoDesc.InputLayout.pInputElementDescs = nullptr;
-            psoDesc.InputLayout.NumElements = 0;
-
-            hr = d3dDevice->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&_impl->pipelineState));
-            if (SUCCEEDED(hr)) {
-                _impl->rootSignature = psoDesc.pRootSignature;
-                _impl->diagnosticFallback = true;
-                CC_LOG_INFO("D3D12PipelineState: retry PSO created successfully with cleared InputLayout.");
-            } else {
-                // Try with empty root signature to isolate: is the issue RootSig or shader/PSO-desc?
-                auto *emptyRootSig = getOrCreateEmptyRootSignature(d3dDevice);
-                if (emptyRootSig) {
-                    psoDesc.pRootSignature = emptyRootSig;
-                    hr = d3dDevice->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&_impl->pipelineState));
-                    if (SUCCEEDED(hr)) {
-                        _impl->rootSignature = psoDesc.pRootSignature;
-                        _impl->usesPipelineLayoutRootSignature = false;
-                        _impl->diagnosticFallback = true;
-                        CC_LOG_INFO("D3D12PipelineState: PSO created with empty root signature (root sig mismatch).");
-                    }
-                }
-
-                if (FAILED(hr)) {
-                    CC_LOG_ERROR("D3D12PipelineState: all PSO creation attempts failed. HRESULT=0x%08x",
-                                 static_cast<unsigned>(hr));
-                }
-            }
-        }
     } else {
         _impl->rootSignature = psoDesc.pRootSignature;
+        _impl->baseDesc = psoDesc;
         CC_LOG_INFO("D3D12PipelineState created successfully.");
     }
 }
@@ -570,15 +532,69 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
 void CCD3D12PipelineState::doDestroy() {
     if (_impl) {
         _impl->pipelineState.Reset();
+        _impl->dynamicPipelineStates.clear();
+        _impl->inputElements.clear();
+        _impl->baseDesc = {};
         _impl->rootSignature = nullptr;
         _impl->primitiveTopology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
         _impl->usesPipelineLayoutRootSignature = false;
-        _impl->diagnosticFallback = false;
     }
 }
 
 void *CCD3D12PipelineState::getID3D12PipelineState() const {
     return _impl ? _impl->pipelineState.Get() : nullptr;
+}
+
+void *CCD3D12PipelineState::getDynamicID3D12PipelineState(float depthBias, float depthBiasClamp, float slopeScaledDepthBias,
+                                                         uint32_t stencilReadMask, uint32_t stencilWriteMask) {
+    if (!_impl || !_impl->pipelineState) {
+        return nullptr;
+    }
+
+    uint32_t depthBiasClampBits = 0;
+    uint32_t slopeScaledDepthBiasBits = 0;
+    static_assert(sizeof(depthBiasClampBits) == sizeof(depthBiasClamp), "float bit size mismatch");
+    std::memcpy(&depthBiasClampBits, &depthBiasClamp, sizeof(depthBiasClampBits));
+    std::memcpy(&slopeScaledDepthBiasBits, &slopeScaledDepthBias, sizeof(slopeScaledDepthBiasBits));
+
+    Impl::DynamicPipelineKey key{
+        static_cast<INT>(depthBias),
+        depthBiasClampBits,
+        slopeScaledDepthBiasBits,
+        static_cast<UINT8>(stencilReadMask),
+        static_cast<UINT8>(stencilWriteMask),
+    };
+    auto cached = _impl->dynamicPipelineStates.find(key);
+    if (cached != _impl->dynamicPipelineStates.end()) {
+        return cached->second.Get();
+    }
+
+    auto *device = CCD3D12Device::getInstance();
+    auto *d3dDevice = static_cast<ID3D12Device *>(device ? device->getD3D12DeviceHandle() : nullptr);
+    if (!d3dDevice) {
+        return nullptr;
+    }
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC variantDesc = _impl->baseDesc;
+    variantDesc.RasterizerState.DepthBias = static_cast<INT>(depthBias);
+    variantDesc.RasterizerState.DepthBiasClamp = depthBiasClamp;
+    variantDesc.RasterizerState.SlopeScaledDepthBias = slopeScaledDepthBias;
+    variantDesc.DepthStencilState.StencilReadMask = static_cast<UINT8>(stencilReadMask);
+    variantDesc.DepthStencilState.StencilWriteMask = static_cast<UINT8>(stencilWriteMask);
+    variantDesc.InputLayout.pInputElementDescs = _impl->inputElements.empty() ? nullptr : _impl->inputElements.data();
+    variantDesc.InputLayout.NumElements = static_cast<UINT>(_impl->inputElements.size());
+
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> variant;
+    HRESULT hr = d3dDevice->CreateGraphicsPipelineState(&variantDesc, IID_PPV_ARGS(&variant));
+    if (FAILED(hr)) {
+        CC_LOG_ERROR("D3D12PipelineState: dynamic PSO variant creation failed. HRESULT=0x%08x",
+                     static_cast<unsigned>(hr));
+        return _impl->pipelineState.Get();
+    }
+
+    auto *result = variant.Get();
+    _impl->dynamicPipelineStates.emplace(key, std::move(variant));
+    return result;
 }
 
 uint32_t CCD3D12PipelineState::getD3D12PrimitiveTopology() const {
@@ -591,10 +607,6 @@ void *CCD3D12PipelineState::getID3D12RootSignature() const {
 
 bool CCD3D12PipelineState::usesPipelineLayoutRootSignature() const {
     return _impl ? _impl->usesPipelineLayoutRootSignature : false;
-}
-
-bool CCD3D12PipelineState::isDiagnosticFallback() const {
-    return _impl ? _impl->diagnosticFallback : false;
 }
 
 } // namespace gfx

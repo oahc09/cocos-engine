@@ -108,7 +108,7 @@ void unregisterOwnedColorRenderTarget(CCD3D12Texture *texture) {
                    textures.end());
 }
 
-DXGI_FORMAT toD3D12Format(Format format) {
+DXGI_FORMAT mapD3D12Format(Format format) {
     switch (format) {
         case Format::R8:
             return DXGI_FORMAT_R8_UNORM;
@@ -221,7 +221,8 @@ DXGI_FORMAT toD3D12Format(Format format) {
             return DXGI_FORMAT_BC7_UNORM;
         case Format::BC7_SRGB:
             return DXGI_FORMAT_BC7_UNORM_SRGB;
-        // ETC2 - D3D12 has no native support, use fallback
+        // ETC2/EAC are not supported by D3D12 and require transcoding before
+        // texture creation. Treating compressed bytes as RGBA8 corrupts data.
         case Format::ETC_RGB8:
         case Format::ETC2_RGB8:
         case Format::ETC2_SRGB8:
@@ -233,9 +234,7 @@ DXGI_FORMAT toD3D12Format(Format format) {
         case Format::EAC_R11SN:
         case Format::EAC_RG11:
         case Format::EAC_RG11SN:
-            // D3D12 does not support ETC2 natively - fallback to RGBA8
-            CC_LOG_WARNING("D3D12: ETC2 format %u not supported natively, falling back to RGBA8.", static_cast<unsigned>(format));
-            return DXGI_FORMAT_R8G8B8A8_UNORM;
+            return DXGI_FORMAT_UNKNOWN;
         case Format::ASTC_RGBA_4X4:
         case Format::ASTC_RGBA_5X4:
         case Format::ASTC_RGBA_5X5:
@@ -258,10 +257,8 @@ DXGI_FORMAT toD3D12Format(Format format) {
         case Format::ASTC_SRGBA_10X5:
         case Format::ASTC_SRGBA_10X10:
         case Format::ASTC_SRGBA_12X12:
-            CC_LOG_WARNING("D3D12: ASTC format %u not supported natively, falling back to RGBA8.", static_cast<unsigned>(format));
-            return DXGI_FORMAT_R8G8B8A8_UNORM;
+            return DXGI_FORMAT_UNKNOWN;
         default:
-            CC_LOG_WARNING("D3D12: Unmapped texture format %u, returning UNKNOWN.", static_cast<unsigned>(format));
             return DXGI_FORMAT_UNKNOWN;
     }
 }
@@ -287,6 +284,10 @@ UINT toD3D12SampleCount(SampleCount samples) {
 }
 } // namespace
 
+DXGI_FORMAT toD3D12Format(Format format) {
+    return mapD3D12Format(format);
+}
+
 CCD3D12Texture::CCD3D12Texture() {
     _impl = std::make_unique<Impl>();
 }
@@ -301,7 +302,6 @@ void CCD3D12Texture::doInit(const TextureInfo &info) {
     _isSwapchainTexture = false;
     _swapchain = nullptr;
     _isTextureView = false;
-    _uploadedMipMask = 0;
     _hash = Texture::computeHash(this);
     if (!createResource(_info.width, _info.height)) {
         CC_LOG_ERROR("D3D12Texture: createResource failed for format=%u, %ux%u, usage=0x%x. "
@@ -323,7 +323,6 @@ void CCD3D12Texture::doInit(const TextureViewInfo &info) {
     }
     _isSwapchainTexture = texture->isSwapchainColorTexture();
     _swapchain = _isSwapchainTexture ? texture->getSwapchain() : nullptr;
-    _uploadedMipMask = texture->_uploadedMipMask;
     _hash = Texture::computeHash(this);
     if (_isSwapchainTexture) {
         _impl->resource.Reset();
@@ -339,7 +338,6 @@ void CCD3D12Texture::doInit(const SwapchainTextureInfo &info) {
     _isTextureView = false;
     _isSwapchainTexture = hasFlag(_info.usage, TextureUsageBit::COLOR_ATTACHMENT) &&
                           !hasFlag(_info.usage, TextureUsageBit::DEPTH_STENCIL_ATTACHMENT);
-    _uploadedMipMask = 0;
     _hash = Texture::computeHash(this);
     if (hasFlag(_info.usage, TextureUsageBit::DEPTH_STENCIL_ATTACHMENT)) {
         createResource(_info.width, _info.height);
@@ -361,7 +359,6 @@ void CCD3D12Texture::doDestroy() {
     }
     _isSwapchainTexture = false;
     _swapchain = nullptr;
-    _uploadedMipMask = 0;
 }
 
 void CCD3D12Texture::doResize(uint32_t width, uint32_t height, uint32_t size) {
@@ -386,31 +383,6 @@ void *CCD3D12Texture::getD3D12ResourceHandle() const {
 
 void *CCD3D12Texture::getD3D12OwnedResourceHandle() const {
     return _impl ? _impl->resource.Get() : nullptr;
-}
-
-void CCD3D12Texture::markMipLevelUploaded(uint32_t mipLevel) {
-    if (mipLevel < 64) {
-        _uploadedMipMask |= (uint64_t{1} << mipLevel);
-    }
-}
-
-uint32_t CCD3D12Texture::getValidSRVMipLevels() const {
-    if (_info.levelCount <= 1) {
-        return _info.levelCount;
-    }
-    if (_uploadedMipMask == 0) {
-        return 1;
-    }
-
-    uint32_t validMipLevels = 0;
-    const uint32_t maxTrackedMips = std::min<uint32_t>(_info.levelCount, 64);
-    for (uint32_t i = 0; i < maxTrackedMips; ++i) {
-        if ((_uploadedMipMask & (uint64_t{1} << i)) == 0) {
-            break;
-        }
-        ++validMipLevels;
-    }
-    return std::max<uint32_t>(validMipLevels, 1);
 }
 
 bool CCD3D12Texture::isSwapchainColorTexture() const {
@@ -483,7 +455,6 @@ bool CCD3D12Texture::createResource(uint32_t width, uint32_t height) {
         return false;
     }
 
-    // --- DIAG: Pre-flight device health check ---
     auto *device = CCD3D12Device::getInstance();
     auto *d3dDevice = static_cast<ID3D12Device *>(device ? device->getD3D12DeviceHandle() : nullptr);
     if (!d3dDevice) {
@@ -491,44 +462,16 @@ bool CCD3D12Texture::createResource(uint32_t width, uint32_t height) {
         return false;
     }
 
-    {
-        HRESULT drr = d3dDevice->GetDeviceRemovedReason();
-        if (FAILED(drr)) {
-            CC_LOG_ERROR("[DIAG] createResource PRE-FLIGHT: device already HUNG! "
-                         "DeviceRemovedReason=0x%08x, format=%u, %ux%u, usage=0x%x. "
-                         "The device hung BEFORE this texture creation.",
-                         static_cast<unsigned>(drr),
-                         static_cast<unsigned>(_info.format), width, height,
-                         static_cast<uint32_t>(_info.usage));
-            // Dump all queued D3D12 debug messages to find the real cause
-            Microsoft::WRL::ComPtr<ID3D12InfoQueue> infoQueue;
-            if (SUCCEEDED(d3dDevice->QueryInterface(IID_PPV_ARGS(&infoQueue)))) {
-                UINT64 msgCount = infoQueue->GetNumStoredMessages();
-                CC_LOG_ERROR("[DIAG-INFOQUEUE] Messages queued at HUNG detection: %llu",
-                             static_cast<unsigned long long>(msgCount));
-                for (UINT64 i = 0; i < msgCount && i < 50; ++i) {
-                    SIZE_T msgSize = 0;
-                    infoQueue->GetMessage(i, nullptr, &msgSize);
-                    if (msgSize == 0) continue;
-                    auto *msgData = static_cast<D3D12_MESSAGE *>(malloc(msgSize));
-                    if (!msgData) continue;
-                    if (SUCCEEDED(infoQueue->GetMessage(i, msgData, &msgSize))) {
-                        CC_LOG_ERROR("[DIAG-INFOQUEUE]   [%u] %.*s",
-                                     static_cast<unsigned>(msgData->ID),
-                                     static_cast<int>(msgData->DescriptionByteLength),
-                                     msgData->pDescription);
-                    }
-                    free(msgData);
-                }
-            }
-            return false;
-        }
-    }
-
-    DXGI_FORMAT format = toD3D12Format(_info.format);
-    if (format == DXGI_FORMAT_UNKNOWN) {
+    const DXGI_FORMAT viewFormat = toD3D12Format(_info.format);
+    if (viewFormat == DXGI_FORMAT_UNKNOWN) {
         CC_LOG_WARNING("Unsupported D3D12 texture format: %u", static_cast<unsigned>(_info.format));
         return false;
+    }
+    DXGI_FORMAT resourceFormat = viewFormat;
+    if (_info.format == Format::DEPTH) {
+        resourceFormat = DXGI_FORMAT_R32_TYPELESS;
+    } else if (_info.format == Format::DEPTH_STENCIL) {
+        resourceFormat = DXGI_FORMAT_R24G8_TYPELESS;
     }
 
     D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE;
@@ -540,6 +483,25 @@ bool CCD3D12Texture::createResource(uint32_t width, uint32_t height) {
     }
     if (hasFlag(_info.usage, TextureUsageBit::STORAGE)) {
         flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    }
+    if (hasFlag(_info.flags, TextureFlagBit::GEN_MIPMAP) &&
+        _info.samples == SampleCount::X1 &&
+        _info.type != TextureType::TEX3D) {
+        const auto &formatInfo = GFX_FORMAT_INFOS[toNumber(_info.format)];
+        D3D12_FEATURE_DATA_FORMAT_SUPPORT formatSupport{viewFormat};
+        const bool supportsRenderTarget =
+            !formatInfo.hasDepth && !formatInfo.hasStencil && !formatInfo.isCompressed &&
+            formatInfo.type != FormatType::UINT && formatInfo.type != FormatType::INT &&
+            SUCCEEDED(d3dDevice->CheckFeatureSupport(
+                D3D12_FEATURE_FORMAT_SUPPORT, &formatSupport, sizeof(formatSupport))) &&
+            (formatSupport.Support1 & D3D12_FORMAT_SUPPORT1_RENDER_TARGET) != 0 &&
+            (formatSupport.Support1 & D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE) != 0;
+        if (supportsRenderTarget) {
+            flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        } else {
+            CC_LOG_WARNING("D3D12 texture format %u cannot generate mipmaps on GPU.",
+                           static_cast<unsigned>(_info.format));
+        }
     }
 
     D3D12_HEAP_PROPERTIES heapProperties{};
@@ -556,7 +518,7 @@ bool CCD3D12Texture::createResource(uint32_t width, uint32_t height) {
     resourceDesc.Height = height;
     resourceDesc.DepthOrArraySize = _info.type == TextureType::TEX3D ? static_cast<UINT16>(_info.depth) : static_cast<UINT16>(_info.layerCount);
     resourceDesc.MipLevels = static_cast<UINT16>(_info.levelCount);
-    resourceDesc.Format = format;
+    resourceDesc.Format = resourceFormat;
     resourceDesc.SampleDesc.Count = toD3D12SampleCount(_info.samples);
     resourceDesc.SampleDesc.Quality = 0;
     resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
@@ -565,14 +527,14 @@ bool CCD3D12Texture::createResource(uint32_t width, uint32_t height) {
     D3D12_CLEAR_VALUE clearValue{};
     D3D12_CLEAR_VALUE *optimizedClearValue = nullptr;
     if (hasFlag(_info.usage, TextureUsageBit::COLOR_ATTACHMENT)) {
-        clearValue.Format = format;
+        clearValue.Format = viewFormat;
         clearValue.Color[0] = 0.0F;
         clearValue.Color[1] = 0.0F;
         clearValue.Color[2] = 0.0F;
         clearValue.Color[3] = 1.0F;
         optimizedClearValue = &clearValue;
     } else if (hasFlag(_info.usage, TextureUsageBit::DEPTH_STENCIL_ATTACHMENT)) {
-        clearValue.Format = format;
+        clearValue.Format = viewFormat;
         clearValue.DepthStencil.Depth = 1.0F;
         clearValue.DepthStencil.Stencil = 0;
         optimizedClearValue = &clearValue;
@@ -593,7 +555,7 @@ bool CCD3D12Texture::createResource(uint32_t width, uint32_t height) {
                      "HRESULT=0x%08x, DeviceRemovedReason=0x%08x, "
                      "format=%u (DXGI=%u), %ux%u, depth=%u, layers=%u, mips=%u, usage=0x%x, flags=0x%x, samples=%u",
                      static_cast<unsigned>(hr), static_cast<unsigned>(removedReason),
-                     static_cast<unsigned>(_info.format), static_cast<unsigned>(format),
+                     static_cast<unsigned>(_info.format), static_cast<unsigned>(resourceFormat),
                      width, height,
                      static_cast<unsigned>(_info.depth),
                      static_cast<unsigned>(_info.layerCount),

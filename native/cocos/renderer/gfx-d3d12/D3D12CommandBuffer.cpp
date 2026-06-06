@@ -45,6 +45,9 @@
     #include <algorithm>
     #include <cstring>
     #include <d3d12.h>
+    #include <d3dcompiler.h>
+    #include <limits>
+    #include <unordered_map>
     #include <wrl/client.h>
 
 namespace cc {
@@ -108,7 +111,379 @@ D3D12_RESOURCE_STATES getPostTransferTextureState(const TextureInfo &info) {
     }
     return D3D12_RESOURCE_STATE_COMMON;
 }
+
+DXGI_FORMAT toBlitDXGIFormat(Format format) {
+    switch (format) {
+        case Format::R8:          return DXGI_FORMAT_R8_UNORM;
+        case Format::R8SN:        return DXGI_FORMAT_R8_SNORM;
+        case Format::RG8:         return DXGI_FORMAT_R8G8_UNORM;
+        case Format::RG8SN:       return DXGI_FORMAT_R8G8_SNORM;
+        case Format::RGBA8:       return DXGI_FORMAT_R8G8B8A8_UNORM;
+        case Format::BGRA8:       return DXGI_FORMAT_B8G8R8A8_UNORM;
+        case Format::SRGB8_A8:    return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+        case Format::RGBA8SN:     return DXGI_FORMAT_R8G8B8A8_SNORM;
+        case Format::R16F:        return DXGI_FORMAT_R16_FLOAT;
+        case Format::RG16F:       return DXGI_FORMAT_R16G16_FLOAT;
+        case Format::RGBA16F:     return DXGI_FORMAT_R16G16B16A16_FLOAT;
+        case Format::R32F:        return DXGI_FORMAT_R32_FLOAT;
+        case Format::RG32F:       return DXGI_FORMAT_R32G32_FLOAT;
+        case Format::RGBA32F:     return DXGI_FORMAT_R32G32B32A32_FLOAT;
+        case Format::RGB10A2:     return DXGI_FORMAT_R10G10B10A2_UNORM;
+        case Format::R11G11B10F:  return DXGI_FORMAT_R11G11B10_FLOAT;
+        case Format::RGBA4:       return DXGI_FORMAT_B4G4R4A4_UNORM;
+        case Format::RGB5A1:      return DXGI_FORMAT_B5G5R5A1_UNORM;
+        default:                  return DXGI_FORMAT_UNKNOWN;
+    }
+}
+
+bool supportsShaderBlit(const TextureInfo &srcInfo, const TextureInfo &dstInfo) {
+    const auto &srcFormatInfo = GFX_FORMAT_INFOS[toNumber(srcInfo.format)];
+    const auto &dstFormatInfo = GFX_FORMAT_INFOS[toNumber(dstInfo.format)];
+    if (srcFormatInfo.hasDepth || srcFormatInfo.hasStencil || dstFormatInfo.hasDepth || dstFormatInfo.hasStencil) return false;
+    if (srcFormatInfo.isCompressed || dstFormatInfo.isCompressed) return false;
+    if (srcFormatInfo.type == FormatType::UINT || srcFormatInfo.type == FormatType::INT) return false;
+    if (dstFormatInfo.type == FormatType::UINT || dstFormatInfo.type == FormatType::INT) return false;
+    if (srcInfo.samples != SampleCount::X1 || dstInfo.samples != SampleCount::X1) return false;
+    if (srcInfo.type == TextureType::TEX3D || dstInfo.type == TextureType::TEX3D) return false;
+    return toBlitDXGIFormat(srcInfo.format) != DXGI_FORMAT_UNKNOWN &&
+           toBlitDXGIFormat(dstInfo.format) != DXGI_FORMAT_UNKNOWN;
+}
+
+struct D3D12BlitPipeline {
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> rootSignature;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> pipelineState;
+};
+
+D3D12BlitPipeline *getOrCreateBlitPipeline(ID3D12Device *device, DXGI_FORMAT rtvFormat) {
+    static std::unordered_map<uint32_t, D3D12BlitPipeline> pipelines;
+    const uint32_t key = static_cast<uint32_t>(rtvFormat);
+    auto iter = pipelines.find(key);
+    if (iter != pipelines.end()) {
+        return &iter->second;
+    }
+
+    D3D12_DESCRIPTOR_RANGE ranges[2]{};
+    ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    ranges[0].NumDescriptors = 1;
+    ranges[0].BaseShaderRegister = 0;
+    ranges[0].RegisterSpace = 0;
+    ranges[0].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+    ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+    ranges[1].NumDescriptors = 1;
+    ranges[1].BaseShaderRegister = 0;
+    ranges[1].RegisterSpace = 0;
+    ranges[1].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    D3D12_ROOT_PARAMETER rootParameters[3]{};
+    rootParameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParameters[0].DescriptorTable.NumDescriptorRanges = 1;
+    rootParameters[0].DescriptorTable.pDescriptorRanges = &ranges[0];
+    rootParameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    rootParameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rootParameters[1].DescriptorTable.NumDescriptorRanges = 1;
+    rootParameters[1].DescriptorTable.pDescriptorRanges = &ranges[1];
+    rootParameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    rootParameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    rootParameters[2].Constants.ShaderRegister = 0;
+    rootParameters[2].Constants.RegisterSpace = 0;
+    rootParameters[2].Constants.Num32BitValues = 12;
+    rootParameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    D3D12_ROOT_SIGNATURE_DESC rootSigDesc{};
+    rootSigDesc.NumParameters = 3;
+    rootSigDesc.pParameters = rootParameters;
+    rootSigDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+    Microsoft::WRL::ComPtr<ID3DBlob> rootBlob;
+    Microsoft::WRL::ComPtr<ID3DBlob> errorBlob;
+    HRESULT hr = D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1, &rootBlob, &errorBlob);
+    if (FAILED(hr)) {
+        CC_LOG_ERROR("D3D12 blit root signature serialization failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+        return nullptr;
+    }
+
+    D3D12BlitPipeline pipeline;
+    hr = device->CreateRootSignature(0, rootBlob->GetBufferPointer(), rootBlob->GetBufferSize(), IID_PPV_ARGS(&pipeline.rootSignature));
+    if (FAILED(hr)) {
+        CC_LOG_ERROR("D3D12 blit root signature creation failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+        return nullptr;
+    }
+
+    static constexpr const char *BLIT_HLSL = R"(
+Texture2DArray<float4> SourceTexture : register(t0);
+SamplerState SourceSampler : register(s0);
+
+cbuffer BlitConstants : register(b0) {
+    float4 SrcRect;
+    float4 DstRect;
+    float4 SrcInfo;
+};
+
+struct VSOut {
+    float4 position : SV_Position;
+};
+
+VSOut VSMain(uint vertexId : SV_VertexID) {
+    float2 pos = float2((vertexId == 2) ? 3.0 : -1.0, (vertexId == 1) ? 3.0 : -1.0);
+    VSOut output;
+    output.position = float4(pos, 0.0, 1.0);
+    return output;
+}
+
+float4 PSMain(VSOut input) : SV_Target {
+    float2 dstUV = (input.position.xy - DstRect.xy) / DstRect.zw;
+    float2 srcPixel = SrcRect.xy + dstUV * SrcRect.zw;
+    float2 uv = srcPixel * SrcInfo.xy;
+    return SourceTexture.SampleLevel(SourceSampler, float3(uv, SrcInfo.z), 0.0);
+}
+)";
+
+    Microsoft::WRL::ComPtr<ID3DBlob> vsBlob;
+    Microsoft::WRL::ComPtr<ID3DBlob> psBlob;
+    hr = D3DCompile(BLIT_HLSL, std::strlen(BLIT_HLSL), "D3D12Blit", nullptr, nullptr, "VSMain", "vs_5_1", 0, 0, &vsBlob, &errorBlob);
+    if (FAILED(hr)) {
+        CC_LOG_ERROR("D3D12 blit VS compile failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+        return nullptr;
+    }
+    hr = D3DCompile(BLIT_HLSL, std::strlen(BLIT_HLSL), "D3D12Blit", nullptr, nullptr, "PSMain", "ps_5_1", 0, 0, &psBlob, &errorBlob);
+    if (FAILED(hr)) {
+        CC_LOG_ERROR("D3D12 blit PS compile failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+        return nullptr;
+    }
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc{};
+    psoDesc.pRootSignature = pipeline.rootSignature.Get();
+    psoDesc.VS = {vsBlob->GetBufferPointer(), vsBlob->GetBufferSize()};
+    psoDesc.PS = {psBlob->GetBufferPointer(), psBlob->GetBufferSize()};
+    psoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    psoDesc.SampleMask = UINT_MAX;
+    psoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    psoDesc.RasterizerState.DepthClipEnable = TRUE;
+    psoDesc.DepthStencilState.DepthEnable = FALSE;
+    psoDesc.DepthStencilState.StencilEnable = FALSE;
+    psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    psoDesc.NumRenderTargets = 1;
+    psoDesc.RTVFormats[0] = rtvFormat;
+    psoDesc.SampleDesc.Count = 1;
+
+    hr = device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&pipeline.pipelineState));
+    if (FAILED(hr)) {
+        CC_LOG_ERROR("D3D12 blit PSO creation failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+        return nullptr;
+    }
+
+    auto inserted = pipelines.emplace(key, std::move(pipeline));
+    return &inserted.first->second;
+}
+
+bool shaderBlitRegion(ID3D12Device *device,
+                      ID3D12GraphicsCommandList *commandList,
+                      ID3D12Resource *srcResource,
+                      ID3D12Resource *dstResource,
+                      const TextureInfo &srcInfo,
+                      const TextureInfo &dstInfo,
+                      const TextureBlit &region,
+                      uint32_t srcLayer,
+                      uint32_t dstLayer,
+                      Filter filter,
+                      ccstd::vector<Microsoft::WRL::ComPtr<ID3D12DescriptorHeap>> &pendingDescriptorHeaps) {
+    const DXGI_FORMAT srvFormat = toBlitDXGIFormat(srcInfo.format);
+    const DXGI_FORMAT rtvFormat = toBlitDXGIFormat(dstInfo.format);
+    auto *pipeline = getOrCreateBlitPipeline(device, rtvFormat);
+    if (!pipeline) return false;
+
+    D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc{};
+    srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    srvHeapDesc.NumDescriptors = 1;
+    srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> srvHeap;
+    HRESULT hr = device->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&srvHeap));
+    if (FAILED(hr)) return false;
+
+    D3D12_DESCRIPTOR_HEAP_DESC samplerHeapDesc{};
+    samplerHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
+    samplerHeapDesc.NumDescriptors = 1;
+    samplerHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> samplerHeap;
+    hr = device->CreateDescriptorHeap(&samplerHeapDesc, IID_PPV_ARGS(&samplerHeap));
+    if (FAILED(hr)) return false;
+
+    D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc{};
+    rtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    rtvHeapDesc.NumDescriptors = 1;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> rtvHeap;
+    hr = device->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(&rtvHeap));
+    if (FAILED(hr)) return false;
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+    srvDesc.Format = srvFormat;
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Texture2DArray.MostDetailedMip = region.srcSubres.mipLevel;
+    srvDesc.Texture2DArray.MipLevels = 1;
+    srvDesc.Texture2DArray.FirstArraySlice = srcLayer;
+    srvDesc.Texture2DArray.ArraySize = 1;
+    device->CreateShaderResourceView(srcResource, &srvDesc, srvHeap->GetCPUDescriptorHandleForHeapStart());
+
+    D3D12_SAMPLER_DESC samplerDesc{};
+    samplerDesc.Filter = filter == Filter::POINT ? D3D12_FILTER_MIN_MAG_MIP_POINT : D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    samplerDesc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    samplerDesc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    samplerDesc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    samplerDesc.MaxLOD = D3D12_FLOAT32_MAX;
+    device->CreateSampler(&samplerDesc, samplerHeap->GetCPUDescriptorHandleForHeapStart());
+
+    D3D12_RENDER_TARGET_VIEW_DESC rtvDesc{};
+    rtvDesc.Format = rtvFormat;
+    rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
+    rtvDesc.Texture2DArray.MipSlice = region.dstSubres.mipLevel;
+    rtvDesc.Texture2DArray.FirstArraySlice = dstLayer;
+    rtvDesc.Texture2DArray.ArraySize = 1;
+    device->CreateRenderTargetView(dstResource, &rtvDesc, rtvHeap->GetCPUDescriptorHandleForHeapStart());
+
+    ID3D12DescriptorHeap *heaps[] = {srvHeap.Get(), samplerHeap.Get()};
+    commandList->SetDescriptorHeaps(2, heaps);
+    commandList->SetGraphicsRootSignature(pipeline->rootSignature.Get());
+    commandList->SetGraphicsRootDescriptorTable(0, srvHeap->GetGPUDescriptorHandleForHeapStart());
+    commandList->SetGraphicsRootDescriptorTable(1, samplerHeap->GetGPUDescriptorHandleForHeapStart());
+
+    const uint32_t srcMipWidth = std::max<uint32_t>(srcInfo.width >> region.srcSubres.mipLevel, 1);
+    const uint32_t srcMipHeight = std::max<uint32_t>(srcInfo.height >> region.srcSubres.mipLevel, 1);
+    struct BlitConstants {
+        float srcRect[4];
+        float dstRect[4];
+        float srcInfo[4];
+    } constants{
+        {static_cast<float>(region.srcOffset.x), static_cast<float>(region.srcOffset.y),
+         static_cast<float>(region.srcExtent.width), static_cast<float>(region.srcExtent.height)},
+        {static_cast<float>(region.dstOffset.x), static_cast<float>(region.dstOffset.y),
+         static_cast<float>(region.dstExtent.width), static_cast<float>(region.dstExtent.height)},
+        {1.0F / static_cast<float>(srcMipWidth), 1.0F / static_cast<float>(srcMipHeight),
+         0.0F, 0.0F},
+    };
+    commandList->SetGraphicsRoot32BitConstants(2, 12, &constants, 0);
+
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = rtvHeap->GetCPUDescriptorHandleForHeapStart();
+    commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+    D3D12_VIEWPORT viewport{};
+    viewport.TopLeftX = static_cast<float>(region.dstOffset.x);
+    viewport.TopLeftY = static_cast<float>(region.dstOffset.y);
+    viewport.Width = static_cast<float>(region.dstExtent.width);
+    viewport.Height = static_cast<float>(region.dstExtent.height);
+    viewport.MinDepth = 0.0F;
+    viewport.MaxDepth = 1.0F;
+    commandList->RSSetViewports(1, &viewport);
+    D3D12_RECT scissor{
+        static_cast<LONG>(region.dstOffset.x),
+        static_cast<LONG>(region.dstOffset.y),
+        static_cast<LONG>(region.dstOffset.x + region.dstExtent.width),
+        static_cast<LONG>(region.dstOffset.y + region.dstExtent.height),
+    };
+    commandList->RSSetScissorRects(1, &scissor);
+    commandList->SetPipelineState(pipeline->pipelineState.Get());
+    commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    commandList->DrawInstanced(3, 1, 0, 0);
+    pendingDescriptorHeaps.push_back(std::move(srvHeap));
+    pendingDescriptorHeaps.push_back(std::move(samplerHeap));
+    pendingDescriptorHeaps.push_back(std::move(rtvHeap));
+    return true;
+}
+
+bool canGenerateMipmaps(const TextureInfo &textureInfo, ID3D12Resource *resource) {
+    if (!resource || !hasFlag(textureInfo.flags, TextureFlagBit::GEN_MIPMAP) ||
+        textureInfo.levelCount <= 1 || textureInfo.samples != SampleCount::X1 ||
+        textureInfo.type == TextureType::TEX3D) {
+        return false;
+    }
+
+    const auto &formatInfo = GFX_FORMAT_INFOS[toNumber(textureInfo.format)];
+    if (formatInfo.hasDepth || formatInfo.hasStencil || formatInfo.isCompressed ||
+        formatInfo.type == FormatType::UINT || formatInfo.type == FormatType::INT) {
+        return false;
+    }
+    return (resource->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0 &&
+           toBlitDXGIFormat(textureInfo.format) != DXGI_FORMAT_UNKNOWN;
+}
+
+bool generateMipmaps(ID3D12Device *device,
+                     ID3D12GraphicsCommandList *commandList,
+                     ID3D12Resource *resource,
+                     const TextureInfo &textureInfo,
+                     ccstd::vector<Microsoft::WRL::ComPtr<ID3D12DescriptorHeap>> &pendingDescriptorHeaps) {
+    if (!canGenerateMipmaps(textureInfo, resource)) {
+        if (hasFlag(textureInfo.flags, TextureFlagBit::GEN_MIPMAP) && textureInfo.levelCount > 1) {
+            CC_LOG_WARNING("[D3D12-MIP-DIAG] generation rejected resource=%p size=%ux%u levels=%u format=%u flags=0x%x",
+                           resource, textureInfo.width, textureInfo.height, textureInfo.levelCount,
+                           static_cast<unsigned>(textureInfo.format),
+                           resource ? static_cast<unsigned>(resource->GetDesc().Flags) : 0U);
+        }
+        return false;
+    }
+
+    const uint32_t mipCount = textureInfo.levelCount;
+    const uint32_t layerCount = std::max<uint32_t>(textureInfo.layerCount, 1);
+    for (uint32_t mip = 1; mip < mipCount; ++mip) {
+        const uint32_t srcWidth = std::max<uint32_t>(textureInfo.width >> (mip - 1), 1);
+        const uint32_t srcHeight = std::max<uint32_t>(textureInfo.height >> (mip - 1), 1);
+        const uint32_t dstWidth = std::max<uint32_t>(textureInfo.width >> mip, 1);
+        const uint32_t dstHeight = std::max<uint32_t>(textureInfo.height >> mip, 1);
+
+        for (uint32_t layer = 0; layer < layerCount; ++layer) {
+            const uint32_t srcSubresource = (mip - 1) + layer * mipCount;
+            const uint32_t dstSubresource = mip + layer * mipCount;
+
+            D3D12_RESOURCE_BARRIER preBarriers[2]{};
+            preBarriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            preBarriers[0].Transition.pResource = resource;
+            preBarriers[0].Transition.Subresource = srcSubresource;
+            preBarriers[0].Transition.StateBefore =
+                mip == 1 ? D3D12_RESOURCE_STATE_COPY_DEST : D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            preBarriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+            preBarriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            preBarriers[1].Transition.pResource = resource;
+            preBarriers[1].Transition.Subresource = dstSubresource;
+            preBarriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+            preBarriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+
+            const UINT preBarrierCount = mip == 1 ? 2U : 1U;
+            commandList->ResourceBarrier(preBarrierCount, mip == 1 ? preBarriers : &preBarriers[1]);
+
+            TextureBlit region{};
+            region.srcSubres.mipLevel = mip - 1;
+            region.srcSubres.baseArrayLayer = layer;
+            region.srcExtent = {srcWidth, srcHeight, 1};
+            region.dstSubres.mipLevel = mip;
+            region.dstSubres.baseArrayLayer = layer;
+            region.dstExtent = {dstWidth, dstHeight, 1};
+            if (!shaderBlitRegion(device, commandList, resource, resource,
+                                  textureInfo, textureInfo, region, layer, layer,
+                                  Filter::LINEAR, pendingDescriptorHeaps)) {
+                return false;
+            }
+
+            D3D12_RESOURCE_BARRIER toShaderRead{};
+            toShaderRead.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            toShaderRead.Transition.pResource = resource;
+            toShaderRead.Transition.Subresource = dstSubresource;
+            toShaderRead.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+            toShaderRead.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            commandList->ResourceBarrier(1, &toShaderRead);
+        }
+    }
+    return true;
+}
 } // namespace
+
+bool generateD3D12Mipmaps(
+    ID3D12Device *device,
+    ID3D12GraphicsCommandList *commandList,
+    ID3D12Resource *resource,
+    const TextureInfo &textureInfo,
+    ccstd::vector<Microsoft::WRL::ComPtr<ID3D12DescriptorHeap>> &pendingDescriptorHeaps) {
+    return generateMipmaps(device, commandList, resource, textureInfo, pendingDescriptorHeaps);
+}
 
 struct CCD3D12CommandBuffer::Impl {
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator> commandAllocator;
@@ -123,6 +498,9 @@ struct CCD3D12CommandBuffer::Impl {
 
     // Track swapchain for resource barriers during render pass
     CCD3D12Swapchain *activeSwapchain{nullptr};
+    RenderPass *activeRenderPass{nullptr};
+    CCD3D12Framebuffer *activeFramebuffer{nullptr};
+    uint32_t currentSubpass{0};
     ID3D12Resource *activeSwapchainBackBuffer{nullptr};
     ID3D12Resource *activeDepthStencil{nullptr};
     CCD3D12Texture *activeDepthTexture{nullptr};
@@ -144,12 +522,24 @@ struct CCD3D12CommandBuffer::Impl {
     PendingDescriptorSet pendingSets[D3D12_MAX_BOUND_SETS]{};
     uint32_t pendingSetCount{0};
     bool descriptorSetsDirty{false};
+    ID3D12DescriptorHeap *boundCbvSrvUavHeap{nullptr};
+    ID3D12DescriptorHeap *boundSamplerHeap{nullptr};
+
+    float dynamicDepthBias{0.F};
+    float dynamicDepthBiasClamp{0.F};
+    float dynamicDepthBiasSlope{0.F};
+    uint32_t dynamicStencilReadMask{0xFFFFFFFFU};
+    uint32_t dynamicStencilWriteMask{0xFFFFFFFFU};
+    bool hasDynamicDepthBias{false};
+    bool hasDynamicStencilReadMask{false};
+    bool hasDynamicStencilWriteMask{false};
 
     // Upload resources created during copyBuffersToTexture must remain alive
     // until the GPU finishes executing the command list. They are released at
     // the start of the next begin() call, by which point the Queue has
     // already waited for the previous frame's GPU work to complete.
     ccstd::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> pendingUploadResources;
+    ccstd::vector<Microsoft::WRL::ComPtr<ID3D12DescriptorHeap>> pendingDescriptorHeaps;
 };
 
 CCD3D12CommandBuffer::CCD3D12CommandBuffer()
@@ -159,7 +549,6 @@ CCD3D12CommandBuffer::CCD3D12CommandBuffer()
 CCD3D12CommandBuffer::~CCD3D12CommandBuffer() = default;
 
 void CCD3D12CommandBuffer::doInit(const CommandBufferInfo &info) {
-    (void)info;
     auto *device = CCD3D12Device::getInstance();
     if (!device) {
         CC_LOG_ERROR("D3D12CommandBuffer: device not available.");
@@ -173,9 +562,12 @@ void CCD3D12CommandBuffer::doInit(const CommandBufferInfo &info) {
     }
 
     _impl->d3dDevice = d3dDevice;
+    const D3D12_COMMAND_LIST_TYPE commandListType = info.type == CommandBufferType::SECONDARY
+                                                       ? D3D12_COMMAND_LIST_TYPE_BUNDLE
+                                                       : D3D12_COMMAND_LIST_TYPE_DIRECT;
 
     HRESULT hr = d3dDevice->CreateCommandAllocator(
-        D3D12_COMMAND_LIST_TYPE_DIRECT,
+        commandListType,
         IID_PPV_ARGS(&_impl->commandAllocator));
     if (FAILED(hr)) {
         CC_LOG_ERROR("D3D12CommandBuffer: CreateCommandAllocator failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
@@ -184,7 +576,7 @@ void CCD3D12CommandBuffer::doInit(const CommandBufferInfo &info) {
 
     hr = d3dDevice->CreateCommandList(
         0,
-        D3D12_COMMAND_LIST_TYPE_DIRECT,
+        commandListType,
         _impl->commandAllocator.Get(),
         nullptr,
         IID_PPV_ARGS(&_impl->commandList));
@@ -200,7 +592,8 @@ void CCD3D12CommandBuffer::doInit(const CommandBufferInfo &info) {
         return;
     }
 
-    CC_LOG_INFO("D3D12CommandBuffer initialized.");
+    CC_LOG_INFO("D3D12CommandBuffer initialized as %s.",
+                info.type == CommandBufferType::SECONDARY ? "bundle" : "direct list");
 }
 
 void CCD3D12CommandBuffer::doDestroy() {
@@ -235,19 +628,13 @@ void CCD3D12CommandBuffer::begin(RenderPass *renderPass, uint32_t subpass, Frame
         return;
     }
 
-    if (auto *device = CCD3D12Device::getInstance()) {
-        if (auto *heapPool = device->getGPUDescriptorHeapPool()) {
-            heapPool->reset();
-        }
-        if (auto *samplerPool = device->getSamplerDescriptorHeapPool()) {
-            samplerPool->reset();
-        }
-    }
-
     _impl->isRecording = true;
     _impl->boundPipelineState = nullptr;
     _impl->boundPipelineLayout = nullptr;
     _impl->activeSwapchain = nullptr;
+    _impl->activeRenderPass = nullptr;
+    _impl->activeFramebuffer = nullptr;
+    _impl->currentSubpass = 0;
     _impl->activeSwapchainBackBuffer = nullptr;
     _impl->activeDepthStencil = nullptr;
     _impl->activeDepthTexture = nullptr;
@@ -255,12 +642,23 @@ void CCD3D12CommandBuffer::begin(RenderPass *renderPass, uint32_t subpass, Frame
     _impl->inRenderPass = false;
     // Queue::submit() has already waited for GPU completion.
     _impl->pendingUploadResources.clear();
+    _impl->pendingDescriptorHeaps.clear();
     // Clear pending descriptor sets
     for (uint32_t i = 0; i < D3D12_MAX_BOUND_SETS; ++i) {
         _impl->pendingSets[i] = {};
     }
     _impl->pendingSetCount = 0;
     _impl->descriptorSetsDirty = false;
+    _impl->boundCbvSrvUavHeap = nullptr;
+    _impl->boundSamplerHeap = nullptr;
+    _impl->dynamicDepthBias = 0.F;
+    _impl->dynamicDepthBiasClamp = 0.F;
+    _impl->dynamicDepthBiasSlope = 0.F;
+    _impl->dynamicStencilReadMask = 0xFFFFFFFFU;
+    _impl->dynamicStencilWriteMask = 0xFFFFFFFFU;
+    _impl->hasDynamicDepthBias = false;
+    _impl->hasDynamicStencilReadMask = false;
+    _impl->hasDynamicStencilWriteMask = false;
     _numDrawCalls = 0;
     _numInstances = 0;
     _numTriangles = 0;
@@ -308,6 +706,10 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
     (void)secondaryCBs;
     (void)secondaryCBCount;
     if (!_impl->commandList) return;
+    if (_type == CommandBufferType::SECONDARY) {
+        CC_LOG_ERROR("D3D12 bundle cannot begin a render pass.");
+        return;
+    }
 
     auto *d3d12Fbo = static_cast<CCD3D12Framebuffer *>(fbo);
     if (!d3d12Fbo) {
@@ -342,6 +744,9 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
 
     const uint32_t fboWidth = d3d12Fbo->getWidth();
     const uint32_t fboHeight = d3d12Fbo->getHeight();
+    _impl->activeRenderPass = renderPass;
+    _impl->activeFramebuffer = d3d12Fbo;
+    _impl->currentSubpass = 0;
 
     // Count color attachments from the D3D12 framebuffer cache. Repaired
     // offscreen targets may only have a cached ID3D12Resource, not a live
@@ -505,6 +910,11 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
 }
 
 void CCD3D12CommandBuffer::endRenderPass() {
+    if (_type == CommandBufferType::SECONDARY) {
+        CC_LOG_ERROR("D3D12 bundle cannot end a render pass.");
+        return;
+    }
+
     D3D12_RESOURCE_BARRIER postPassBarriers[MAX_PASS_BARRIERS];
     uint32_t postPassBarrierCount = 0;
 
@@ -585,24 +995,68 @@ void CCD3D12CommandBuffer::endRenderPass() {
     }
 
     _impl->inRenderPass = false;
+    _impl->activeRenderPass = nullptr;
+    _impl->activeFramebuffer = nullptr;
+    _impl->currentSubpass = 0;
     // D3D12 has no explicit endRenderPass beyond resource barriers
 }
 
 void CCD3D12CommandBuffer::insertMarker(const MarkerInfo &marker) {
-    (void)marker;
+    if (!_impl->commandList || marker.name.empty()) return;
+    _impl->commandList->SetMarker(0, marker.name.c_str(), static_cast<UINT>(marker.name.size() + 1));
 }
 
 void CCD3D12CommandBuffer::beginMarker(const MarkerInfo &marker) {
-    (void)marker;
+    if (!_impl->commandList || marker.name.empty()) return;
+    _impl->commandList->BeginEvent(0, marker.name.c_str(), static_cast<UINT>(marker.name.size() + 1));
 }
 
 void CCD3D12CommandBuffer::endMarker() {
+    if (!_impl->commandList) return;
+    _impl->commandList->EndEvent();
 }
 
 void CCD3D12CommandBuffer::execute(CommandBuffer *const *cmdBuffs, uint32_t count) {
-    (void)cmdBuffs;
-    (void)count;
-    // Bundles could be executed here but not needed for PoC
+    if (!_impl->commandList || !cmdBuffs || count == 0) return;
+    if (_type == CommandBufferType::SECONDARY) {
+        CC_LOG_ERROR("D3D12 bundles cannot execute nested command buffers.");
+        return;
+    }
+
+    for (uint32_t i = 0; i < count; ++i) {
+        if (!cmdBuffs[i]) continue;
+
+        auto *d3d12CmdBuff = static_cast<CCD3D12CommandBuffer *>(cmdBuffs[i]);
+        if (d3d12CmdBuff->getType() != CommandBufferType::SECONDARY) {
+            CC_LOG_WARNING("D3D12CommandBuffer::execute skipped non-secondary command buffer at index %u.", i);
+            continue;
+        }
+
+        auto *bundle = static_cast<ID3D12GraphicsCommandList *>(d3d12CmdBuff->getD3D12CommandList());
+        if (!bundle) continue;
+
+        ID3D12DescriptorHeap *bundleHeaps[2]{};
+        UINT bundleHeapCount = 0;
+        if (d3d12CmdBuff->_impl->boundCbvSrvUavHeap) {
+            bundleHeaps[bundleHeapCount++] = d3d12CmdBuff->_impl->boundCbvSrvUavHeap;
+        }
+        if (d3d12CmdBuff->_impl->boundSamplerHeap) {
+            bundleHeaps[bundleHeapCount++] = d3d12CmdBuff->_impl->boundSamplerHeap;
+        }
+        if (bundleHeapCount > 0) {
+            _impl->commandList->SetDescriptorHeaps(bundleHeapCount, bundleHeaps);
+            _impl->boundCbvSrvUavHeap = d3d12CmdBuff->_impl->boundCbvSrvUavHeap;
+            _impl->boundSamplerHeap = d3d12CmdBuff->_impl->boundSamplerHeap;
+        }
+
+        _impl->commandList->ExecuteBundle(bundle);
+        if (_impl->pendingSetCount > 0) {
+            _impl->descriptorSetsDirty = true;
+        }
+        _numDrawCalls += d3d12CmdBuff->getNumDrawCalls();
+        _numInstances += d3d12CmdBuff->getNumInstances();
+        _numTriangles += d3d12CmdBuff->getNumTris();
+    }
 }
 
 void CCD3D12CommandBuffer::bindPipelineState(PipelineState *pso) {
@@ -656,6 +1110,46 @@ void CCD3D12CommandBuffer::bindPipelineState(PipelineState *pso) {
     }
 
     _impl->boundPipelineState = pso;
+    applyDynamicPipelineState();
+}
+
+void CCD3D12CommandBuffer::applyDynamicPipelineState() {
+    if (!_impl->commandList || !_impl->boundPipelineState) {
+        return;
+    }
+
+    auto *d3d12PSO = static_cast<CCD3D12PipelineState *>(_impl->boundPipelineState);
+    const auto dynamicStates = d3d12PSO->getDynamicStates();
+    const auto &rasterizer = d3d12PSO->getRasterizerState();
+    const auto &depthStencil = d3d12PSO->getDepthStencilState();
+
+    const bool dynamicDepthBias = hasFlag(dynamicStates, DynamicStateFlagBit::DEPTH_BIAS) &&
+                                  _impl->hasDynamicDepthBias;
+    const bool dynamicStencilReadMask = hasFlag(dynamicStates, DynamicStateFlagBit::STENCIL_COMPARE_MASK) &&
+                                        _impl->hasDynamicStencilReadMask;
+    const bool dynamicStencilWriteMask = hasFlag(dynamicStates, DynamicStateFlagBit::STENCIL_WRITE_MASK) &&
+                                         _impl->hasDynamicStencilWriteMask;
+    if (!dynamicDepthBias && !dynamicStencilReadMask && !dynamicStencilWriteMask) {
+        return;
+    }
+
+    const bool useFrontStencilMask = depthStencil.stencilTestFront || !depthStencil.stencilTestBack;
+    const float depthBias = dynamicDepthBias ? _impl->dynamicDepthBias : rasterizer.depthBias;
+    const float depthBiasClamp = dynamicDepthBias ? _impl->dynamicDepthBiasClamp : rasterizer.depthBiasClamp;
+    const float depthBiasSlope = dynamicDepthBias ? _impl->dynamicDepthBiasSlope : rasterizer.depthBiasSlop;
+    const uint32_t stencilReadMask = dynamicStencilReadMask
+                                         ? _impl->dynamicStencilReadMask
+                                         : (useFrontStencilMask ? depthStencil.stencilReadMaskFront : depthStencil.stencilReadMaskBack);
+    const uint32_t stencilWriteMask = dynamicStencilWriteMask
+                                          ? _impl->dynamicStencilWriteMask
+                                          : (useFrontStencilMask ? depthStencil.stencilWriteMaskFront : depthStencil.stencilWriteMaskBack);
+
+    auto *variant = static_cast<ID3D12PipelineState *>(
+        d3d12PSO->getDynamicID3D12PipelineState(depthBias, depthBiasClamp, depthBiasSlope,
+                                                stencilReadMask, stencilWriteMask));
+    if (variant) {
+        _impl->commandList->SetPipelineState(variant);
+    }
 }
 
 void CCD3D12CommandBuffer::bindDescriptorSet(uint32_t set, DescriptorSet *descriptorSet, uint32_t dynamicOffsetCount, const uint32_t *dynamicOffsets) {
@@ -833,7 +1327,21 @@ void CCD3D12CommandBuffer::flushDescriptorSets() {
     }
 
     if (boundHeapCount > 0) {
-        _impl->commandList->SetDescriptorHeaps(boundHeapCount, boundHeaps);
+        bool setDescriptorHeaps = true;
+        if (_type == CommandBufferType::SECONDARY) {
+            const bool bundleAlreadyBoundHeaps = _impl->boundCbvSrvUavHeap || _impl->boundSamplerHeap;
+            if (bundleAlreadyBoundHeaps &&
+                (_impl->boundCbvSrvUavHeap != cbvHeap || _impl->boundSamplerHeap != samplerHeap)) {
+                CC_LOG_ERROR("D3D12 bundle descriptor allocation changed heap objects; bundle recording is invalid.");
+                return;
+            }
+            setDescriptorHeaps = !bundleAlreadyBoundHeaps;
+        }
+        if (setDescriptorHeaps) {
+            _impl->commandList->SetDescriptorHeaps(boundHeapCount, boundHeaps);
+        }
+        _impl->boundCbvSrvUavHeap = cbvHeap;
+        _impl->boundSamplerHeap = samplerHeap;
     }
 
     // Set all root descriptor tables
@@ -871,6 +1379,10 @@ void CCD3D12CommandBuffer::bindInputAssembler(InputAssembler *ia) {
 
 void CCD3D12CommandBuffer::setViewport(const Viewport &vp) {
     if (!_impl->commandList) return;
+    if (_type == CommandBufferType::SECONDARY) {
+        CC_LOG_ERROR("D3D12 bundle cannot set viewport state.");
+        return;
+    }
 
     D3D12_VIEWPORT d3dViewport{};
     d3dViewport.TopLeftX = static_cast<float>(vp.left);
@@ -884,6 +1396,10 @@ void CCD3D12CommandBuffer::setViewport(const Viewport &vp) {
 
 void CCD3D12CommandBuffer::setScissor(const Rect &rect) {
     if (!_impl->commandList) return;
+    if (_type == CommandBufferType::SECONDARY) {
+        CC_LOG_ERROR("D3D12 bundle cannot set scissor state.");
+        return;
+    }
 
     D3D12_RECT d3dRect{};
     d3dRect.left = rect.x;
@@ -896,16 +1412,16 @@ void CCD3D12CommandBuffer::setScissor(const Rect &rect) {
 void CCD3D12CommandBuffer::setLineWidth(float width) {
     (void)width;
     if (width != 1.0f) {
-        CC_LOG_WARNING("[D3D12] setLineWidth(%.1f) ignored — D3D12 does not support line width > 1", width);
+        CC_LOG_WARNING("[D3D12] setLineWidth(%.1f) ignored - D3D12 does not support line width > 1", width);
     }
 }
 
 void CCD3D12CommandBuffer::setDepthBias(float constant, float clamp, float slope) {
-    (void)constant;
-    (void)clamp;
-    (void)slope;
-    // D3D12 does not support dynamic depth bias via command list.
-    // Depth bias is set in the rasterizer state during PSO creation.
+    _impl->dynamicDepthBias = constant;
+    _impl->dynamicDepthBiasClamp = clamp;
+    _impl->dynamicDepthBiasSlope = slope;
+    _impl->hasDynamicDepthBias = true;
+    applyDynamicPipelineState();
 }
 
 void CCD3D12CommandBuffer::setBlendConstants(const Color &constants) {
@@ -924,20 +1440,138 @@ void CCD3D12CommandBuffer::setDepthBound(float minBounds, float maxBounds) {
 }
 
 void CCD3D12CommandBuffer::setStencilWriteMask(StencilFace face, uint32_t mask) {
-    (void)face;
-    (void)mask;
-    CC_LOG_WARNING("[D3D12] setStencilWriteMask(face=%u, mask=0x%x) ignored — set in pipeline state", static_cast<unsigned>(face), mask);
+    if (face != StencilFace::ALL) {
+        CC_LOG_WARNING("D3D12 setStencilWriteMask: per-face masks are not supported; applying mask globally.");
+    }
+    _impl->dynamicStencilWriteMask = mask;
+    _impl->hasDynamicStencilWriteMask = true;
+    applyDynamicPipelineState();
 }
 
 void CCD3D12CommandBuffer::setStencilCompareMask(StencilFace face, uint32_t ref, uint32_t mask) {
     if (!_impl->commandList) return;
-    (void)face;
-    (void)mask;
+    if (face != StencilFace::ALL) {
+        CC_LOG_WARNING("D3D12 setStencilCompareMask: per-face masks/references are not supported; applying them globally.");
+    }
+    _impl->dynamicStencilReadMask = mask;
+    _impl->hasDynamicStencilReadMask = true;
     _impl->commandList->OMSetStencilRef(ref);
+    applyDynamicPipelineState();
 }
 
 void CCD3D12CommandBuffer::nextSubpass() {
-    // D3D12 doesn't have explicit subpasses
+    if (!_impl->commandList || !_impl->inRenderPass || !_impl->activeRenderPass || !_impl->activeFramebuffer) {
+        return;
+    }
+    if (_type == CommandBufferType::SECONDARY) {
+        CC_LOG_ERROR("D3D12 bundle cannot change subpasses.");
+        return;
+    }
+
+    const auto &subpasses = _impl->activeRenderPass->getSubpasses();
+    if (subpasses.empty()) {
+        return;
+    }
+
+    const uint32_t nextSubpassIndex = _impl->currentSubpass + 1;
+    if (nextSubpassIndex >= subpasses.size()) {
+        CC_LOG_WARNING("D3D12 nextSubpass ignored: requested subpass %u but render pass has %zu subpasses.",
+                       nextSubpassIndex, subpasses.size());
+        return;
+    }
+
+    auto *framebuffer = _impl->activeFramebuffer;
+    const auto &subpass = subpasses[nextSubpassIndex];
+    auto containsAttachment = [](const ccstd::vector<uint32_t> &attachments, uint32_t index) {
+        return std::find(attachments.begin(), attachments.end(), index) != attachments.end();
+    };
+    auto transitionColor = [this, framebuffer](uint32_t index, D3D12_RESOURCE_STATES nextState) {
+        if (index >= framebuffer->getColorTextureCount()) {
+            CC_LOG_WARNING("D3D12 nextSubpass: color attachment index %u is outside framebuffer color count %u.",
+                           index, framebuffer->getColorTextureCount());
+            return;
+        }
+
+        auto *resource = static_cast<ID3D12Resource *>(framebuffer->getColorResource(index));
+        if (!resource) {
+            return;
+        }
+
+        auto *texture = framebuffer->getColorTexture(index);
+        const bool hasTextureState = texture && framebuffer->hasColorTextureState(index);
+        const D3D12_RESOURCE_STATES prevState = hasTextureState
+                                                   ? texture->getCurrentState()
+                                                   : CCD3D12Texture::getTrackedResourceState(resource, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        if (prevState == nextState) {
+            return;
+        }
+
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        barrier.Transition.pResource = resource;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        barrier.Transition.StateBefore = prevState;
+        barrier.Transition.StateAfter = nextState;
+        _impl->commandList->ResourceBarrier(1, &barrier);
+
+        if (hasTextureState) {
+            texture->setCurrentState(nextState);
+        } else {
+            CCD3D12Texture::setTrackedResourceState(resource, nextState);
+        }
+    };
+
+    for (uint32_t input : subpass.inputs) {
+        if (containsAttachment(subpass.colors, input)) {
+            CC_LOG_WARNING("D3D12 nextSubpass: input/color self-dependency on attachment %u is not natively expressible; "
+                           "keeping it as a render target.",
+                           input);
+            continue;
+        }
+        transitionColor(input, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    }
+
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandles[MAX_ATTACHMENTS]{};
+    uint32_t rtvCount = 0;
+    for (uint32_t color : subpass.colors) {
+        if (rtvCount >= MAX_ATTACHMENTS) {
+            CC_LOG_WARNING("D3D12 nextSubpass: too many color attachments; truncating to %u.", MAX_ATTACHMENTS);
+            break;
+        }
+        transitionColor(color, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        auto handle = framebuffer->getRTVHandle(color);
+        if (handle.ptr == 0) {
+            CC_LOG_WARNING("D3D12 nextSubpass: RTV handle[%u] is NULL.", color);
+            continue;
+        }
+        rtvHandles[rtvCount++].ptr = handle.ptr;
+    }
+
+    D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle{};
+    const bool hasDSV = subpass.depthStencil != INVALID_BINDING;
+    if (hasDSV) {
+        auto dsvPair = framebuffer->getDSVHandle();
+        dsvHandle.ptr = dsvPair.ptr;
+        if (_impl->activeDepthStencil && _impl->activeDepthTexture) {
+            const D3D12_RESOURCE_STATES prevState = _impl->activeDepthTexture->getCurrentState();
+            if (prevState != D3D12_RESOURCE_STATE_DEPTH_WRITE) {
+                D3D12_RESOURCE_BARRIER barrier{};
+                barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+                barrier.Transition.pResource = _impl->activeDepthStencil;
+                barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                barrier.Transition.StateBefore = prevState;
+                barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+                _impl->commandList->ResourceBarrier(1, &barrier);
+                _impl->activeDepthTexture->setCurrentState(D3D12_RESOURCE_STATE_DEPTH_WRITE);
+            }
+        }
+    }
+
+    _impl->commandList->OMSetRenderTargets(rtvCount, rtvCount > 0 ? rtvHandles : nullptr, FALSE,
+                                           (hasDSV && dsvHandle.ptr != 0) ? &dsvHandle : nullptr);
+    _impl->currentSubpass = nextSubpassIndex;
 }
 
 void CCD3D12CommandBuffer::draw(const DrawInfo &info) {
@@ -948,16 +1582,6 @@ void CCD3D12CommandBuffer::draw(const DrawInfo &info) {
 
     const uint32_t instanceCount = std::max<uint32_t>(info.instanceCount, 1);
     const uint32_t firstInstance = info.firstInstance;
-    auto *d3d12PSO = static_cast<CCD3D12PipelineState *>(_impl->boundPipelineState);
-
-    if (d3d12PSO && d3d12PSO->isDiagnosticFallback()) {
-        _impl->commandList->DrawInstanced(3, 1, 0, 0);
-        ++_numDrawCalls;
-        _numInstances += 1;
-        _numTriangles += 1;
-        return;
-    }
-
     // Check for indirect draw via InputAssembler's indirect buffer
     if (_impl->boundIA) {
         auto *ia = static_cast<CCD3D12InputAssembler *>(_impl->boundIA);
@@ -1098,6 +1722,10 @@ void CCD3D12CommandBuffer::updateBuffer(Buffer *buff, const void *data, uint32_t
 
 void CCD3D12CommandBuffer::copyBuffersToTexture(const uint8_t *const *buffers, Texture *texture, const BufferTextureCopy *regions, uint32_t count) {
     if (!_impl->commandList || !buffers || !texture || !regions || count == 0) return;
+    if (_type == CommandBufferType::SECONDARY) {
+        CC_LOG_ERROR("D3D12 bundle cannot copy buffers to textures.");
+        return;
+    }
 
     auto *d3d12Texture = static_cast<CCD3D12Texture *>(texture);
     auto *textureResource = static_cast<ID3D12Resource *>(d3d12Texture->getD3D12ResourceHandle());
@@ -1110,8 +1738,7 @@ void CCD3D12CommandBuffer::copyBuffersToTexture(const uint8_t *const *buffers, T
     if (!d3dDevice) return;
 
     const auto &textureInfo = texture->getInfo();
-    const uint32_t bytesPerTexel = GFX_FORMAT_INFOS[toNumber(textureInfo.format)].size;
-    if (bytesPerTexel == 0) return;
+    if (formatSize(textureInfo.format, 1, 1, 1) == 0) return;
 
     // Transition to copy dest
     D3D12_RESOURCE_BARRIER toCopyDest{};
@@ -1172,10 +1799,13 @@ void CCD3D12CommandBuffer::copyBuffersToTexture(const uint8_t *const *buffers, T
 
         const uint32_t srcRowTexels = region.buffStride > 0 ? region.buffStride : region.texExtent.width;
         const uint32_t srcRows = region.buffTexHeight > 0 ? region.buffTexHeight : region.texExtent.height;
-        const uint32_t srcRowPitch = srcRowTexels * bytesPerTexel;
-        const uint32_t srcSlicePitch = srcRowPitch * srcRows;
-        const uint32_t copyRowBytes = region.texExtent.width * bytesPerTexel;
-        const uint32_t copyRows = std::min<uint32_t>(region.texExtent.height, rowCount);
+        const uint32_t srcRowPitch = formatSize(textureInfo.format, srcRowTexels, 1, 1);
+        const uint32_t srcSlicePitch = formatSize(textureInfo.format, srcRowTexels, srcRows, 1);
+        const uint32_t copyRowBytes = formatSize(textureInfo.format, region.texExtent.width, 1, 1);
+        const auto blockAlignment = formatAlignment(textureInfo.format);
+        const uint32_t blockHeight = std::max<uint32_t>(blockAlignment.second, 1);
+        const uint32_t copyRows = std::min<uint32_t>(
+            (region.texExtent.height + blockHeight - 1) / blockHeight, rowCount);
         const uint32_t copyDepth = std::max<uint32_t>(region.texExtent.depth, 1);
         const auto *src = buffers[i] + region.buffOffset;
         auto *dst = static_cast<uint8_t *>(mappedData) + footprint.Offset;
@@ -1210,15 +1840,36 @@ void CCD3D12CommandBuffer::copyBuffersToTexture(const uint8_t *const *buffers, T
         srcBox.back = copyDepth;
 
         _impl->commandList->CopyTextureRegion(&dstLoc, region.texOffset.x, region.texOffset.y, region.texOffset.z, &srcLoc, &srcBox);
-        d3d12Texture->markMipLevelUploaded(mipLevel);
-
         // Transfer ownership to the pending list — keeps resource alive until
         // the next begin() call, by which point the GPU has finished execution.
         _impl->pendingUploadResources.push_back(std::move(uploadResource));
     }
 
-    // Transition back to appropriate state after copy
     D3D12_RESOURCE_STATES postCopyState = getPostTransferTextureState(textureInfo);
+    if (hasFlag(textureInfo.flags, TextureFlagBit::GEN_MIPMAP) && textureInfo.levelCount > 1) {
+        if (generateD3D12Mipmaps(d3dDevice, _impl->commandList.Get(), textureResource, textureInfo,
+                                 _impl->pendingDescriptorHeaps)) {
+            constexpr D3D12_RESOURCE_STATES GENERATED_STATE = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            if (postCopyState != GENERATED_STATE) {
+                D3D12_RESOURCE_BARRIER toPostCopy{};
+                toPostCopy.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                toPostCopy.Transition.pResource = textureResource;
+                toPostCopy.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                toPostCopy.Transition.StateBefore = GENERATED_STATE;
+                toPostCopy.Transition.StateAfter = postCopyState;
+                _impl->commandList->ResourceBarrier(1, &toPostCopy);
+            }
+            if (_impl->pendingSetCount > 0) {
+                _impl->descriptorSetsDirty = true;
+            }
+            d3d12Texture->setCurrentState(postCopyState);
+            return;
+        }
+        CC_LOG_WARNING("D3D12 failed to generate mipmaps for texture format %u; sampling is limited to uploaded levels.",
+                       static_cast<unsigned>(textureInfo.format));
+    }
+
+    // Transition back to appropriate state after copy.
     D3D12_RESOURCE_BARRIER toPostCopy{};
     toPostCopy.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     toPostCopy.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
@@ -1232,6 +1883,10 @@ void CCD3D12CommandBuffer::copyBuffersToTexture(const uint8_t *const *buffers, T
 
 void CCD3D12CommandBuffer::blitTexture(Texture *srcTexture, Texture *dstTexture, const TextureBlit *regions, uint32_t count, Filter filter) {
     if (!_impl->commandList || !srcTexture || !dstTexture || !regions || count == 0) return;
+    if (_type == CommandBufferType::SECONDARY) {
+        CC_LOG_ERROR("D3D12 bundle cannot blit textures.");
+        return;
+    }
 
     auto *srcD3D12 = static_cast<CCD3D12Texture *>(srcTexture);
     auto *dstD3D12 = static_cast<CCD3D12Texture *>(dstTexture);
@@ -1242,132 +1897,105 @@ void CCD3D12CommandBuffer::blitTexture(Texture *srcTexture, Texture *dstTexture,
     const auto &srcInfo = srcTexture->getInfo();
     const auto &dstInfo = dstTexture->getInfo();
 
-    CC_LOG_INFO("[D3D12] blitTexture: src=%ux%u dst=%ux%u regions=%u filter=%d",
-                srcInfo.width, srcInfo.height, dstInfo.width, dstInfo.height,
-                static_cast<unsigned>(count), static_cast<int>(filter));
-
-    // Transition src to COPY_SOURCE, dst to COPY_DEST
-    D3D12_RESOURCE_BARRIER preBarriers[4];
-    uint32_t preBarrierCount = 0;
-
-    D3D12_RESOURCE_STATES srcPrevState = srcD3D12->getCurrentState();
-    if (srcPrevState != D3D12_RESOURCE_STATE_COPY_SOURCE) {
-        D3D12_RESOURCE_BARRIER b{};
-        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-        b.Transition.pResource = srcResource;
-        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        b.Transition.StateBefore = srcPrevState;
-        b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-        if (preBarrierCount < 4) preBarriers[preBarrierCount++] = b;
-    }
-
-    D3D12_RESOURCE_STATES dstPrevState = dstD3D12->getCurrentState();
-    if (dstPrevState != D3D12_RESOURCE_STATE_COPY_DEST) {
-        D3D12_RESOURCE_BARRIER b{};
-        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-        b.Transition.pResource = dstResource;
-        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        b.Transition.StateBefore = dstPrevState;
-        b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-        if (preBarrierCount < 4) preBarriers[preBarrierCount++] = b;
-    }
-
-    if (preBarrierCount > 0) {
-        _impl->commandList->ResourceBarrier(preBarrierCount, preBarriers);
-    }
-    srcD3D12->setCurrentState(D3D12_RESOURCE_STATE_COPY_SOURCE);
-    dstD3D12->setCurrentState(D3D12_RESOURCE_STATE_COPY_DEST);
+    D3D12_RESOURCE_STATES srcState = srcD3D12->getCurrentState();
+    D3D12_RESOURCE_STATES dstState = dstD3D12->getCurrentState();
+    auto transitionIfNeeded = [&](ID3D12Resource *resource, D3D12_RESOURCE_STATES &currentState, D3D12_RESOURCE_STATES nextState) {
+        if (currentState == nextState) return;
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        barrier.Transition.pResource = resource;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        barrier.Transition.StateBefore = currentState;
+        barrier.Transition.StateAfter = nextState;
+        _impl->commandList->ResourceBarrier(1, &barrier);
+        currentState = nextState;
+    };
 
     for (uint32_t i = 0; i < count; ++i) {
         const auto &region = regions[i];
 
-        // Check if scaling is needed
         const bool needsScaling = (region.srcExtent.width != region.dstExtent.width ||
                                     region.srcExtent.height != region.dstExtent.height ||
                                     region.srcExtent.depth != region.dstExtent.depth);
+        const uint32_t layerCount = std::max<uint32_t>(std::min(region.srcSubres.layerCount, region.dstSubres.layerCount), 1);
 
         if (needsScaling) {
-            // D3D12 has no native blit with scaling. For now, log a warning and
-            // copy the source box to the destination offset without scaling.
-            // TODO: Implement full-screen quad render pass for scaled blit.
-            CC_LOG_WARNING("[D3D12] blitTexture region %u requires scaling (%ux%ux%u -> %ux%ux%u), "
-                           "which is not yet supported. Copying source size.",
-                           i, region.srcExtent.width, region.srcExtent.height, region.srcExtent.depth,
-                           region.dstExtent.width, region.dstExtent.height, region.dstExtent.depth);
+            if (!supportsShaderBlit(srcInfo, dstInfo)) {
+                CC_LOG_ERROR("[D3D12] blitTexture region %u requires scaling but format/type is unsupported. "
+                             "srcFormat=%u dstFormat=%u srcType=%u dstType=%u",
+                             i, static_cast<unsigned>(srcInfo.format), static_cast<unsigned>(dstInfo.format),
+                             static_cast<unsigned>(srcInfo.type), static_cast<unsigned>(dstInfo.type));
+                continue;
+            }
+
+            transitionIfNeeded(srcResource, srcState,
+                               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            transitionIfNeeded(dstResource, dstState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            for (uint32_t layer = 0; layer < layerCount; ++layer) {
+                const uint32_t srcLayer = region.srcSubres.baseArrayLayer + layer;
+                const uint32_t dstLayer = region.dstSubres.baseArrayLayer + layer;
+                if (!shaderBlitRegion(_impl->d3dDevice.Get(), _impl->commandList.Get(), srcResource, dstResource,
+                                      srcInfo, dstInfo, region, srcLayer, dstLayer, filter, _impl->pendingDescriptorHeaps)) {
+                    CC_LOG_ERROR("[D3D12] blitTexture shader blit failed for region %u layer %u.", i, layer);
+                }
+            }
+            continue;
         }
 
-        // Use CopyTextureRegion (same-size copy, no scaling)
-        const uint32_t srcSubresource = region.srcSubres.mipLevel +
-            region.srcSubres.baseArrayLayer * srcInfo.levelCount;
-        const uint32_t dstSubresource = region.dstSubres.mipLevel +
-            region.dstSubres.baseArrayLayer * dstInfo.levelCount;
+        transitionIfNeeded(srcResource, srcState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        transitionIfNeeded(dstResource, dstState, D3D12_RESOURCE_STATE_COPY_DEST);
 
-        D3D12_TEXTURE_COPY_LOCATION srcLoc{};
-        srcLoc.pResource = srcResource;
-        srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        srcLoc.SubresourceIndex = srcSubresource;
+        for (uint32_t layer = 0; layer < layerCount; ++layer) {
+            const uint32_t srcSubresource = region.srcSubres.mipLevel +
+                (region.srcSubres.baseArrayLayer + layer) * srcInfo.levelCount;
+            const uint32_t dstSubresource = region.dstSubres.mipLevel +
+                (region.dstSubres.baseArrayLayer + layer) * dstInfo.levelCount;
 
-        D3D12_TEXTURE_COPY_LOCATION dstLoc{};
-        dstLoc.pResource = dstResource;
-        dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        dstLoc.SubresourceIndex = dstSubresource;
+            D3D12_TEXTURE_COPY_LOCATION srcLoc{};
+            srcLoc.pResource = srcResource;
+            srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            srcLoc.SubresourceIndex = srcSubresource;
 
-        D3D12_BOX srcBox{};
-        srcBox.left = static_cast<UINT>(region.srcOffset.x);
-        srcBox.top = static_cast<UINT>(region.srcOffset.y);
-        srcBox.front = static_cast<UINT>(region.srcOffset.z);
-        srcBox.right = srcBox.left + region.srcExtent.width;
-        srcBox.bottom = srcBox.top + region.srcExtent.height;
-        srcBox.back = srcBox.front + std::max<uint32_t>(region.srcExtent.depth, 1);
+            D3D12_TEXTURE_COPY_LOCATION dstLoc{};
+            dstLoc.pResource = dstResource;
+            dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            dstLoc.SubresourceIndex = dstSubresource;
 
-        _impl->commandList->CopyTextureRegion(
-            &dstLoc,
-            region.dstOffset.x, region.dstOffset.y, region.dstOffset.z,
-            &srcLoc,
-            &srcBox);
+            D3D12_BOX srcBox{};
+            srcBox.left = static_cast<UINT>(region.srcOffset.x);
+            srcBox.top = static_cast<UINT>(region.srcOffset.y);
+            srcBox.front = static_cast<UINT>(region.srcOffset.z);
+            srcBox.right = srcBox.left + region.srcExtent.width;
+            srcBox.bottom = srcBox.top + region.srcExtent.height;
+            srcBox.back = srcBox.front + std::max<uint32_t>(region.srcExtent.depth, 1);
+
+            _impl->commandList->CopyTextureRegion(
+                &dstLoc,
+                region.dstOffset.x, region.dstOffset.y, region.dstOffset.z,
+                &srcLoc,
+                &srcBox);
+        }
     }
-
-    // Transition back to shader resource
-    D3D12_RESOURCE_BARRIER postBarriers[4];
-    uint32_t postBarrierCount = 0;
 
     D3D12_RESOURCE_STATES srcPostState = getPostTransferTextureState(srcInfo);
-    {
-        D3D12_RESOURCE_BARRIER b{};
-        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-        b.Transition.pResource = srcResource;
-        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
-        b.Transition.StateAfter = srcPostState;
-        if (postBarrierCount < 4) postBarriers[postBarrierCount++] = b;
-    }
-
     D3D12_RESOURCE_STATES dstPostState = getPostTransferTextureState(dstInfo);
-    {
-        D3D12_RESOURCE_BARRIER b{};
-        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-        b.Transition.pResource = dstResource;
-        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-        b.Transition.StateAfter = dstPostState;
-        if (postBarrierCount < 4) postBarriers[postBarrierCount++] = b;
-    }
-
-    if (postBarrierCount > 0) {
-        _impl->commandList->ResourceBarrier(postBarrierCount, postBarriers);
-    }
+    transitionIfNeeded(srcResource, srcState, srcPostState);
+    transitionIfNeeded(dstResource, dstState, dstPostState);
     srcD3D12->setCurrentState(srcPostState);
     dstD3D12->setCurrentState(dstPostState);
 
-    (void)filter; // Filter is not used for same-size copy (D3D12 CopyTextureRegion doesn't support filtering)
+    if (_impl->pendingSetCount > 0) {
+        _impl->descriptorSetsDirty = true;
+    }
 }
 
 void CCD3D12CommandBuffer::copyTexture(Texture *srcTexture, Texture *dstTexture, const TextureCopy *regions, uint32_t count) {
     if (!_impl->commandList || !srcTexture || !dstTexture || !regions || count == 0) return;
+    if (_type == CommandBufferType::SECONDARY) {
+        CC_LOG_ERROR("D3D12 bundle cannot copy textures.");
+        return;
+    }
 
     auto *srcD3D12 = static_cast<CCD3D12Texture *>(srcTexture);
     auto *dstD3D12 = static_cast<CCD3D12Texture *>(dstTexture);
@@ -1380,9 +2008,6 @@ void CCD3D12CommandBuffer::copyTexture(Texture *srcTexture, Texture *dstTexture,
 
     const auto &srcInfo = srcTexture->getInfo();
     const auto &dstInfo = dstTexture->getInfo();
-
-    CC_LOG_INFO("[D3D12] copyTexture: src=%ux%u dst=%ux%u regions=%u",
-                srcInfo.width, srcInfo.height, dstInfo.width, dstInfo.height, count);
 
     // Transition src to COPY_SOURCE, dst to COPY_DEST
     D3D12_RESOURCE_BARRIER preBarriers[4];
@@ -1421,40 +2046,38 @@ void CCD3D12CommandBuffer::copyTexture(Texture *srcTexture, Texture *dstTexture,
     // Perform texture-to-texture copy for each region
     for (uint32_t i = 0; i < count; ++i) {
         const auto &region = regions[i];
+        const uint32_t layerCount = std::max<uint32_t>(std::min(region.srcSubres.layerCount, region.dstSubres.layerCount), 1);
 
-        // Calculate D3D12 subresource indices:
-        // subresource = mipLevel + baseArrayLayer * mipLevelCount
-        const uint32_t srcSubresource = region.srcSubres.mipLevel +
-            region.srcSubres.baseArrayLayer * srcInfo.levelCount;
-        const uint32_t dstSubresource = region.dstSubres.mipLevel +
-            region.dstSubres.baseArrayLayer * dstInfo.levelCount;
+        for (uint32_t layer = 0; layer < layerCount; ++layer) {
+            const uint32_t srcSubresource = region.srcSubres.mipLevel +
+                (region.srcSubres.baseArrayLayer + layer) * srcInfo.levelCount;
+            const uint32_t dstSubresource = region.dstSubres.mipLevel +
+                (region.dstSubres.baseArrayLayer + layer) * dstInfo.levelCount;
 
-        // Build source copy location (subresource index)
-        D3D12_TEXTURE_COPY_LOCATION srcLoc{};
-        srcLoc.pResource = srcResource;
-        srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        srcLoc.SubresourceIndex = srcSubresource;
+            D3D12_TEXTURE_COPY_LOCATION srcLoc{};
+            srcLoc.pResource = srcResource;
+            srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            srcLoc.SubresourceIndex = srcSubresource;
 
-        // Build destination copy location (subresource index)
-        D3D12_TEXTURE_COPY_LOCATION dstLoc{};
-        dstLoc.pResource = dstResource;
-        dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        dstLoc.SubresourceIndex = dstSubresource;
+            D3D12_TEXTURE_COPY_LOCATION dstLoc{};
+            dstLoc.pResource = dstResource;
+            dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            dstLoc.SubresourceIndex = dstSubresource;
 
-        // Build source box (optional — if null, copies entire subresource)
-        D3D12_BOX srcBox{};
-        srcBox.left = static_cast<UINT>(region.srcOffset.x);
-        srcBox.top = static_cast<UINT>(region.srcOffset.y);
-        srcBox.front = static_cast<UINT>(region.srcOffset.z);
-        srcBox.right = srcBox.left + region.extent.width;
-        srcBox.bottom = srcBox.top + region.extent.height;
-        srcBox.back = srcBox.front + std::max<uint32_t>(region.extent.depth, 1);
+            D3D12_BOX srcBox{};
+            srcBox.left = static_cast<UINT>(region.srcOffset.x);
+            srcBox.top = static_cast<UINT>(region.srcOffset.y);
+            srcBox.front = static_cast<UINT>(region.srcOffset.z);
+            srcBox.right = srcBox.left + region.extent.width;
+            srcBox.bottom = srcBox.top + region.extent.height;
+            srcBox.back = srcBox.front + std::max<uint32_t>(region.extent.depth, 1);
 
-        _impl->commandList->CopyTextureRegion(
-            &dstLoc,
-            region.dstOffset.x, region.dstOffset.y, region.dstOffset.z,
-            &srcLoc,
-            &srcBox);
+            _impl->commandList->CopyTextureRegion(
+                &dstLoc,
+                region.dstOffset.x, region.dstOffset.y, region.dstOffset.z,
+                &srcLoc,
+                &srcBox);
+        }
     }
 
     // Transition src and dst back to reasonable states after copy
@@ -1496,6 +2119,10 @@ void CCD3D12CommandBuffer::copyTexture(Texture *srcTexture, Texture *dstTexture,
 
 void CCD3D12CommandBuffer::resolveTexture(Texture *srcTexture, Texture *dstTexture, const TextureCopy *regions, uint32_t count) {
     if (!_impl->commandList || !srcTexture || !dstTexture || !regions || count == 0) return;
+    if (_type == CommandBufferType::SECONDARY) {
+        CC_LOG_ERROR("D3D12 bundle cannot resolve textures.");
+        return;
+    }
 
     auto *srcD3D12 = static_cast<CCD3D12Texture *>(srcTexture);
     auto *dstD3D12 = static_cast<CCD3D12Texture *>(dstTexture);
@@ -1515,10 +2142,6 @@ void CCD3D12CommandBuffer::resolveTexture(Texture *srcTexture, Texture *dstTextu
         copyTexture(srcTexture, dstTexture, regions, count);
         return;
     }
-
-    CC_LOG_INFO("[D3D12] resolveTexture: src=%ux%u(msaa=%u) dst=%ux%u regions=%u",
-                srcInfo.width, srcInfo.height, srcInfo.samples,
-                dstInfo.width, dstInfo.height, count);
 
     // Transition src to RESOLVE_SOURCE, dst to RESOLVE_DEST
     D3D12_RESOURCE_BARRIER preBarriers[4];
@@ -1558,18 +2181,22 @@ void CCD3D12CommandBuffer::resolveTexture(Texture *srcTexture, Texture *dstTextu
     // For each region, resolve the corresponding mip+layer combination.
     for (uint32_t i = 0; i < count; ++i) {
         const auto &region = regions[i];
-        const uint32_t srcSubresource = region.srcSubres.mipLevel +
-            region.srcSubres.baseArrayLayer * srcInfo.levelCount;
-        const uint32_t dstSubresource = region.dstSubres.mipLevel +
-            region.dstSubres.baseArrayLayer * dstInfo.levelCount;
+        const uint32_t layerCount = std::max<uint32_t>(std::min(region.srcSubres.layerCount, region.dstSubres.layerCount), 1);
 
-        // ResolveSubresource requires a DXGI format when the source and destination
-        // formats differ (format conversion resolve). For same-format resolves, pass
-        // DXGI_FORMAT_UNKNOWN which lets the runtime use the source format.
-        _impl->commandList->ResolveSubresource(
-            dstResource, dstSubresource,
-            srcResource, srcSubresource,
-            DXGI_FORMAT_UNKNOWN);
+        for (uint32_t layer = 0; layer < layerCount; ++layer) {
+            const uint32_t srcSubresource = region.srcSubres.mipLevel +
+                (region.srcSubres.baseArrayLayer + layer) * srcInfo.levelCount;
+            const uint32_t dstSubresource = region.dstSubres.mipLevel +
+                (region.dstSubres.baseArrayLayer + layer) * dstInfo.levelCount;
+
+            // ResolveSubresource requires a DXGI format when the source and destination
+            // formats differ (format conversion resolve). For same-format resolves, pass
+            // DXGI_FORMAT_UNKNOWN which lets the runtime use the source format.
+            _impl->commandList->ResolveSubresource(
+                dstResource, dstSubresource,
+                srcResource, srcSubresource,
+                DXGI_FORMAT_UNKNOWN);
+        }
     }
 
     // Transition back to shader resource after resolve
@@ -1608,6 +2235,10 @@ void CCD3D12CommandBuffer::resolveTexture(Texture *srcTexture, Texture *dstTextu
 
 void CCD3D12CommandBuffer::dispatch(const DispatchInfo &info) {
     if (!_impl->commandList) return;
+    if (_type == CommandBufferType::SECONDARY) {
+        CC_LOG_ERROR("D3D12 bundle cannot dispatch compute work.");
+        return;
+    }
     // Flush any pending descriptor set bindings before dispatching
     flushDescriptorSets();
 
@@ -1629,6 +2260,20 @@ void CCD3D12CommandBuffer::dispatch(const DispatchInfo &info) {
 
 void CCD3D12CommandBuffer::pipelineBarrier(const GeneralBarrier *barrier, const BufferBarrier *const *bufferBarriers, const Buffer *const *buffers, uint32_t bufferCount, const TextureBarrier *const *textureBarriers, const Texture *const *textures, uint32_t textureBarrierCount) {
     if (!_impl->commandList) return;
+    if (_type == CommandBufferType::SECONDARY) {
+        CC_LOG_ERROR("D3D12 bundle cannot record resource barriers.");
+        return;
+    }
+
+    auto hasWriteAccess = [](AccessFlags access) {
+        return hasFlag(access, AccessFlagBit::VERTEX_SHADER_WRITE) ||
+               hasFlag(access, AccessFlagBit::FRAGMENT_SHADER_WRITE) ||
+               hasFlag(access, AccessFlagBit::COLOR_ATTACHMENT_WRITE) ||
+               hasFlag(access, AccessFlagBit::DEPTH_STENCIL_ATTACHMENT_WRITE) ||
+               hasFlag(access, AccessFlagBit::COMPUTE_SHADER_WRITE) ||
+               hasFlag(access, AccessFlagBit::TRANSFER_WRITE) ||
+               hasFlag(access, AccessFlagBit::HOST_WRITE);
+    };
 
     // Map Cocos AccessFlags to D3D12_RESOURCE_STATES
     auto accessFlagsToD3D12State = [](AccessFlags access) -> D3D12_RESOURCE_STATES {
@@ -1637,9 +2282,10 @@ void CCD3D12CommandBuffer::pipelineBarrier(const GeneralBarrier *barrier, const 
             hasFlag(access, AccessFlagBit::COLOR_ATTACHMENT_READ)) {
             state |= D3D12_RESOURCE_STATE_RENDER_TARGET;
         }
-        if (hasFlag(access, AccessFlagBit::DEPTH_STENCIL_ATTACHMENT_WRITE) ||
-            hasFlag(access, AccessFlagBit::DEPTH_STENCIL_ATTACHMENT_READ)) {
+        if (hasFlag(access, AccessFlagBit::DEPTH_STENCIL_ATTACHMENT_WRITE)) {
             state |= D3D12_RESOURCE_STATE_DEPTH_WRITE;
+        } else if (hasFlag(access, AccessFlagBit::DEPTH_STENCIL_ATTACHMENT_READ)) {
+            state |= D3D12_RESOURCE_STATE_DEPTH_READ;
         }
         if (hasFlag(access, AccessFlagBit::FRAGMENT_SHADER_READ_TEXTURE) ||
             hasFlag(access, AccessFlagBit::VERTEX_SHADER_READ_TEXTURE) ||
@@ -1696,6 +2342,10 @@ void CCD3D12CommandBuffer::pipelineBarrier(const GeneralBarrier *barrier, const 
         if (!textureBarriers[i] || !textures[i]) continue;
 
         const auto &texBarrierInfo = textureBarriers[i]->getInfo();
+        if (texBarrierInfo.type == BarrierType::SPLIT_BEGIN) {
+            continue;
+        }
+
         auto *d3d12Texture = static_cast<CCD3D12Texture *>(const_cast<Texture *>(textures[i]));
         if (!d3d12Texture) continue;
 
@@ -1718,15 +2368,45 @@ void CCD3D12CommandBuffer::pipelineBarrier(const GeneralBarrier *barrier, const 
         // If states match, no barrier needed
         if (prevState == nextState) continue;
 
-        D3D12_RESOURCE_BARRIER b{};
-        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-        b.Transition.pResource = resource;
-        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        b.Transition.StateBefore = prevState;
-        b.Transition.StateAfter = nextState;
+        const auto &range = texBarrierInfo.range;
+        const auto &textureInfo = d3d12Texture->getInfo();
+        const uint32_t mipCount = std::max<uint32_t>(textureInfo.levelCount, 1);
+        const uint32_t arraySize = std::max<uint32_t>(textureInfo.layerCount, 1);
+        const uint32_t planeCount = std::max<uint32_t>(range.planeCount, 1);
+        const bool hasExplicitRange = range.numSlices > 0 || range.levelCount > 0 || range.planeCount > 0;
+        const uint32_t firstSlice = std::min<uint32_t>(range.firstSlice, arraySize - 1);
+        const uint32_t sliceCount = range.numSlices > 0 ? std::min<uint32_t>(range.numSlices, arraySize - firstSlice) : arraySize;
+        const uint32_t firstMip = std::min<uint32_t>(range.mipLevel, mipCount - 1);
+        const uint32_t levelCount = range.levelCount > 0 ? std::min<uint32_t>(range.levelCount, mipCount - firstMip) : mipCount;
+        const uint32_t firstPlane = range.basePlane;
 
-        barriers.push_back(b);
+        if (!hasExplicitRange) {
+            D3D12_RESOURCE_BARRIER b{};
+            b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+            b.Transition.pResource = resource;
+            b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            b.Transition.StateBefore = prevState;
+            b.Transition.StateAfter = nextState;
+            barriers.push_back(b);
+        } else {
+            for (uint32_t plane = 0; plane < planeCount; ++plane) {
+                for (uint32_t slice = 0; slice < sliceCount; ++slice) {
+                    for (uint32_t mip = 0; mip < levelCount; ++mip) {
+                        D3D12_RESOURCE_BARRIER b{};
+                        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                        b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+                        b.Transition.pResource = resource;
+                        b.Transition.Subresource = (firstMip + mip) +
+                                                   (firstSlice + slice) * mipCount +
+                                                   (firstPlane + plane) * mipCount * arraySize;
+                        b.Transition.StateBefore = prevState;
+                        b.Transition.StateAfter = nextState;
+                        barriers.push_back(b);
+                    }
+                }
+            }
+        }
 
         // Update tracked state
         d3d12Texture->setCurrentState(nextState);
@@ -1737,57 +2417,78 @@ void CCD3D12CommandBuffer::pipelineBarrier(const GeneralBarrier *barrier, const 
         if (!bufferBarriers[i] || !buffers[i]) continue;
 
         const auto &bufBarrierInfo = bufferBarriers[i]->getInfo();
+        if (bufBarrierInfo.type == BarrierType::SPLIT_BEGIN) {
+            continue;
+        }
+
         // If a buffer is written then read, we need a UAV barrier
-        if (hasFlag(bufBarrierInfo.prevAccesses, AccessFlagBit::FRAGMENT_SHADER_WRITE) ||
-            hasFlag(bufBarrierInfo.prevAccesses, AccessFlagBit::COMPUTE_SHADER_WRITE) ||
-            hasFlag(bufBarrierInfo.prevAccesses, AccessFlagBit::TRANSFER_WRITE)) {
+        if (hasWriteAccess(bufBarrierInfo.prevAccesses)) {
+            auto *d3d12Buffer = static_cast<CCD3D12Buffer *>(const_cast<Buffer *>(buffers[i]));
             D3D12_RESOURCE_BARRIER b{};
             b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
             b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-            b.UAV.pResource = nullptr; // nullptr means all UAV resources
+            b.UAV.pResource = d3d12Buffer ? static_cast<ID3D12Resource *>(d3d12Buffer->getD3D12ResourceHandle()) : nullptr;
             barriers.push_back(b);
-            break; // One global UAV barrier is sufficient
+        }
+    }
+
+    if (barrier) {
+        const auto &barrierInfo = barrier->getInfo();
+        if (barrierInfo.type != BarrierType::SPLIT_BEGIN &&
+            (hasWriteAccess(barrierInfo.prevAccesses) || hasWriteAccess(barrierInfo.nextAccesses))) {
+            D3D12_RESOURCE_BARRIER b{};
+            b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+            b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+            b.UAV.pResource = nullptr;
+            barriers.push_back(b);
         }
     }
 
     if (!barriers.empty()) {
         _impl->commandList->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
     }
-
-    (void)barrier;
 }
 
 void CCD3D12CommandBuffer::beginQuery(QueryPool *queryPool, uint32_t id) {
     if (!_impl || !_impl->commandList) return;
+    if (_type == CommandBufferType::SECONDARY) {
+        CC_LOG_ERROR("D3D12 bundle cannot begin queries.");
+        return;
+    }
     auto *d3d12Pool = static_cast<CCD3D12QueryPool *>(queryPool);
     auto *heap = static_cast<ID3D12QueryHeap *>(d3d12Pool->getD3D12QueryHeap());
     if (!heap) return;
-    D3D12_QUERY_TYPE queryType = (d3d12Pool->getType() == QueryType::OCCLUSION)
-                                     ? D3D12_QUERY_TYPE_OCCLUSION
-                                     : D3D12_QUERY_TYPE_TIMESTAMP;
-    _impl->commandList->BeginQuery(heap, queryType, id);
+    const uint32_t queryIndex = d3d12Pool->beginD3D12Query(id);
+    if (queryIndex == std::numeric_limits<uint32_t>::max()) return;
+    if (d3d12Pool->getType() == QueryType::OCCLUSION) {
+        _impl->commandList->BeginQuery(heap, D3D12_QUERY_TYPE_OCCLUSION, queryIndex);
+    }
 }
 
 void CCD3D12CommandBuffer::endQuery(QueryPool *queryPool, uint32_t id) {
     if (!_impl || !_impl->commandList) return;
+    if (_type == CommandBufferType::SECONDARY) {
+        CC_LOG_ERROR("D3D12 bundle cannot end queries.");
+        return;
+    }
     auto *d3d12Pool = static_cast<CCD3D12QueryPool *>(queryPool);
     auto *heap = static_cast<ID3D12QueryHeap *>(d3d12Pool->getD3D12QueryHeap());
     if (!heap) return;
-    D3D12_QUERY_TYPE queryType = (d3d12Pool->getType() == QueryType::OCCLUSION)
-                                     ? D3D12_QUERY_TYPE_OCCLUSION
-                                     : D3D12_QUERY_TYPE_TIMESTAMP;
-    _impl->commandList->EndQuery(heap, queryType, id);
+    const uint32_t queryIndex = d3d12Pool->endD3D12Query(id);
+    if (queryIndex == std::numeric_limits<uint32_t>::max()) return;
+    const D3D12_QUERY_TYPE queryType = d3d12Pool->getType() == QueryType::TIMESTAMP
+                                           ? D3D12_QUERY_TYPE_TIMESTAMP
+                                           : D3D12_QUERY_TYPE_OCCLUSION;
+    _impl->commandList->EndQuery(heap, queryType, queryIndex);
 }
 
 void CCD3D12CommandBuffer::resetQueryPool(QueryPool *queryPool) {
     if (!_impl || !_impl->commandList) return;
     auto *d3d12Pool = static_cast<CCD3D12QueryPool *>(queryPool);
-    auto *heap = static_cast<ID3D12QueryHeap *>(d3d12Pool->getD3D12QueryHeap());
-    if (!heap) return;
     // D3D12 doesn't have a direct "reset query pool" on command list.
     // The results are overwritten on next BeginQuery/EndQuery cycle.
     // We clear the CPU-side results here.
-    (void)heap;
+    d3d12Pool->resetD3D12Queries();
 }
 
 void CCD3D12CommandBuffer::customCommand(CustomCommand &&cmd) {

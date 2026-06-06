@@ -1,5 +1,28 @@
 # Error Log
 
+## [ERR-20260606-001] concurrent-header-edit-during-build
+
+**Logged**: 2026-06-06T00:00:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: build
+
+### Summary
+A Release build briefly failed while an unrelated untracked header was being edited concurrently.
+
+### Details
+`Engine.cpp` included `CocosTracer.h`; the compiler observed an older `scene/Node.h` include, while the file read immediately afterward already contained the valid `core/scene-graph/Node.h` path. Re-running the same build succeeded.
+
+### Suggested Action
+When a build error references a concurrently edited untracked file, re-read the file and retry before attributing the failure to the current backend changes.
+
+### Metadata
+- Source: command_failure
+- Related Files: native/cocos/engine/CocosTracer.h
+- Tags: cmake, concurrent-edit, transient
+
+---
+
 ## [ERR-20260523-001] brv-query-unavailable
 
 **Logged**: 2026-05-23T19:30:56+08:00
@@ -20,6 +43,29 @@ Authenticate ByteRover with `brv login` or ensure a provider is connected before
 - Source: command_failure
 - Related Files: AGENTS.md
 - Tags: byterover, tooling, context
+
+---
+
+## [ERR-20260605-001] debug-build-timeout-retry
+
+**Logged**: 2026-06-05T00:00:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: build
+
+### Summary
+`cmake --build build --config Debug --target cocos_engine` may exceed a 120s command timeout even when the build is healthy.
+
+### Details
+The first Debug build attempt timed out after 124s without returning compiler diagnostics. Re-running the same command with a 300s timeout completed successfully in the warmed build and produced `build\Debug\cocos_engine.lib`.
+
+### Suggested Action
+Use a longer timeout for Debug engine builds in this workspace before treating a timeout as a build failure.
+
+### Metadata
+- Source: command_failure
+- Related Files: native/cocos/renderer/gfx-d3d12/D3D12Device.cpp
+- Tags: cmake, debug-build, timeout
 
 ---
 
@@ -229,3 +275,107 @@ Connect the ByteRover provider before relying on `brv query` for project context
 - Tags: brv, byterover, provider
 
 ---
+[ERR-20260606-002] multi-file-cleanup-patch-context-mismatch
+
+**Logged**: 2026-06-06
+**Context**: D3D12 backend cleanup
+**Error**: A multi-file apply_patch failed because the expected D3D12CommandBuffer.cpp context no longer matched.
+**Resolution**: Re-read the exact local snippets and apply smaller per-file patches. The failed patch was atomic and changed no files.
+[ERR-20260606-003] ripgrep-windows-wildcard
+
+**Logged**: 2026-06-06
+**Context**: D3D12 static implementation scan
+**Error**: `rg ... native/cocos/renderer/gfx-d3d12/*.cpp` failed because PowerShell/Windows did not expand the path wildcard for ripgrep.
+**Resolution**: Use `rg -g "*.cpp" ... native/cocos/renderer/gfx-d3d12`.
+[ERR-20260606-004] d3d12-format-mapper-ambiguous
+
+**Logged**: 2026-06-06
+**Context**: Release build after sharing the texture format mapper with D3D12Device
+**Error**: `toD3D12Format` was still defined in an anonymous namespace while a public namespace declaration was added, making calls in D3D12Texture.cpp ambiguous.
+**Resolution**: Rename the anonymous implementation and expose a namespace-level forwarding function.
+[ERR-20260606-005] renderdoc-capture-discovery-restrictions
+
+**Logged**: 2026-06-06
+**Context**: Inspecting an opened RenderDoc capture
+**Error**: Win32_Process command-line inspection was denied, a recursive D-drive RDC search timed out, and the sandboxed Codex executable could not query MCP configuration.
+**Resolution**: Inspect RenderDoc process ports and search only likely capture directories; use the local RenderDoc Python/API tooling when the capture path is found.
+[ERR-20260606-006] renderdoc-mcp-parallel-request-race
+
+**Logged**: 2026-06-06
+**Context**: RenderDoc EID inspection through the file-based MCP bridge
+**Error**: Parallel bridge calls raced on the single shared request/response JSON files, causing missing response files.
+**Resolution**: Send RenderDoc bridge calls strictly sequentially.
+[ERR-20260606-007] renderdoc-mcp-pillow-unavailable
+
+**Logged**: 2026-06-06
+**Context**: Exporting RenderDoc texture data for visual inspection
+**Error**: The renderdoc-mcp virtual environment does not include Pillow.
+**Resolution**: Export raw RGBA bytes with the bridge environment and render them using the available Node image tooling.
+[ERR-20260606-008] node-repl-windows-sandbox-exit
+
+**Logged**: 2026-06-06
+**Context**: Rendering exported RenderDoc RGBA data
+**Error**: The Node REPL kernel exited during Windows sandbox setup refresh.
+**Resolution**: Use the bundled workspace Python runtime and image libraries for diagnostic image conversion.
+[ERR-20260606-009] renderdoc-convert-argument-order
+
+**Logged**: 2026-06-06
+**Context**: Converting the current RDC to XML
+**Error**: Used `-f` as an output format flag, but RenderDoc defines it as the input filename.
+**Resolution**: Use `-f <capture> -c xml -o <output>`.
+
+[ERR-20260606-010] renderdoc-bridge-generic-call
+
+**Logged**: 2026-06-06
+**Context**: Inspecting texture mip contents through the RenderDoc MCP bridge
+**Error**: Assumed capture operations were direct `RenderDocBridge` methods, but the client exposes only `call(method, params)`.
+**Resolution**: Inspect `RenderDocBridge.call` and dispatch extension methods through that generic API.
+
+[ERR-20260606-011] renderdoc-bridge-timeout-constructor
+
+**Logged**: 2026-06-06
+**Context**: Reopening a capture through the RenderDoc MCP bridge
+**Error**: Passed `timeout` to `RenderDocBridge.__init__`, which only accepts compatibility host and port parameters.
+**Resolution**: Construct with no arguments and assign `bridge.timeout` when a custom timeout is needed.
+
+[ERR-20260606-012] renderdoc-open-capture-parameter
+
+**Logged**: 2026-06-06
+**Context**: Reopening a capture through the RenderDoc MCP bridge
+**Error**: Used `filename` for `open_capture`; the extension requires `capture_path`.
+**Resolution**: Read the extension method schema before dispatching bridge calls and pass `capture_path`.
+
+[ERR-20260606-013] release-build-compiler-heap
+
+**Logged**: 2026-06-06
+**Context**: Release verification after the D3D12 sampler fix
+**Error**: The default parallel MSBuild exhausted compiler heap space with C1060 errors in unrelated translation units.
+**Resolution**: Re-run the Release target with `/m:1` to limit MSBuild concurrency.
+
+[ERR-20260606-014] qrenderdoc-not-on-path
+
+**Logged**: 2026-06-06
+**Context**: Launching an isolated RenderDoc UI Python pixel-debug session
+**Error**: `Get-Command qrenderdoc.exe` failed because the RenderDoc install directory is not on PATH.
+**Resolution**: Reuse the executable path from the running process: `D:\Program Files\RenderDoc\qrenderdoc.exe`.
+
+[ERR-20260606-015] powershell-select-string-byte-encoding
+
+**Logged**: 2026-06-06
+**Context**: Searching the RenderDoc executable for command-line option strings
+**Error**: PowerShell 7 `Select-String` does not accept `-Encoding Byte`.
+**Resolution**: Use a binary strings utility or inspect RenderDoc's documented/GUI script entry points instead of treating the executable as byte-encoded text.
+
+[ERR-20260606-016] broad-user-directory-recursion-timeout
+
+**Logged**: 2026-06-06
+**Context**: Locating the previously used RenderDoc MCP bridge
+**Error**: Recursively enumerating all directories under the Windows user profile exceeded the command timeout.
+**Resolution**: Search only likely tool roots such as `.codex`, `.agents`, and temporary tool directories with `rg --files`.
+
+[ERR-20260606-017] renderdoc-runtime-injection-no-capture
+
+**Logged**: 2026-06-06
+**Context**: Capturing the already running D3D12 test scene after mip diagnostics
+**Error**: `renderdoccmd inject` reported success, but neither scripted F12 input path produced a capture.
+**Resolution**: Launch the executable through `renderdoccmd capture` from process start and trigger capture after the target scene has loaded.

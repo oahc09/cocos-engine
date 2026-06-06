@@ -47,6 +47,7 @@ namespace cc {
 namespace gfx {
 
 namespace {
+#ifndef NDEBUG
 void shaderDiagLog(const char *fmt, ...) {
     static FILE *s_file = nullptr;
     if (!s_file) {
@@ -59,6 +60,10 @@ void shaderDiagLog(const char *fmt, ...) {
     vfprintf(s_file, fmt, args);
     va_end(args);
 }
+#else
+void shaderDiagLog(const char * /*fmt*/, ...) {
+}
+#endif
 
 EShLanguage toEShLanguage(ShaderStageFlagBit stage) {
     switch (stage) {
@@ -490,9 +495,9 @@ void CCD3D12Shader::doInit(const ShaderInfo &info) {
             bool ok = compileGLSLToDXBC(stage.stage, stage.source, entry, *dxbcBuffer);
 
             if (!ok) {
-                CC_LOG_WARNING("D3D12Shader '%s': GLSL->DXBC failed for stage 0x%x, will use fallback.",
-                               info.name.c_str(), static_cast<unsigned>(stage.stage));
-                shaderDiagLog("[SHADER] '%s' stage 0x%x: compilation FAILED, will fallback\n",
+                CC_LOG_ERROR("D3D12Shader '%s': GLSL->DXBC failed for stage 0x%x; stage bytecode is unavailable.",
+                             info.name.c_str(), static_cast<unsigned>(stage.stage));
+                shaderDiagLog("[SHADER] '%s' stage 0x%x: compilation FAILED\n",
                               info.name.c_str(), static_cast<unsigned>(stage.stage));
                 dxbcBuffer->clear();
             }

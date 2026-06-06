@@ -69,6 +69,31 @@ D3D12_RESOURCE_BARRIER textureTransition(ID3D12Resource *resource, D3D12_RESOURC
     barrier.Transition.StateAfter = after;
     return barrier;
 }
+
+void copyReadbackToBuffer(const uint8_t *mappedData, const D3D12_PLACED_SUBRESOURCE_FOOTPRINT &footprint, uint32_t footprintRowCount,
+                          uint8_t *buffer, const BufferTextureCopy &region, Format format) {
+    const uint32_t rowStrideWidth = region.buffStride > 0 ? region.buffStride : region.texExtent.width;
+    const uint32_t sliceStrideHeight = region.buffTexHeight > 0 ? region.buffTexHeight : region.texExtent.height;
+    const uint32_t dstRowStride = formatSize(format, rowStrideWidth, 1, 1);
+    const uint32_t dstSliceStride = formatSize(format, rowStrideWidth, sliceStrideHeight, 1);
+    const uint32_t copyRowBytes = formatSize(format, region.texExtent.width, 1, 1);
+    const auto blockAlignment = formatAlignment(format);
+    const uint32_t blockHeight = std::max<uint32_t>(blockAlignment.second, 1);
+    const uint32_t copyRows = (region.texExtent.height + blockHeight - 1) / blockHeight;
+    const uint32_t copyDepth = std::max<uint32_t>(region.texExtent.depth, 1);
+
+    const auto *srcBase = mappedData + footprint.Offset;
+    auto *dstBase = buffer + region.buffOffset;
+    for (uint32_t z = 0; z < copyDepth; ++z) {
+        const auto *srcSlice = srcBase + static_cast<size_t>(z) * footprint.Footprint.RowPitch * footprintRowCount;
+        auto *dstSlice = dstBase + static_cast<size_t>(z) * dstSliceStride;
+        for (uint32_t row = 0; row < copyRows; ++row) {
+            const auto *srcRow = srcSlice + static_cast<size_t>(row) * footprint.Footprint.RowPitch;
+            auto *dstRow = dstSlice + static_cast<size_t>(row) * dstRowStride;
+            std::memcpy(dstRow, srcRow, copyRowBytes);
+        }
+    }
+}
 }
 
 struct CCD3D12Device::Impl {
@@ -259,6 +284,17 @@ void CCD3D12Device::doDestroy() {
 }
 
 void CCD3D12Device::acquire(Swapchain *const *swapchains, uint32_t count) {
+    // present() waits for the previous frame before the next acquire, so all
+    // descriptor allocations from that frame are no longer in flight here.
+    // Reset once per frame; resetting from each CommandBuffer::begin() would
+    // let later command buffers overwrite descriptors referenced by earlier ones.
+    if (_impl->gpuDescriptorHeapPool) {
+        _impl->gpuDescriptorHeapPool->reset();
+    }
+    if (_impl->samplerDescriptorHeapPool) {
+        _impl->samplerDescriptorHeapPool->reset();
+    }
+
     // The DeviceAgent and DeviceValidator layers unwrap their wrappers before
     // passing swapchains down to us, so the pointers here are raw CCD3D12Swapchain*.
     _d3d12Swapchains.clear();
@@ -410,10 +446,16 @@ void CCD3D12Device::copyBuffersToTexture(const uint8_t *const *buffers, Texture 
     }
 
     const auto &textureInfo = dst->getInfo();
-    const uint32_t bytesPerTexel = GFX_FORMAT_INFOS[toNumber(textureInfo.format)].size;
-    if (bytesPerTexel == 0) {
+    if (formatSize(textureInfo.format, 1, 1, 1) == 0) {
         CC_LOG_WARNING("D3D12 texture upload skipped for unsupported texel size.");
         return;
+    }
+    const bool diagnoseMipUpload =
+        hasFlag(textureInfo.flags, TextureFlagBit::GEN_MIPMAP) && textureInfo.levelCount > 1;
+    if (diagnoseMipUpload) {
+        CC_LOG_INFO("[D3D12-MIP-DIAG] device upload resource=%p size=%ux%u levels=%u layers=%u format=%u regions=%u",
+                    textureResource, textureInfo.width, textureInfo.height, textureInfo.levelCount,
+                    textureInfo.layerCount, static_cast<unsigned>(textureInfo.format), count);
     }
 
     waitForGpu();
@@ -449,6 +491,12 @@ void CCD3D12Device::copyBuffersToTexture(const uint8_t *const *buffers, Texture 
         const uint32_t mipLevel = region.texSubres.mipLevel;
         const uint32_t arrayLayer = textureInfo.type == TextureType::TEX3D ? 0 : region.texSubres.baseArrayLayer;
         const uint32_t subresource = mipLevel + arrayLayer * textureInfo.levelCount;
+        if (diagnoseMipUpload) {
+            CC_LOG_INFO("[D3D12-MIP-DIAG] region=%u mip=%u layer=%u extent=%ux%ux%u offset=%d,%d,%d",
+                        regionIndex, mipLevel, arrayLayer,
+                        region.texExtent.width, region.texExtent.height, region.texExtent.depth,
+                        region.texOffset.x, region.texOffset.y, region.texOffset.z);
+        }
 
         D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
         UINT rowCount = 0;
@@ -503,10 +551,13 @@ void CCD3D12Device::copyBuffersToTexture(const uint8_t *const *buffers, Texture 
 
         const uint32_t sourceRowTexels = region.buffStride > 0 ? region.buffStride : region.texExtent.width;
         const uint32_t sourceRows = region.buffTexHeight > 0 ? region.buffTexHeight : region.texExtent.height;
-        const uint32_t sourceRowPitch = sourceRowTexels * bytesPerTexel;
-        const uint32_t sourceSlicePitch = sourceRowPitch * sourceRows;
-        const uint32_t copyRowBytes = region.texExtent.width * bytesPerTexel;
-        const uint32_t copyRows = std::min<uint32_t>(region.texExtent.height, rowCount);
+        const uint32_t sourceRowPitch = formatSize(textureInfo.format, sourceRowTexels, 1, 1);
+        const uint32_t sourceSlicePitch = formatSize(textureInfo.format, sourceRowTexels, sourceRows, 1);
+        const uint32_t copyRowBytes = formatSize(textureInfo.format, region.texExtent.width, 1, 1);
+        const auto blockAlignment = formatAlignment(textureInfo.format);
+        const uint32_t blockHeight = std::max<uint32_t>(blockAlignment.second, 1);
+        const uint32_t copyRows = std::min<uint32_t>(
+            (region.texExtent.height + blockHeight - 1) / blockHeight, rowCount);
         const uint32_t copyDepth = std::max<uint32_t>(region.texExtent.depth, 1);
         const auto *src = buffers[regionIndex] + region.buffOffset;
         auto *dstBytes = static_cast<uint8_t *>(mappedData) + footprint.Offset;
@@ -547,14 +598,23 @@ void CCD3D12Device::copyBuffersToTexture(const uint8_t *const *buffers, Texture 
             region.texOffset.z,
             &srcLocation,
             &srcBox);
-        d3d12Texture->markMipLevelUploaded(mipLevel);
-
         // Transfer ownership to the vector — keeps resource alive until
         // after waitForGpu() below.
         uploadResources.push_back(std::move(uploadResource));
     }
 
-    auto toCommon = textureTransition(textureResource, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+    ccstd::vector<Microsoft::WRL::ComPtr<ID3D12DescriptorHeap>> mipDescriptorHeaps;
+    const bool generatedMipmaps =
+        generateD3D12Mipmaps(_impl->d3dDevice.Get(), _impl->commandList.Get(), textureResource,
+                             textureInfo, mipDescriptorHeaps);
+    if (diagnoseMipUpload) {
+        CC_LOG_INFO("[D3D12-MIP-DIAG] generation resource=%p result=%s descriptorHeaps=%zu",
+                    textureResource, generatedMipmaps ? "success" : "failed", mipDescriptorHeaps.size());
+    }
+    auto toCommon = textureTransition(
+        textureResource,
+        generatedMipmaps ? D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE : D3D12_RESOURCE_STATE_COPY_DEST,
+        D3D12_RESOURCE_STATE_COMMON);
     _impl->commandList->ResourceBarrier(1, &toCommon);
 
     hr = _impl->commandList->Close();
@@ -569,13 +629,172 @@ void CCD3D12Device::copyBuffersToTexture(const uint8_t *const *buffers, Texture 
 
     // Now safe to release upload resources — GPU has finished.
     uploadResources.clear();
+    mipDescriptorHeaps.clear();
 }
 
-void CCD3D12Device::copyTextureToBuffers(Texture *src, uint8_t *const *buffers, const BufferTextureCopy *region, uint32_t count) {
-    (void)src;
-    (void)buffers;
-    (void)region;
-    (void)count;
+void CCD3D12Device::copyTextureToBuffers(Texture *src, uint8_t *const *buffers, const BufferTextureCopy *regions, uint32_t count) {
+    if (!src || !buffers || !regions || count == 0 || !_impl->d3dDevice || !_impl->graphicsQueue || !_impl->commandAllocator || !_impl->commandList) {
+        return;
+    }
+
+    auto *d3d12Texture = static_cast<CCD3D12Texture *>(src);
+    auto *textureResource = static_cast<ID3D12Resource *>(d3d12Texture->getD3D12ResourceHandle());
+    if (!textureResource) {
+        return;
+    }
+
+    const auto &textureInfo = src->getInfo();
+    if (textureInfo.samples != SampleCount::X1) {
+        CC_LOG_WARNING("D3D12 texture readback skipped for multisampled texture. Resolve before readback.");
+        return;
+    }
+
+    waitForGpu();
+
+    HRESULT hr = _impl->commandAllocator->Reset();
+    if (FAILED(hr)) {
+        CC_LOG_ERROR("D3D12 readback command allocator reset failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+        return;
+    }
+
+    hr = _impl->commandList->Reset(_impl->commandAllocator.Get(), nullptr);
+    if (FAILED(hr)) {
+        CC_LOG_ERROR("D3D12 readback command list reset failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+        return;
+    }
+
+    const D3D12_RESOURCE_STATES previousState = d3d12Texture->getCurrentState();
+    if (previousState != D3D12_RESOURCE_STATE_COPY_SOURCE) {
+        auto toCopySource = textureTransition(textureResource, previousState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        _impl->commandList->ResourceBarrier(1, &toCopySource);
+        d3d12Texture->setCurrentState(D3D12_RESOURCE_STATE_COPY_SOURCE);
+    }
+
+    struct ReadbackRegion {
+        Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+        uint32_t regionIndex{0};
+        UINT rowCount{0};
+        UINT64 uploadSize{0};
+    };
+    ccstd::vector<ReadbackRegion> readbackRegions;
+    readbackRegions.reserve(count);
+
+    D3D12_RESOURCE_DESC textureDesc = textureResource->GetDesc();
+    for (uint32_t regionIndex = 0; regionIndex < count; ++regionIndex) {
+        if (!buffers[regionIndex]) {
+            continue;
+        }
+
+        const auto &copyRegion = regions[regionIndex];
+        const uint32_t mipLevel = copyRegion.texSubres.mipLevel;
+        const uint32_t arrayLayer = textureInfo.type == TextureType::TEX3D ? 0 : copyRegion.texSubres.baseArrayLayer;
+        const uint32_t subresource = mipLevel + arrayLayer * textureInfo.levelCount;
+
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+        UINT rowCount = 0;
+        UINT64 rowSizeInBytes = 0;
+        UINT64 readbackSize = 0;
+        _impl->d3dDevice->GetCopyableFootprints(&textureDesc, subresource, 1, 0, &footprint, &rowCount, &rowSizeInBytes, &readbackSize);
+        if (readbackSize == 0 || rowCount == 0) {
+            continue;
+        }
+
+        D3D12_HEAP_PROPERTIES heapProperties{};
+        heapProperties.Type = D3D12_HEAP_TYPE_READBACK;
+        heapProperties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+        heapProperties.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+        heapProperties.CreationNodeMask = 1;
+        heapProperties.VisibleNodeMask = 1;
+
+        D3D12_RESOURCE_DESC readbackDesc{};
+        readbackDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        readbackDesc.Alignment = 0;
+        readbackDesc.Width = readbackSize;
+        readbackDesc.Height = 1;
+        readbackDesc.DepthOrArraySize = 1;
+        readbackDesc.MipLevels = 1;
+        readbackDesc.Format = DXGI_FORMAT_UNKNOWN;
+        readbackDesc.SampleDesc.Count = 1;
+        readbackDesc.SampleDesc.Quality = 0;
+        readbackDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        readbackDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+        Microsoft::WRL::ComPtr<ID3D12Resource> readbackResource;
+        hr = _impl->d3dDevice->CreateCommittedResource(
+            &heapProperties,
+            D3D12_HEAP_FLAG_NONE,
+            &readbackDesc,
+            D3D12_RESOURCE_STATE_COPY_DEST,
+            nullptr,
+            IID_PPV_ARGS(&readbackResource));
+        if (FAILED(hr)) {
+            CC_LOG_ERROR("CreateCommittedResource(texture readback) failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+            continue;
+        }
+
+        D3D12_TEXTURE_COPY_LOCATION srcLocation{};
+        srcLocation.pResource = textureResource;
+        srcLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        srcLocation.SubresourceIndex = subresource;
+
+        D3D12_TEXTURE_COPY_LOCATION dstLocation{};
+        dstLocation.pResource = readbackResource.Get();
+        dstLocation.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        dstLocation.PlacedFootprint = footprint;
+
+        D3D12_BOX srcBox{};
+        srcBox.left = static_cast<UINT>(copyRegion.texOffset.x);
+        srcBox.top = static_cast<UINT>(copyRegion.texOffset.y);
+        srcBox.front = static_cast<UINT>(copyRegion.texOffset.z);
+        srcBox.right = srcBox.left + copyRegion.texExtent.width;
+        srcBox.bottom = srcBox.top + copyRegion.texExtent.height;
+        srcBox.back = srcBox.front + std::max<uint32_t>(copyRegion.texExtent.depth, 1);
+
+        _impl->commandList->CopyTextureRegion(&dstLocation, 0, 0, 0, &srcLocation, &srcBox);
+
+        ReadbackRegion readbackRegion;
+        readbackRegion.resource = std::move(readbackResource);
+        readbackRegion.footprint = footprint;
+        readbackRegion.regionIndex = regionIndex;
+        readbackRegion.rowCount = rowCount;
+        readbackRegion.uploadSize = readbackSize;
+        readbackRegions.push_back(std::move(readbackRegion));
+    }
+
+    if (previousState != D3D12_RESOURCE_STATE_COPY_SOURCE) {
+        auto restoreState = textureTransition(textureResource, D3D12_RESOURCE_STATE_COPY_SOURCE, previousState);
+        _impl->commandList->ResourceBarrier(1, &restoreState);
+        d3d12Texture->setCurrentState(previousState);
+    }
+
+    hr = _impl->commandList->Close();
+    if (FAILED(hr)) {
+        CC_LOG_ERROR("D3D12 readback command list close failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+        return;
+    }
+
+    if (!readbackRegions.empty()) {
+        ID3D12CommandList *commandLists[] = {_impl->commandList.Get()};
+        _impl->graphicsQueue->ExecuteCommandLists(1, commandLists);
+        waitForGpu();
+
+        for (const auto &readbackRegion : readbackRegions) {
+            void *mappedData = nullptr;
+            D3D12_RANGE readRange{0, static_cast<SIZE_T>(readbackRegion.uploadSize)};
+            hr = readbackRegion.resource->Map(0, &readRange, &mappedData);
+            if (FAILED(hr) || !mappedData) {
+                CC_LOG_ERROR("D3D12 texture readback Map failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+                continue;
+            }
+
+            const uint32_t regionIndex = readbackRegion.regionIndex;
+            copyReadbackToBuffer(static_cast<const uint8_t *>(mappedData), readbackRegion.footprint, readbackRegion.rowCount,
+                                 buffers[regionIndex], regions[regionIndex], textureInfo.format);
+            D3D12_RANGE writtenRange{0, 0};
+            readbackRegion.resource->Unmap(0, &writtenRange);
+        }
+    }
 }
 
 void CCD3D12Device::getQueryPoolResults(QueryPool *queryPool) {
@@ -587,27 +806,8 @@ void CCD3D12Device::getQueryPoolResults(QueryPool *queryPool) {
 SampleCount CCD3D12Device::getMaxSampleCount(Format format, TextureUsage usage, TextureFlags flags) const {
     if (!_impl || !_impl->d3dDevice) return SampleCount::X1;
 
-    DXGI_FORMAT dxgiFormat = DXGI_FORMAT_UNKNOWN;
-    // Map common Cocos formats to DXGI formats — only need to handle renderable formats
-    switch (format) {
-        case Format::RGBA8:      dxgiFormat = DXGI_FORMAT_R8G8B8A8_UNORM; break;
-        case Format::BGRA8:      dxgiFormat = DXGI_FORMAT_B8G8R8A8_UNORM; break;
-        case Format::R8:         dxgiFormat = DXGI_FORMAT_R8_UNORM; break;
-        case Format::RG8:        dxgiFormat = DXGI_FORMAT_R8G8_UNORM; break;
-        case Format::RGBA4:      dxgiFormat = DXGI_FORMAT_B4G4R4A4_UNORM; break;
-        case Format::DEPTH:      dxgiFormat = DXGI_FORMAT_D24_UNORM_S8_UINT; break;
-        case Format::DEPTH_STENCIL: dxgiFormat = DXGI_FORMAT_D24_UNORM_S8_UINT; break;
-        case Format::R16F:       dxgiFormat = DXGI_FORMAT_R16_FLOAT; break;
-        case Format::RG16F:      dxgiFormat = DXGI_FORMAT_R16G16_FLOAT; break;
-        case Format::RGBA16F:    dxgiFormat = DXGI_FORMAT_R16G16B16A16_FLOAT; break;
-        case Format::R32F:       dxgiFormat = DXGI_FORMAT_R32_FLOAT; break;
-        case Format::RG32F:      dxgiFormat = DXGI_FORMAT_R32G32_FLOAT; break;
-        case Format::RGBA32F:    dxgiFormat = DXGI_FORMAT_R32G32B32A32_FLOAT; break;
-        case Format::R11G11B10F: dxgiFormat = DXGI_FORMAT_R11G11B10_FLOAT; break;
-        case Format::RGB10A2:    dxgiFormat = DXGI_FORMAT_R10G10B10A2_UNORM; break;
-        case Format::RGB9E5:     dxgiFormat = DXGI_FORMAT_R9G9B9E5_SHAREDEXP; break;
-        default:                 dxgiFormat = DXGI_FORMAT_R8G8B8A8_UNORM; break; // fallback
-    }
+    const DXGI_FORMAT dxgiFormat = toD3D12Format(format);
+    if (dxgiFormat == DXGI_FORMAT_UNKNOWN) return SampleCount::X1;
 
     D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS qualityLevels{};
     qualityLevels.Format = dxgiFormat;
@@ -628,116 +828,52 @@ SampleCount CCD3D12Device::getMaxSampleCount(Format format, TextureUsage usage, 
 }
 
 void CCD3D12Device::initFormatFeatures() {
-    // Hardcoded format feature table for D3D12 FL11_0+ hardware.
-    // Same approach as GLES3Device::initFormatFeature() — no runtime API calls needed.
-    // D3D12 FL11_0 guarantees support for all these formats.
+    if (!_impl || !_impl->d3dDevice) return;
 
-    // Full set: SAMPLED_TEXTURE | RENDER_TARGET | LINEAR_FILTER | STORAGE_TEXTURE | VERTEX_ATTRIBUTE
-    const auto F_FULL = FormatFeature::SAMPLED_TEXTURE | FormatFeature::RENDER_TARGET |
-                         FormatFeature::LINEAR_FILTER | FormatFeature::STORAGE_TEXTURE |
-                         FormatFeature::VERTEX_ATTRIBUTE;
-    // No render target.
-    const auto F_NO_RT = FormatFeature::SAMPLED_TEXTURE | FormatFeature::STORAGE_TEXTURE |
-                          FormatFeature::VERTEX_ATTRIBUTE;
-    // Single-channel 32-bit float is renderable and is used by shadow maps when available.
-    const auto F_R32F = FormatFeature::SAMPLED_TEXTURE | FormatFeature::RENDER_TARGET |
-                         FormatFeature::STORAGE_TEXTURE | FormatFeature::VERTEX_ATTRIBUTE;
-    // Standard: SAMPLED_TEXTURE | RENDER_TARGET | LINEAR_FILTER | STORAGE_TEXTURE (no vertex)
-    const auto F_STD = FormatFeature::SAMPLED_TEXTURE | FormatFeature::RENDER_TARGET |
-                        FormatFeature::LINEAR_FILTER | FormatFeature::STORAGE_TEXTURE;
-    // Depth: SAMPLED_TEXTURE | RENDER_TARGET only
-    const auto F_DEPTH = FormatFeature::SAMPLED_TEXTURE | FormatFeature::RENDER_TARGET;
+    auto queryFormatSupport = [this](DXGI_FORMAT format) {
+        D3D12_FEATURE_DATA_FORMAT_SUPPORT support{};
+        support.Format = format;
+        if (format == DXGI_FORMAT_UNKNOWN ||
+            FAILED(_impl->d3dDevice->CheckFeatureSupport(
+                D3D12_FEATURE_FORMAT_SUPPORT, &support, sizeof(support)))) {
+            support.Support1 = D3D12_FORMAT_SUPPORT1_NONE;
+            support.Support2 = D3D12_FORMAT_SUPPORT2_NONE;
+        }
+        return support;
+    };
 
-    // --- 8-bit normalized ---
-    _formatFeatures[toNumber(Format::R8)]          = F_FULL;
-    _formatFeatures[toNumber(Format::R8SN)]        = F_STD;
-    _formatFeatures[toNumber(Format::RG8)]         = F_FULL;
-    _formatFeatures[toNumber(Format::RG8SN)]       = F_STD;
-    _formatFeatures[toNumber(Format::RGB8)]        = F_FULL;
-    _formatFeatures[toNumber(Format::RGB8SN)]      = F_STD;
-    _formatFeatures[toNumber(Format::RGBA8)]       = F_FULL;
-    _formatFeatures[toNumber(Format::RGBA8SN)]     = F_STD;
-    _formatFeatures[toNumber(Format::BGRA8)]       = F_FULL;
-    _formatFeatures[toNumber(Format::SRGB8)]       = F_STD;
-    _formatFeatures[toNumber(Format::SRGB8_A8)]    = F_STD;
+    const auto formatCount = static_cast<uint32_t>(Format::COUNT);
+    for (uint32_t i = toNumber(Format::R8); i < formatCount; ++i) {
+        const auto format = static_cast<Format>(i);
+        const DXGI_FORMAT dxgiFormat = toD3D12Format(format);
+        if (dxgiFormat == DXGI_FORMAT_UNKNOWN) continue;
 
-    // --- 8-bit integer ---
-    _formatFeatures[toNumber(Format::R8I)]         = F_FULL;
-    _formatFeatures[toNumber(Format::R8UI)]        = F_FULL;
-    _formatFeatures[toNumber(Format::RG8I)]        = F_FULL;
-    _formatFeatures[toNumber(Format::RG8UI)]       = F_FULL;
-    _formatFeatures[toNumber(Format::RGB8I)]       = F_FULL;
-    _formatFeatures[toNumber(Format::RGB8UI)]      = F_FULL;
-    _formatFeatures[toNumber(Format::RGBA8I)]      = F_FULL;
-    _formatFeatures[toNumber(Format::RGBA8UI)]     = F_FULL;
+        const auto nativeSupport = queryFormatSupport(dxgiFormat);
+        auto sampledSupport = nativeSupport;
+        if (format == Format::DEPTH) {
+            sampledSupport = queryFormatSupport(DXGI_FORMAT_R32_FLOAT);
+        } else if (format == Format::DEPTH_STENCIL) {
+            sampledSupport = queryFormatSupport(DXGI_FORMAT_R24_UNORM_X8_TYPELESS);
+        }
 
-    // --- 16-bit float ---
-    _formatFeatures[toNumber(Format::R16F)]        = F_FULL;
-    _formatFeatures[toNumber(Format::RG16F)]       = F_FULL;
-    _formatFeatures[toNumber(Format::RGB16F)]      = F_FULL;
-    _formatFeatures[toNumber(Format::RGBA16F)]     = F_FULL;
-
-    // --- 16-bit integer ---
-    _formatFeatures[toNumber(Format::R16I)]        = F_FULL;
-    _formatFeatures[toNumber(Format::R16UI)]       = F_FULL;
-    _formatFeatures[toNumber(Format::RG16I)]       = F_FULL;
-    _formatFeatures[toNumber(Format::RG16UI)]      = F_FULL;
-    _formatFeatures[toNumber(Format::RGB16I)]      = F_FULL;
-    _formatFeatures[toNumber(Format::RGB16UI)]     = F_FULL;
-    _formatFeatures[toNumber(Format::RGBA16I)]     = F_FULL;
-    _formatFeatures[toNumber(Format::RGBA16UI)]    = F_FULL;
-
-    // --- 32-bit float ---
-    _formatFeatures[toNumber(Format::R32F)]        = F_R32F;
-    _formatFeatures[toNumber(Format::RG32F)]       = F_NO_RT;
-    _formatFeatures[toNumber(Format::RGB32F)]      = F_NO_RT;
-    _formatFeatures[toNumber(Format::RGBA32F)]     = F_NO_RT;
-
-    // --- 32-bit integer ---
-    _formatFeatures[toNumber(Format::R32I)]        = F_FULL;
-    _formatFeatures[toNumber(Format::R32UI)]       = F_FULL;
-    _formatFeatures[toNumber(Format::RG32I)]       = F_FULL;
-    _formatFeatures[toNumber(Format::RG32UI)]      = F_FULL;
-    _formatFeatures[toNumber(Format::RGB32I)]      = F_FULL;
-    _formatFeatures[toNumber(Format::RGB32UI)]     = F_FULL;
-    _formatFeatures[toNumber(Format::RGBA32I)]     = F_FULL;
-    _formatFeatures[toNumber(Format::RGBA32UI)]    = F_FULL;
-
-    // --- Packed / special ---
-    _formatFeatures[toNumber(Format::RGB10A2)]     = F_STD;
-    _formatFeatures[toNumber(Format::RGB10A2UI)]   = F_STD;
-    _formatFeatures[toNumber(Format::R11G11B10F)]  = F_STD;
-    _formatFeatures[toNumber(Format::RGB9E5)]      = F_STD;
-    _formatFeatures[toNumber(Format::R5G6B5)]      = F_STD;
-    _formatFeatures[toNumber(Format::RGBA4)]       = F_STD;
-    _formatFeatures[toNumber(Format::RGB5A1)]      = F_STD;
-
-    // --- Depth ---
-    _formatFeatures[toNumber(Format::DEPTH)]       = F_DEPTH;
-    _formatFeatures[toNumber(Format::DEPTH_STENCIL)] = F_DEPTH;
-
-    // --- BC compressed (SAMPLED_TEXTURE only, no render target) ---
-    const auto F_BC = FormatFeature::SAMPLED_TEXTURE | FormatFeature::LINEAR_FILTER;
-    _formatFeatures[toNumber(Format::BC1)]           = F_BC;
-    _formatFeatures[toNumber(Format::BC1_ALPHA)]     = F_BC;
-    _formatFeatures[toNumber(Format::BC1_SRGB)]      = F_BC;
-    _formatFeatures[toNumber(Format::BC1_SRGB_ALPHA)]= F_BC;
-    _formatFeatures[toNumber(Format::BC2)]           = F_BC;
-    _formatFeatures[toNumber(Format::BC2_SRGB)]      = F_BC;
-    _formatFeatures[toNumber(Format::BC3)]           = F_BC;
-    _formatFeatures[toNumber(Format::BC3_SRGB)]      = F_BC;
-    _formatFeatures[toNumber(Format::BC4)]           = FormatFeature::SAMPLED_TEXTURE;
-    _formatFeatures[toNumber(Format::BC4_SNORM)]     = FormatFeature::SAMPLED_TEXTURE;
-    _formatFeatures[toNumber(Format::BC5)]           = FormatFeature::SAMPLED_TEXTURE;
-    _formatFeatures[toNumber(Format::BC5_SNORM)]     = FormatFeature::SAMPLED_TEXTURE;
-    _formatFeatures[toNumber(Format::BC6H_UF16)]     = FormatFeature::SAMPLED_TEXTURE;
-    _formatFeatures[toNumber(Format::BC6H_SF16)]     = FormatFeature::SAMPLED_TEXTURE;
-    _formatFeatures[toNumber(Format::BC7)]           = F_BC;
-    _formatFeatures[toNumber(Format::BC7_SRGB)]      = F_BC;
-
-    // ETC / ASTC — D3D12 has no native support, leave as NONE
-
-    CC_LOG_INFO("[D3D12] Format features initialized (hardcoded table).");
+        const auto support1 = nativeSupport.Support1;
+        if (support1 & (D3D12_FORMAT_SUPPORT1_RENDER_TARGET | D3D12_FORMAT_SUPPORT1_DEPTH_STENCIL)) {
+            _formatFeatures[i] |= FormatFeature::RENDER_TARGET;
+        }
+        if (sampledSupport.Support1 & D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE) {
+            _formatFeatures[i] |= FormatFeature::SAMPLED_TEXTURE;
+            const auto type = GFX_FORMAT_INFOS[i].type;
+            if (type != FormatType::UINT && type != FormatType::INT) {
+                _formatFeatures[i] |= FormatFeature::LINEAR_FILTER;
+            }
+        }
+        if (support1 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW) {
+            _formatFeatures[i] |= FormatFeature::STORAGE_TEXTURE;
+        }
+        if (support1 & D3D12_FORMAT_SUPPORT1_IA_VERTEX_BUFFER) {
+            _formatFeatures[i] |= FormatFeature::VERTEX_ATTRIBUTE;
+        }
+    }
 }
 
 void CCD3D12Device::initCapabilities() {

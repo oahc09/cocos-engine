@@ -37,6 +37,8 @@ namespace gfx {
 
 class Swapchain;
 
+DXGI_FORMAT toD3D12Format(Format format);
+
 class CC_DLL CCD3D12Texture final : public Texture {
 public:
     CCD3D12Texture();
@@ -44,8 +46,6 @@ public:
 
     void *getD3D12ResourceHandle() const;
     void *getD3D12OwnedResourceHandle() const;
-    void markMipLevelUploaded(uint32_t mipLevel);
-    uint32_t getValidSRVMipLevels() const;
 
     // Returns true if this texture wraps a swapchain back buffer (color attachment)
     bool isSwapchainColorTexture() const;
@@ -76,7 +76,6 @@ private:
     std::unique_ptr<Impl> _impl;
 
     bool _isSwapchainTexture{false};
-    uint64_t _uploadedMipMask{0};
     D3D12_RESOURCE_STATES _currentState = D3D12_RESOURCE_STATE_COMMON;
 };
 

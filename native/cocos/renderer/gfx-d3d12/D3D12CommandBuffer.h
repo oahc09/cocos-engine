@@ -25,10 +25,19 @@
 #pragma once
 
 #include "gfx-base/GFXCommandBuffer.h"
+#include <d3d12.h>
 #include <memory>
+#include <wrl/client.h>
 
 namespace cc {
 namespace gfx {
+
+bool generateD3D12Mipmaps(
+    ID3D12Device *device,
+    ID3D12GraphicsCommandList *commandList,
+    ID3D12Resource *resource,
+    const TextureInfo &textureInfo,
+    ccstd::vector<Microsoft::WRL::ComPtr<ID3D12DescriptorHeap>> &pendingDescriptorHeaps);
 
 class CC_DLL CCD3D12CommandBuffer final : public CommandBuffer {
 public:
@@ -79,6 +88,8 @@ protected:
     void doDestroy() override;
 
 private:
+    void applyDynamicPipelineState();
+
     struct Impl;
     std::unique_ptr<Impl> _impl;
 };
