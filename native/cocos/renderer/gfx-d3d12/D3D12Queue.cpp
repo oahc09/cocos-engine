@@ -170,7 +170,8 @@ void CCD3D12Queue::submit(CommandBuffer *const *cmdBuffs, uint32_t count) {
     graphicsQueue->ExecuteCommandLists(static_cast<UINT>(commandLists.size()), commandLists.data());
     dumpQueueDebugMessages(d3dDevice, "after-execute");
 
-    // Signal fence and wait (synchronous submit for PoC)
+    // Signal completion for allocator/resource reuse. Reuse waits happen lazily
+    // in CommandBuffer::begin() and Device::retireFrameResources(), not here.
     if (_impl->fence && _impl->fenceEvent) {
         ++_impl->fenceValue;
         HRESULT hr = graphicsQueue->Signal(_impl->fence.Get(), _impl->fenceValue);
@@ -178,23 +179,14 @@ void CCD3D12Queue::submit(CommandBuffer *const *cmdBuffs, uint32_t count) {
             CC_LOG_ERROR("D3D12Queue::submit - Signal failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
             return;
         }
-
-        if (_impl->fence->GetCompletedValue() < _impl->fenceValue) {
-            hr = _impl->fence->SetEventOnCompletion(_impl->fenceValue, _impl->fenceEvent);
-            if (SUCCEEDED(hr)) {
-                DWORD waitResult = WaitForSingleObject(_impl->fenceEvent, 5000);
-                if (waitResult == WAIT_TIMEOUT) {
-                    CC_LOG_ERROR("D3D12Queue::submit - fence wait timed out (5s). GPU may be hung.");
-                    if (d3dDevice) {
-                        HRESULT deviceHR = d3dDevice->GetDeviceRemovedReason();
-                        CC_LOG_ERROR("D3D12 device removed reason: 0x%08x", static_cast<unsigned>(deviceHR));
-                    }
-                } else if (waitResult == WAIT_FAILED) {
-                    CC_LOG_ERROR("D3D12Queue::submit - WaitForSingleObject failed. errno=%u", static_cast<unsigned>(GetLastError()));
-                }
+        for (uint32_t i = 0; i < count; ++i) {
+            if (!cmdBuffs[i]) continue;
+            auto *d3d12CmdBuf = static_cast<CCD3D12CommandBuffer *>(cmdBuffs[i]);
+            if (d3d12CmdBuf->getType() == CommandBufferType::PRIMARY) {
+                d3d12CmdBuf->notifySubmitted(_impl->fence.Get(), _impl->fenceValue);
             }
         }
-        dumpQueueDebugMessages(d3dDevice, "after-fence-wait");
+        device->notifySubmittedFence(_impl->fence.Get(), _impl->fenceValue);
     }
 }
 

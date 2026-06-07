@@ -80,6 +80,8 @@ public:
     // Returns the closed ID3D12GraphicsCommandList as void* for Queue::submit
     void *getD3D12CommandList() const;
 
+    void notifySubmitted(void *fence, uint64_t fenceValue);
+
     // Flush pending descriptor set bindings to GPU (called internally before draw/dispatch)
     void flushDescriptorSets();
 
@@ -88,6 +90,7 @@ protected:
     void doDestroy() override;
 
 private:
+    void waitForFenceValue();
     void applyDynamicPipelineState();
     void transitionColorAttachment(uint32_t attachment, D3D12_RESOURCE_STATES state);
     void bindSubpassRenderTargets(uint32_t subpass);

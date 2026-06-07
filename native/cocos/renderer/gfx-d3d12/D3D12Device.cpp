@@ -94,7 +94,7 @@ void copyReadbackToBuffer(const uint8_t *mappedData, const D3D12_PLACED_SUBRESOU
         }
     }
 }
-}
+} // namespace
 
 struct CCD3D12Device::Impl {
     Microsoft::WRL::ComPtr<IDXGIFactory6> dxgiFactory;
@@ -107,10 +107,21 @@ struct CCD3D12Device::Impl {
 
     HANDLE fenceEvent{nullptr};
     uint64_t fenceValue{0};
+    Microsoft::WRL::ComPtr<ID3D12Fence> lastSubmittedFence;
+    uint64_t lastSubmittedFenceValue{0};
+    uint64_t lastRetiredFenceValue{0};
 
     // GPU-visible descriptor heap pools for shader access
     std::unique_ptr<D3D12DescriptorHeapPool> gpuDescriptorHeapPool;    // CBV_SRV_UAV, shaderVisible
     std::unique_ptr<D3D12DescriptorHeapPool> samplerDescriptorHeapPool; // SAMPLER, shaderVisible
+
+    struct UploadPage {
+        Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+        uint8_t *mappedData{nullptr};
+        uint64_t size{0};
+        uint64_t offset{0};
+    };
+    ccstd::vector<UploadPage> uploadPages;
 
     // Dummy resources for safe null descriptor bindings
     IntrusivePtr<CCD3D12Texture> dummyTexture;
@@ -284,16 +295,9 @@ void CCD3D12Device::doDestroy() {
 }
 
 void CCD3D12Device::acquire(Swapchain *const *swapchains, uint32_t count) {
-    // present() waits for the previous frame before the next acquire, so all
-    // descriptor allocations from that frame are no longer in flight here.
-    // Reset once per frame; resetting from each CommandBuffer::begin() would
-    // let later command buffers overwrite descriptors referenced by earlier ones.
-    if (_impl->gpuDescriptorHeapPool) {
-        _impl->gpuDescriptorHeapPool->reset();
-    }
-    if (_impl->samplerDescriptorHeapPool) {
-        _impl->samplerDescriptorHeapPool->reset();
-    }
+    // Reclaim transient descriptor and upload pages only after the last queue
+    // submission fence has completed. This avoids a blocking wait in present().
+    retireFrameResources();
 
     // The DeviceAgent and DeviceValidator layers unwrap their wrappers before
     // passing swapchains down to us, so the pointers here are raw CCD3D12Swapchain*.
@@ -315,6 +319,114 @@ CCD3D12Texture *CCD3D12Device::getDummyTexture() const {
 
 CCD3D12Buffer *CCD3D12Device::getDummyBuffer() const {
     return _impl ? _impl->dummyBuffer.get() : nullptr;
+}
+
+D3D12UploadAllocation CCD3D12Device::allocateUploadBuffer(uint64_t size, uint64_t alignment) {
+    D3D12UploadAllocation allocation;
+    if (!_impl || !_impl->d3dDevice || size == 0) {
+        return allocation;
+    }
+
+    alignment = std::max<uint64_t>(alignment, 1);
+    auto alignUp = [](uint64_t value, uint64_t align) {
+        return ((value + align - 1) / align) * align;
+    };
+
+    constexpr uint64_t DEFAULT_UPLOAD_PAGE_SIZE = 1024ULL * 1024ULL;
+    const uint64_t requiredSize = alignUp(size, alignment);
+
+    for (auto &page : _impl->uploadPages) {
+        const uint64_t alignedOffset = alignUp(page.offset, alignment);
+        if (alignedOffset + requiredSize <= page.size) {
+            page.offset = alignedOffset + requiredSize;
+            allocation.resource = page.resource.Get();
+            allocation.mappedData = page.mappedData + alignedOffset;
+            allocation.offset = alignedOffset;
+            allocation.gpuAddress = page.resource->GetGPUVirtualAddress() + alignedOffset;
+            allocation.size = requiredSize;
+            allocation.isValid = true;
+            return allocation;
+        }
+    }
+
+    D3D12_HEAP_PROPERTIES heapProperties{};
+    heapProperties.Type = D3D12_HEAP_TYPE_UPLOAD;
+    heapProperties.CreationNodeMask = 1;
+    heapProperties.VisibleNodeMask = 1;
+
+    D3D12_RESOURCE_DESC resourceDesc{};
+    resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    resourceDesc.Width = std::max<uint64_t>(DEFAULT_UPLOAD_PAGE_SIZE, requiredSize);
+    resourceDesc.Height = 1;
+    resourceDesc.DepthOrArraySize = 1;
+    resourceDesc.MipLevels = 1;
+    resourceDesc.Format = DXGI_FORMAT_UNKNOWN;
+    resourceDesc.SampleDesc.Count = 1;
+    resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    Impl::UploadPage page;
+    page.size = resourceDesc.Width;
+    HRESULT hr = _impl->d3dDevice->CreateCommittedResource(
+        &heapProperties,
+        D3D12_HEAP_FLAG_NONE,
+        &resourceDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,
+        nullptr,
+        IID_PPV_ARGS(&page.resource));
+    if (FAILED(hr)) {
+        CC_LOG_ERROR("D3D12 upload page creation failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+        return allocation;
+    }
+
+    D3D12_RANGE readRange{};
+    void *mappedData = nullptr;
+    hr = page.resource->Map(0, &readRange, &mappedData);
+    if (FAILED(hr) || !mappedData) {
+        CC_LOG_ERROR("D3D12 upload page Map failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+        return allocation;
+    }
+    page.mappedData = static_cast<uint8_t *>(mappedData);
+    page.offset = requiredSize;
+
+    allocation.resource = page.resource.Get();
+    allocation.mappedData = page.mappedData;
+    allocation.offset = 0;
+    allocation.gpuAddress = page.resource->GetGPUVirtualAddress();
+    allocation.size = requiredSize;
+    allocation.isValid = true;
+
+    _impl->uploadPages.emplace_back(std::move(page));
+    return allocation;
+}
+
+void CCD3D12Device::notifySubmittedFence(void *fence, uint64_t value) {
+    if (!_impl) {
+        return;
+    }
+    _impl->lastSubmittedFence = static_cast<ID3D12Fence *>(fence);
+    _impl->lastSubmittedFenceValue = value;
+}
+
+void CCD3D12Device::retireFrameResources() {
+    if (!_impl || !_impl->lastSubmittedFence || _impl->lastSubmittedFenceValue == 0) {
+        return;
+    }
+    const uint64_t completedValue = _impl->lastSubmittedFence->GetCompletedValue();
+    if (completedValue < _impl->lastSubmittedFenceValue ||
+        _impl->lastRetiredFenceValue == _impl->lastSubmittedFenceValue) {
+        return;
+    }
+
+    if (_impl->gpuDescriptorHeapPool) {
+        _impl->gpuDescriptorHeapPool->reset();
+    }
+    if (_impl->samplerDescriptorHeapPool) {
+        _impl->samplerDescriptorHeapPool->reset();
+    }
+    for (auto &page : _impl->uploadPages) {
+        page.offset = 0;
+    }
+    _impl->lastRetiredFenceValue = _impl->lastSubmittedFenceValue;
 }
 
 void *CCD3D12Device::getDrawIndirectSignature() const {
@@ -355,25 +467,10 @@ void CCD3D12Device::present() {
             CC_LOG_ERROR("D3D12 queue signal failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
             continue;
         }
-
-        if (_impl->frameFence->GetCompletedValue() < _impl->fenceValue) {
-            hr = _impl->frameFence->SetEventOnCompletion(_impl->fenceValue, _impl->fenceEvent);
-            if (SUCCEEDED(hr)) {
-                DWORD waitResult = WaitForSingleObject(_impl->fenceEvent, 5000);
-                if (waitResult == WAIT_TIMEOUT) {
-                    CC_LOG_ERROR("D3D12 present fence wait timed out (5s). GPU may be hung.");
-                } else if (waitResult == WAIT_FAILED) {
-                    CC_LOG_ERROR("D3D12 present WaitForSingleObject failed. errno=%u", static_cast<unsigned>(GetLastError()));
-                }
-            } else {
-                CC_LOG_ERROR("D3D12 fence wait setup failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
-            }
-        }
     }
 
-    // Note: GPU descriptor heap pool reset is now handled exclusively in
-    // CommandBuffer::begin() to avoid double-reset if multiple command buffers
-    // exist. Previously this was redundantly called here AND in begin().
+    // Transient descriptor/upload pages are reclaimed lazily in acquire()
+    // after the queue fence proves the previous submission has completed.
 }
 
 CommandBuffer *CCD3D12Device::createCommandBuffer(const CommandBufferInfo &info, bool hasAgent) {
@@ -450,8 +547,12 @@ void CCD3D12Device::copyBuffersToTexture(const uint8_t *const *buffers, Texture 
         CC_LOG_WARNING("D3D12 texture upload skipped for unsupported texel size.");
         return;
     }
+#ifndef NDEBUG
     const bool diagnoseMipUpload =
         hasFlag(textureInfo.flags, TextureFlagBit::GEN_MIPMAP) && textureInfo.levelCount > 1;
+#else
+    constexpr bool diagnoseMipUpload = false;
+#endif
     if (diagnoseMipUpload) {
         CC_LOG_INFO("[D3D12-MIP-DIAG] device upload resource=%p size=%ux%u levels=%u layers=%u format=%u regions=%u",
                     textureResource, textureInfo.width, textureInfo.height, textureInfo.levelCount,
@@ -474,13 +575,6 @@ void CCD3D12Device::copyBuffersToTexture(const uint8_t *const *buffers, Texture 
 
     auto toCopyDest = textureTransition(textureResource, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
     _impl->commandList->ResourceBarrier(1, &toCopyDest);
-
-    // Keep all upload resources alive until after GPU execution completes.
-    // Previously, uploadResource was a local inside the for-loop body and was
-    // destroyed before CommandList::Close(), which violates D3D12 resource
-    // lifetime rules and triggers DEVICE_HUNG / TDR.
-    ccstd::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> uploadResources;
-    uploadResources.reserve(count);
 
     for (uint32_t regionIndex = 0; regionIndex < count; ++regionIndex) {
         if (!buffers[regionIndex]) {
@@ -508,44 +602,10 @@ void CCD3D12Device::copyBuffersToTexture(const uint8_t *const *buffers, Texture 
             continue;
         }
 
-        D3D12_HEAP_PROPERTIES heapProperties{};
-        heapProperties.Type = D3D12_HEAP_TYPE_UPLOAD;
-        heapProperties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
-        heapProperties.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-        heapProperties.CreationNodeMask = 1;
-        heapProperties.VisibleNodeMask = 1;
-
-        D3D12_RESOURCE_DESC uploadDesc{};
-        uploadDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        uploadDesc.Alignment = 0;
-        uploadDesc.Width = uploadSize;
-        uploadDesc.Height = 1;
-        uploadDesc.DepthOrArraySize = 1;
-        uploadDesc.MipLevels = 1;
-        uploadDesc.Format = DXGI_FORMAT_UNKNOWN;
-        uploadDesc.SampleDesc.Count = 1;
-        uploadDesc.SampleDesc.Quality = 0;
-        uploadDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-        uploadDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
-
-        Microsoft::WRL::ComPtr<ID3D12Resource> uploadResource;
-        hr = _impl->d3dDevice->CreateCommittedResource(
-            &heapProperties,
-            D3D12_HEAP_FLAG_NONE,
-            &uploadDesc,
-            D3D12_RESOURCE_STATE_GENERIC_READ,
-            nullptr,
-            IID_PPV_ARGS(&uploadResource));
-        if (FAILED(hr)) {
-            CC_LOG_ERROR("CreateCommittedResource(texture upload) failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
-            continue;
-        }
-
-        void *mappedData = nullptr;
-        D3D12_RANGE readRange{};
-        hr = uploadResource->Map(0, &readRange, &mappedData);
-        if (FAILED(hr) || !mappedData) {
-            CC_LOG_ERROR("D3D12 texture upload Map failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+        auto upload = allocateUploadBuffer(uploadSize + footprint.Offset, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+        if (!upload.isValid || !upload.mappedData || !upload.resource) {
+            CC_LOG_ERROR("D3D12 texture upload allocation failed. size=%llu",
+                         static_cast<unsigned long long>(uploadSize + footprint.Offset));
             continue;
         }
 
@@ -560,7 +620,7 @@ void CCD3D12Device::copyBuffersToTexture(const uint8_t *const *buffers, Texture 
             (region.texExtent.height + blockHeight - 1) / blockHeight, rowCount);
         const uint32_t copyDepth = std::max<uint32_t>(region.texExtent.depth, 1);
         const auto *src = buffers[regionIndex] + region.buffOffset;
-        auto *dstBytes = static_cast<uint8_t *>(mappedData) + footprint.Offset;
+        auto *dstBytes = static_cast<uint8_t *>(upload.mappedData) + footprint.Offset;
 
         for (uint32_t z = 0; z < copyDepth; ++z) {
             for (uint32_t row = 0; row < copyRows; ++row) {
@@ -570,13 +630,11 @@ void CCD3D12Device::copyBuffersToTexture(const uint8_t *const *buffers, Texture 
             }
         }
 
-        D3D12_RANGE writeRange{0, static_cast<SIZE_T>(uploadSize)};
-        uploadResource->Unmap(0, &writeRange);
-
         D3D12_TEXTURE_COPY_LOCATION srcLocation{};
-        srcLocation.pResource = uploadResource.Get();
+        srcLocation.pResource = static_cast<ID3D12Resource *>(upload.resource);
         srcLocation.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
         srcLocation.PlacedFootprint = footprint;
+        srcLocation.PlacedFootprint.Offset = upload.offset + footprint.Offset;
 
         D3D12_TEXTURE_COPY_LOCATION dstLocation{};
         dstLocation.pResource = textureResource;
@@ -598,9 +656,6 @@ void CCD3D12Device::copyBuffersToTexture(const uint8_t *const *buffers, Texture 
             region.texOffset.z,
             &srcLocation,
             &srcBox);
-        // Transfer ownership to the vector — keeps resource alive until
-        // after waitForGpu() below.
-        uploadResources.push_back(std::move(uploadResource));
     }
 
     ccstd::vector<Microsoft::WRL::ComPtr<ID3D12DescriptorHeap>> mipDescriptorHeaps;
@@ -627,8 +682,6 @@ void CCD3D12Device::copyBuffersToTexture(const uint8_t *const *buffers, Texture 
     _impl->graphicsQueue->ExecuteCommandLists(1, commandLists);
     waitForGpu();
 
-    // Now safe to release upload resources — GPU has finished.
-    uploadResources.clear();
     mipDescriptorHeaps.clear();
 }
 
@@ -1102,6 +1155,9 @@ void CCD3D12Device::waitForGpu() {
             return;
         }
         WaitForSingleObject(_impl->fenceEvent, INFINITE);
+    }
+    for (auto &page : _impl->uploadPages) {
+        page.offset = 0;
     }
 }
 

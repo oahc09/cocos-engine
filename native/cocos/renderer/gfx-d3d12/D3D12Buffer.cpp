@@ -41,6 +41,8 @@ struct CCD3D12Buffer::Impl {
     Microsoft::WRL::ComPtr<ID3D12Resource> resource;
     CCD3D12Buffer *parent{nullptr};
     uint32_t resourceOffset{0};
+    bool uploadHeap{true};
+    D3D12_RESOURCE_STATES currentState{D3D12_RESOURCE_STATE_GENERIC_READ};
 };
 
 CCD3D12Buffer::CCD3D12Buffer() {
@@ -113,6 +115,76 @@ void CCD3D12Buffer::update(const void *buffer, uint32_t size) {
     if (!resource) {
         return;
     }
+
+    const uint32_t copySize = std::min(size, _size);
+    const uint32_t resourceOffset = getD3D12ResourceOffset();
+
+    if (!isD3D12UploadHeap()) {
+        auto *device = CCD3D12Device::getInstance();
+        auto *d3dDevice = static_cast<ID3D12Device *>(device ? device->getD3D12DeviceHandle() : nullptr);
+        auto *queue = static_cast<ID3D12CommandQueue *>(device ? device->getGraphicsQueueHandle() : nullptr);
+        if (!d3dDevice || !queue) {
+            return;
+        }
+
+        auto upload = device->allocateUploadBuffer(copySize, 256);
+        if (!upload.isValid || !upload.mappedData || !upload.resource) {
+            return;
+        }
+        std::memcpy(upload.mappedData, buffer, copySize);
+
+        Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocator;
+        HRESULT hr = d3dDevice->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator));
+        if (FAILED(hr)) {
+            return;
+        }
+
+        Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commandList;
+        hr = d3dDevice->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr, IID_PPV_ARGS(&commandList));
+        if (FAILED(hr)) {
+            return;
+        }
+
+        const auto previousState = getCurrentState();
+        if (previousState != D3D12_RESOURCE_STATE_COPY_DEST) {
+            D3D12_RESOURCE_BARRIER toCopyDest{};
+            toCopyDest.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            toCopyDest.Transition.pResource = resource;
+            toCopyDest.Transition.StateBefore = previousState;
+            toCopyDest.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+            toCopyDest.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            commandList->ResourceBarrier(1, &toCopyDest);
+        }
+        commandList->CopyBufferRegion(resource, resourceOffset, static_cast<ID3D12Resource *>(upload.resource), upload.offset, copySize);
+        D3D12_RESOURCE_BARRIER toRead{};
+        toRead.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        toRead.Transition.pResource = resource;
+        toRead.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        toRead.Transition.StateAfter = D3D12_RESOURCE_STATE_GENERIC_READ;
+        toRead.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        commandList->ResourceBarrier(1, &toRead);
+        commandList->Close();
+
+        ID3D12CommandList *lists[] = {commandList.Get()};
+        queue->ExecuteCommandLists(1, lists);
+
+        Microsoft::WRL::ComPtr<ID3D12Fence> fence;
+        hr = d3dDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
+        if (SUCCEEDED(hr)) {
+            HANDLE fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+            if (fenceEvent) {
+                queue->Signal(fence.Get(), 1);
+                if (fence->GetCompletedValue() < 1) {
+                    fence->SetEventOnCompletion(1, fenceEvent);
+                    WaitForSingleObject(fenceEvent, INFINITE);
+                }
+                CloseHandle(fenceEvent);
+            }
+        }
+        setCurrentState(D3D12_RESOURCE_STATE_GENERIC_READ);
+        return;
+    }
+
     void *mappedData = nullptr;
     D3D12_RANGE readRange{};
     HRESULT hr = resource->Map(0, &readRange, &mappedData);
@@ -121,8 +193,6 @@ void CCD3D12Buffer::update(const void *buffer, uint32_t size) {
         return;
     }
 
-    const uint32_t copySize = std::min(size, _size);
-    const uint32_t resourceOffset = getD3D12ResourceOffset();
     auto *dst = static_cast<uint8_t *>(mappedData) + resourceOffset;
     std::memcpy(dst, buffer, copySize);
 
@@ -165,16 +235,35 @@ uint32_t CCD3D12Buffer::getD3D12ResourceOffset() const {
     return _impl->resourceOffset;
 }
 
-Microsoft::WRL::ComPtr<ID3D12Resource> CCD3D12Buffer::replaceD3D12Resource(Microsoft::WRL::ComPtr<ID3D12Resource> resource) {
-    Microsoft::WRL::ComPtr<ID3D12Resource> previous;
-    if (!_impl || _isBufferView || !resource) {
-        return previous;
+bool CCD3D12Buffer::isD3D12UploadHeap() const {
+    if (!_impl) {
+        return true;
     }
+    if (_impl->parent) {
+        return _impl->parent->isD3D12UploadHeap();
+    }
+    return _impl->uploadHeap;
+}
 
-    previous = _impl->resource;
-    _impl->resource = std::move(resource);
-    _impl->resourceOffset = 0;
-    return previous;
+D3D12_RESOURCE_STATES CCD3D12Buffer::getCurrentState() const {
+    if (!_impl) {
+        return D3D12_RESOURCE_STATE_COMMON;
+    }
+    if (_impl->parent) {
+        return _impl->parent->getCurrentState();
+    }
+    return _impl->currentState;
+}
+
+void CCD3D12Buffer::setCurrentState(D3D12_RESOURCE_STATES state) {
+    if (!_impl) {
+        return;
+    }
+    if (_impl->parent) {
+        _impl->parent->setCurrentState(state);
+        return;
+    }
+    _impl->currentState = state;
 }
 
 bool CCD3D12Buffer::createResource(uint32_t size) {
@@ -189,8 +278,11 @@ bool CCD3D12Buffer::createResource(uint32_t size) {
         return false;
     }
 
+    const bool useUploadHeap = hasFlag(_memUsage, MemoryUsageBit::HOST) &&
+                               !hasFlag(_usage, BufferUsageBit::UNIFORM);
+
     D3D12_HEAP_PROPERTIES heapProperties{};
-    heapProperties.Type = D3D12_HEAP_TYPE_UPLOAD;
+    heapProperties.Type = useUploadHeap ? D3D12_HEAP_TYPE_UPLOAD : D3D12_HEAP_TYPE_DEFAULT;
     heapProperties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
     heapProperties.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
     heapProperties.CreationNodeMask = 1;
@@ -214,7 +306,7 @@ bool CCD3D12Buffer::createResource(uint32_t size) {
         &heapProperties,
         D3D12_HEAP_FLAG_NONE,
         &resourceDesc,
-        D3D12_RESOURCE_STATE_GENERIC_READ,
+        useUploadHeap ? D3D12_RESOURCE_STATE_GENERIC_READ : D3D12_RESOURCE_STATE_COMMON,
         nullptr,
         IID_PPV_ARGS(&resource));
     if (FAILED(hr)) {
@@ -224,6 +316,8 @@ bool CCD3D12Buffer::createResource(uint32_t size) {
 
     _impl->resource = resource;
     _impl->resourceOffset = 0;
+    _impl->uploadHeap = useUploadHeap;
+    _impl->currentState = useUploadHeap ? D3D12_RESOURCE_STATE_GENERIC_READ : D3D12_RESOURCE_STATE_COMMON;
     return true;
 }
 

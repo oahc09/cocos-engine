@@ -412,12 +412,14 @@ bool generateMipmaps(ID3D12Device *device,
                      const TextureInfo &textureInfo,
                      ccstd::vector<Microsoft::WRL::ComPtr<ID3D12DescriptorHeap>> &pendingDescriptorHeaps) {
     if (!canGenerateMipmaps(textureInfo, resource)) {
+#ifndef NDEBUG
         if (hasFlag(textureInfo.flags, TextureFlagBit::GEN_MIPMAP) && textureInfo.levelCount > 1) {
             CC_LOG_WARNING("[D3D12-MIP-DIAG] generation rejected resource=%p size=%ux%u levels=%u format=%u flags=0x%x",
                            resource, textureInfo.width, textureInfo.height, textureInfo.levelCount,
                            static_cast<unsigned>(textureInfo.format),
                            resource ? static_cast<unsigned>(resource->GetDesc().Flags) : 0U);
         }
+#endif
         return false;
     }
 
@@ -524,6 +526,8 @@ struct CCD3D12CommandBuffer::Impl {
     bool descriptorSetsDirty{false};
     ID3D12DescriptorHeap *boundCbvSrvUavHeap{nullptr};
     ID3D12DescriptorHeap *boundSamplerHeap{nullptr};
+    Microsoft::WRL::ComPtr<ID3D12Fence> lastSubmittedFence;
+    uint64_t lastSubmittedFenceValue{0};
 
     float dynamicDepthBias{0.F};
     float dynamicDepthBiasClamp{0.F};
@@ -533,11 +537,16 @@ struct CCD3D12CommandBuffer::Impl {
     bool hasDynamicDepthBias{false};
     bool hasDynamicStencilReadMask{false};
     bool hasDynamicStencilWriteMask{false};
+    PipelineState *lastDynamicPipelineStateOwner{nullptr};
+    float lastDynamicDepthBias{0.F};
+    float lastDynamicDepthBiasClamp{0.F};
+    float lastDynamicDepthBiasSlope{0.F};
+    uint32_t lastDynamicStencilReadMask{0xFFFFFFFFU};
+    uint32_t lastDynamicStencilWriteMask{0xFFFFFFFFU};
+    bool dynamicPipelineStateValid{false};
 
-    // Upload resources created during copyBuffersToTexture must remain alive
-    // until the GPU finishes executing the command list. They are released at
-    // the start of the next begin() call, by which point the Queue has
-    // already waited for the previous frame's GPU work to complete.
+    // Resources replaced while recording stay alive until this command buffer
+    // can be safely reused. Upload heap pages are owned by the device ring.
     ccstd::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> pendingUploadResources;
     ccstd::vector<Microsoft::WRL::ComPtr<ID3D12DescriptorHeap>> pendingDescriptorHeaps;
 };
@@ -600,8 +609,44 @@ void CCD3D12CommandBuffer::doDestroy() {
     _impl->commandList.Reset();
     _impl->commandAllocator.Reset();
     _impl->d3dDevice.Reset();
+    _impl->lastSubmittedFence.Reset();
+    _impl->lastSubmittedFenceValue = 0;
     _impl->boundPipelineState = nullptr;
     _impl->boundPipelineLayout = nullptr;
+}
+
+void CCD3D12CommandBuffer::notifySubmitted(void *fence, uint64_t fenceValue) {
+    if (!_impl) {
+        return;
+    }
+    _impl->lastSubmittedFence = static_cast<ID3D12Fence *>(fence);
+    _impl->lastSubmittedFenceValue = fenceValue;
+}
+
+void CCD3D12CommandBuffer::waitForFenceValue() {
+    if (!_impl || !_impl->lastSubmittedFence || _impl->lastSubmittedFenceValue == 0) {
+        return;
+    }
+    if (_impl->lastSubmittedFence->GetCompletedValue() >= _impl->lastSubmittedFenceValue) {
+        _impl->lastSubmittedFence.Reset();
+        _impl->lastSubmittedFenceValue = 0;
+        return;
+    }
+
+    HANDLE fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+    if (!fenceEvent) {
+        CC_LOG_ERROR("D3D12CommandBuffer::begin - CreateEvent failed while waiting for allocator reuse.");
+        return;
+    }
+    HRESULT hr = _impl->lastSubmittedFence->SetEventOnCompletion(_impl->lastSubmittedFenceValue, fenceEvent);
+    if (SUCCEEDED(hr)) {
+        WaitForSingleObject(fenceEvent, INFINITE);
+        _impl->lastSubmittedFence.Reset();
+        _impl->lastSubmittedFenceValue = 0;
+    } else {
+        CC_LOG_ERROR("D3D12CommandBuffer::begin - SetEventOnCompletion failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+    }
+    CloseHandle(fenceEvent);
 }
 
 void CCD3D12CommandBuffer::begin(RenderPass *renderPass, uint32_t subpass, Framebuffer *frameBuffer) {
@@ -612,6 +657,8 @@ void CCD3D12CommandBuffer::begin(RenderPass *renderPass, uint32_t subpass, Frame
         CC_LOG_ERROR("D3D12CommandBuffer::begin - allocator or command list is null.");
         return;
     }
+
+    waitForFenceValue();
 
     HRESULT hr = _impl->commandAllocator->Reset();
     if (FAILED(hr)) {
@@ -640,7 +687,8 @@ void CCD3D12CommandBuffer::begin(RenderPass *renderPass, uint32_t subpass, Frame
     _impl->activeDepthTexture = nullptr;
     _impl->activeColorTargets.clear();
     _impl->inRenderPass = false;
-    // Queue::submit() has already waited for GPU completion.
+    // waitForFenceValue() above guarantees resources referenced by the previous
+    // submission are no longer in flight.
     _impl->pendingUploadResources.clear();
     _impl->pendingDescriptorHeaps.clear();
     // Clear pending descriptor sets
@@ -659,6 +707,8 @@ void CCD3D12CommandBuffer::begin(RenderPass *renderPass, uint32_t subpass, Frame
     _impl->hasDynamicDepthBias = false;
     _impl->hasDynamicStencilReadMask = false;
     _impl->hasDynamicStencilWriteMask = false;
+    _impl->lastDynamicPipelineStateOwner = nullptr;
+    _impl->dynamicPipelineStateValid = false;
     _numDrawCalls = 0;
     _numInstances = 0;
     _numTriangles = 0;
@@ -1291,6 +1341,7 @@ void CCD3D12CommandBuffer::bindPipelineState(PipelineState *pso) {
     }
 
     _impl->boundPipelineState = pso;
+    _impl->dynamicPipelineStateValid = false;
     applyDynamicPipelineState();
 }
 
@@ -1325,11 +1376,28 @@ void CCD3D12CommandBuffer::applyDynamicPipelineState() {
                                           ? _impl->dynamicStencilWriteMask
                                           : (useFrontStencilMask ? depthStencil.stencilWriteMaskFront : depthStencil.stencilWriteMaskBack);
 
+    if (_impl->dynamicPipelineStateValid &&
+        _impl->lastDynamicPipelineStateOwner == _impl->boundPipelineState &&
+        _impl->lastDynamicDepthBias == depthBias &&
+        _impl->lastDynamicDepthBiasClamp == depthBiasClamp &&
+        _impl->lastDynamicDepthBiasSlope == depthBiasSlope &&
+        _impl->lastDynamicStencilReadMask == stencilReadMask &&
+        _impl->lastDynamicStencilWriteMask == stencilWriteMask) {
+        return;
+    }
+
     auto *variant = static_cast<ID3D12PipelineState *>(
         d3d12PSO->getDynamicID3D12PipelineState(depthBias, depthBiasClamp, depthBiasSlope,
                                                 stencilReadMask, stencilWriteMask));
     if (variant) {
         _impl->commandList->SetPipelineState(variant);
+        _impl->lastDynamicPipelineStateOwner = _impl->boundPipelineState;
+        _impl->lastDynamicDepthBias = depthBias;
+        _impl->lastDynamicDepthBiasClamp = depthBiasClamp;
+        _impl->lastDynamicDepthBiasSlope = depthBiasSlope;
+        _impl->lastDynamicStencilReadMask = stencilReadMask;
+        _impl->lastDynamicStencilWriteMask = stencilWriteMask;
+        _impl->dynamicPipelineStateValid = true;
     }
 }
 
@@ -1340,7 +1408,7 @@ void CCD3D12CommandBuffer::bindDescriptorSet(uint32_t set, DescriptorSet *descri
     // D3D12 only allows one CBV/SRV/UAV heap and one Sampler heap bound at a time,
     // so we must collect all sets and flush them together before each draw call.
     auto *d3d12Set = static_cast<CCD3D12DescriptorSet *>(descriptorSet);
-    d3d12Set->forceUpdate(); // ensure CPU staging descriptors are up to date
+    d3d12Set->update(); // dirty-aware CPU staging update
     if (dynamicOffsetCount > 0 && dynamicOffsets) {
         d3d12Set->applyDynamicOffsets(dynamicOffsetCount, dynamicOffsets);
     }
@@ -1763,77 +1831,45 @@ void CCD3D12CommandBuffer::updateBuffer(Buffer *buff, const void *data, uint32_t
     const uint32_t copySize = std::min(size, buff->getSize());
     if (copySize == 0) return;
 
-    // For uniform buffers, record a GPU CopyBufferRegion command so that
-    // consecutive updates to the same buffer (CSM levels, forward-add lights)
-    // execute in command-list order. GLES3 glBufferSubData and Vulkan
-    // vkCmdUpdateBuffer are GPU commands; D3D12 Map/memcpy is a CPU operation
-    // that overwrites in-place during recording — later levels overwrite
-    // earlier levels before the GPU executes.
-    if (!buff->isBufferView() && hasFlag(buff->getUsage(), BufferUsageBit::UNIFORM)) {
-        auto *device = CCD3D12Device::getInstance();
-        auto *d3dDevice = static_cast<ID3D12Device *>(device ? device->getD3D12DeviceHandle() : nullptr);
-        if (d3dDevice) {
-            const uint64_t alignedSize = (static_cast<uint64_t>(copySize) + 255ULL) & ~255ULL;
-
-            D3D12_HEAP_PROPERTIES uploadHeap{};
-            uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
-
-            D3D12_RESOURCE_DESC stagingDesc{};
-            stagingDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-            stagingDesc.Width = alignedSize;
-            stagingDesc.Height = 1;
-            stagingDesc.DepthOrArraySize = 1;
-            stagingDesc.MipLevels = 1;
-            stagingDesc.Format = DXGI_FORMAT_UNKNOWN;
-            stagingDesc.SampleDesc = {1, 0};
-            stagingDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-            stagingDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
-
-            Microsoft::WRL::ComPtr<ID3D12Resource> staging;
-            HRESULT hr = d3dDevice->CreateCommittedResource(
-                &uploadHeap, D3D12_HEAP_FLAG_NONE, &stagingDesc,
-                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
-                IID_PPV_ARGS(&staging));
-            if (SUCCEEDED(hr) && staging) {
-                void *mapped = nullptr;
-                hr = staging->Map(0, nullptr, &mapped);
-                if (SUCCEEDED(hr) && mapped) {
-                    std::memcpy(mapped, data, copySize);
-                    D3D12_RANGE written{0, static_cast<SIZE_T>(copySize)};
-                    staging->Unmap(0, &written);
-
-                    auto *dstResource = static_cast<ID3D12Resource *>(d3d12Buffer->getD3D12ResourceHandle());
-                    if (dstResource) {
-                        // Atomically swap the backing resource so that the
-                        // new data has a distinct GPU VA.  Earlier draws
-                        // that already recorded their descriptor heaps read
-                        // from the old resource (kept alive via
-                        // pendingUploadResources); subsequent draws use the
-                        // new resource after forceUpdate rebuilds the CBV.
-                        auto previous = d3d12Buffer->replaceD3D12Resource(staging);
-                        if (previous) {
-                            _impl->pendingUploadResources.emplace_back(std::move(previous));
-                        }
-                        _impl->pendingUploadResources.emplace_back(std::move(staging));
-
-                        for (uint32_t i = 0; i < _impl->pendingSetCount; ++i) {
-                            if (_impl->pendingSets[i].valid && _impl->pendingSets[i].set) {
-                                static_cast<CCD3D12DescriptorSet *>(_impl->pendingSets[i].set)->forceUpdate();
-                            }
-                        }
-                        if (_impl->pendingSetCount > 0) {
-                            _impl->descriptorSetsDirty = true;
-                        }
-                    }
-                }
-                return;
-            }
-        }
-    }
-
-    // Fallback for non-uniform buffers and buffer views: immediate Map/memcpy
+    // Upload heaps can be mapped directly; default heaps, including uniform
+    // buffers, are updated through a GPU copy so descriptors keep stable backing.
     auto *resource = static_cast<ID3D12Resource *>(d3d12Buffer->getD3D12ResourceHandle());
     if (!resource) return;
+
+    if (!d3d12Buffer->isD3D12UploadHeap()) {
+        auto *device = CCD3D12Device::getInstance();
+        auto upload = device ? device->allocateUploadBuffer(copySize, 256) : D3D12UploadAllocation{};
+        if (!upload.isValid || !upload.mappedData || !upload.resource) {
+            return;
+        }
+        std::memcpy(upload.mappedData, data, copySize);
+
+        const auto previousState = d3d12Buffer->getCurrentState();
+        if (previousState != D3D12_RESOURCE_STATE_COPY_DEST) {
+            D3D12_RESOURCE_BARRIER toCopyDest{};
+            toCopyDest.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            toCopyDest.Transition.pResource = resource;
+            toCopyDest.Transition.StateBefore = previousState;
+            toCopyDest.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+            toCopyDest.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            _impl->commandList->ResourceBarrier(1, &toCopyDest);
+        }
+        _impl->commandList->CopyBufferRegion(
+            resource,
+            d3d12Buffer->getD3D12ResourceOffset(),
+            static_cast<ID3D12Resource *>(upload.resource),
+            upload.offset,
+            copySize);
+        D3D12_RESOURCE_BARRIER toRead{};
+        toRead.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        toRead.Transition.pResource = resource;
+        toRead.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        toRead.Transition.StateAfter = D3D12_RESOURCE_STATE_GENERIC_READ;
+        toRead.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        _impl->commandList->ResourceBarrier(1, &toRead);
+        d3d12Buffer->setCurrentState(D3D12_RESOURCE_STATE_GENERIC_READ);
+        return;
+    }
 
     void *mappedData = nullptr;
     D3D12_RANGE readRange{};
@@ -1893,35 +1929,8 @@ void CCD3D12CommandBuffer::copyBuffersToTexture(const uint8_t *const *buffers, T
         d3dDevice->GetCopyableFootprints(&texDesc, subresource, 1, 0, &footprint, &rowCount, &rowSizeInBytes, &uploadSize);
         if (uploadSize == 0 || rowCount == 0) continue;
 
-        // Create upload buffer
-        D3D12_HEAP_PROPERTIES heapProps{};
-        heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
-        heapProps.CreationNodeMask = 1;
-        heapProps.VisibleNodeMask = 1;
-
-        D3D12_RESOURCE_DESC uploadDesc{};
-        uploadDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        uploadDesc.Alignment = 0;
-        uploadDesc.Width = uploadSize;
-        uploadDesc.Height = 1;
-        uploadDesc.DepthOrArraySize = 1;
-        uploadDesc.MipLevels = 1;
-        uploadDesc.Format = DXGI_FORMAT_UNKNOWN;
-        uploadDesc.SampleDesc.Count = 1;
-        uploadDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-        uploadDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
-
-        Microsoft::WRL::ComPtr<ID3D12Resource> uploadResource;
-        HRESULT hr = d3dDevice->CreateCommittedResource(
-            &heapProps, D3D12_HEAP_FLAG_NONE, &uploadDesc,
-            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
-            IID_PPV_ARGS(&uploadResource));
-        if (FAILED(hr)) continue;
-
-        void *mappedData = nullptr;
-        D3D12_RANGE readRange{};
-        hr = uploadResource->Map(0, &readRange, &mappedData);
-        if (FAILED(hr) || !mappedData) continue;
+        auto upload = device->allocateUploadBuffer(uploadSize + footprint.Offset, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+        if (!upload.isValid || !upload.mappedData || !upload.resource) continue;
 
         const uint32_t srcRowTexels = region.buffStride > 0 ? region.buffStride : region.texExtent.width;
         const uint32_t srcRows = region.buffTexHeight > 0 ? region.buffTexHeight : region.texExtent.height;
@@ -1934,7 +1943,7 @@ void CCD3D12CommandBuffer::copyBuffersToTexture(const uint8_t *const *buffers, T
             (region.texExtent.height + blockHeight - 1) / blockHeight, rowCount);
         const uint32_t copyDepth = std::max<uint32_t>(region.texExtent.depth, 1);
         const auto *src = buffers[i] + region.buffOffset;
-        auto *dst = static_cast<uint8_t *>(mappedData) + footprint.Offset;
+        auto *dst = static_cast<uint8_t *>(upload.mappedData) + footprint.Offset;
 
         for (uint32_t z = 0; z < copyDepth; ++z) {
             for (uint32_t row = 0; row < copyRows; ++row) {
@@ -1944,13 +1953,11 @@ void CCD3D12CommandBuffer::copyBuffersToTexture(const uint8_t *const *buffers, T
             }
         }
 
-        D3D12_RANGE writeRange{0, static_cast<SIZE_T>(uploadSize)};
-        uploadResource->Unmap(0, &writeRange);
-
         D3D12_TEXTURE_COPY_LOCATION srcLoc{};
-        srcLoc.pResource = uploadResource.Get();
+        srcLoc.pResource = static_cast<ID3D12Resource *>(upload.resource);
         srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
         srcLoc.PlacedFootprint = footprint;
+        srcLoc.PlacedFootprint.Offset = upload.offset + footprint.Offset;
 
         D3D12_TEXTURE_COPY_LOCATION dstLoc{};
         dstLoc.pResource = textureResource;
@@ -1966,9 +1973,6 @@ void CCD3D12CommandBuffer::copyBuffersToTexture(const uint8_t *const *buffers, T
         srcBox.back = copyDepth;
 
         _impl->commandList->CopyTextureRegion(&dstLoc, region.texOffset.x, region.texOffset.y, region.texOffset.z, &srcLoc, &srcBox);
-        // Transfer ownership to the pending list — keeps resource alive until
-        // the next begin() call, by which point the GPU has finished execution.
-        _impl->pendingUploadResources.push_back(std::move(uploadResource));
     }
 
     D3D12_RESOURCE_STATES postCopyState = getPostTransferTextureState(textureInfo);

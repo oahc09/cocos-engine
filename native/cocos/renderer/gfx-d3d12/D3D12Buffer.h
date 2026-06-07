@@ -42,7 +42,9 @@ public:
     void *getD3D12ResourceHandle() const;
     uint64_t getD3D12GPUVirtualAddress() const;
     uint32_t getD3D12ResourceOffset() const;
-    Microsoft::WRL::ComPtr<ID3D12Resource> replaceD3D12Resource(Microsoft::WRL::ComPtr<ID3D12Resource> resource);
+    bool isD3D12UploadHeap() const;
+    D3D12_RESOURCE_STATES getCurrentState() const;
+    void setCurrentState(D3D12_RESOURCE_STATES state);
 
 protected:
     void doInit(const BufferInfo &info) override;

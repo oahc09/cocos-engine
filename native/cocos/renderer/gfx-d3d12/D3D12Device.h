@@ -34,6 +34,15 @@ class D3D12DescriptorHeapPool;
 
 class CCD3D12Swapchain;
 
+struct D3D12UploadAllocation {
+    void *resource{nullptr};
+    void *mappedData{nullptr};
+    uint64_t offset{0};
+    uint64_t gpuAddress{0};
+    uint64_t size{0};
+    bool isValid{false};
+};
+
 class CC_DLL CCD3D12Device final : public Device {
 public:
     static CCD3D12Device *getInstance();
@@ -81,6 +90,9 @@ public:
     void *getDrawIndirectSignature() const;
     void *getDrawIndexedIndirectSignature() const;
     void *getDispatchIndirectSignature() const;
+    D3D12UploadAllocation allocateUploadBuffer(uint64_t size, uint64_t alignment);
+    void notifySubmittedFence(void *fence, uint64_t value);
+    void retireFrameResources();
 
 protected:
     static CCD3D12Device *instance;

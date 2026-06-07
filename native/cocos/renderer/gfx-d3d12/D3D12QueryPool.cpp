@@ -42,6 +42,11 @@ namespace gfx {
 struct CCD3D12QueryPool::Impl {
     Microsoft::WRL::ComPtr<ID3D12QueryHeap> queryHeap;
     Microsoft::WRL::ComPtr<ID3D12Resource> readbackBuffer;
+    Microsoft::WRL::ComPtr<ID3D12CommandAllocator> commandAllocator;
+    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commandList;
+    Microsoft::WRL::ComPtr<ID3D12Fence> fence;
+    HANDLE fenceEvent{nullptr};
+    uint64_t fenceValue{0};
     std::vector<uint32_t> completedIds;
     std::unordered_map<uint32_t, uint32_t> activeIndices;
 };
@@ -127,10 +132,48 @@ void CCD3D12QueryPool::doInit(const QueryPoolInfo &info) {
         return;
     }
 
+    hr = devicePtr->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&_impl->commandAllocator));
+    if (FAILED(hr)) {
+        CC_LOG_ERROR("D3D12QueryPool CreateCommandAllocator failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+        return;
+    }
+
+    hr = devicePtr->CreateCommandList(
+        0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+        _impl->commandAllocator.Get(), nullptr,
+        IID_PPV_ARGS(&_impl->commandList));
+    if (FAILED(hr)) {
+        CC_LOG_ERROR("D3D12QueryPool CreateCommandList failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+        return;
+    }
+    hr = _impl->commandList->Close();
+    if (FAILED(hr)) {
+        CC_LOG_ERROR("D3D12QueryPool initial command list close failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+        return;
+    }
+
+    hr = devicePtr->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_impl->fence));
+    if (FAILED(hr)) {
+        CC_LOG_ERROR("D3D12QueryPool CreateFence failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+        return;
+    }
+    _impl->fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+    if (!_impl->fenceEvent) {
+        CC_LOG_ERROR("D3D12QueryPool CreateEvent failed.");
+        return;
+    }
+
     CC_LOG_INFO("D3D12 QueryPool initialized: type=%u, maxQueries=%u", static_cast<unsigned>(_type), _maxQueryObjects);
 }
 
 void CCD3D12QueryPool::doDestroy() {
+    if (_impl->fenceEvent) {
+        CloseHandle(_impl->fenceEvent);
+        _impl->fenceEvent = nullptr;
+    }
+    _impl->fence.Reset();
+    _impl->commandList.Reset();
+    _impl->commandAllocator.Reset();
     _impl->readbackBuffer.Reset();
     _impl->queryHeap.Reset();
 }
@@ -188,7 +231,8 @@ void CCD3D12QueryPool::resetD3D12Queries() {
 }
 
 void CCD3D12QueryPool::fetchResults() {
-    if (!_impl->queryHeap || !_impl->readbackBuffer) {
+    if (!_impl->queryHeap || !_impl->readbackBuffer || !_impl->commandAllocator ||
+        !_impl->commandList || !_impl->fence || !_impl->fenceEvent) {
         return;
     }
 
@@ -198,31 +242,20 @@ void CCD3D12QueryPool::fetchResults() {
         return;
     }
 
-    auto *devicePtr = static_cast<ID3D12Device *>(CCD3D12Device::getInstance()->getD3D12DeviceHandle());
     auto *queuePtr = static_cast<ID3D12CommandQueue *>(CCD3D12Device::getInstance()->getGraphicsQueueHandle());
-    if (!devicePtr || !queuePtr) {
+    if (!queuePtr) {
         return;
     }
 
-    // Resolve query data to readback buffer
-    // This must be called after EndQuery has been recorded and the command list executed.
-    // For simplicity we use a separate command list here.
-    Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocator;
-    HRESULT hr = devicePtr->CreateCommandAllocator(
-        D3D12_COMMAND_LIST_TYPE_DIRECT,
-        IID_PPV_ARGS(&allocator));
+    HRESULT hr = _impl->commandAllocator->Reset();
     if (FAILED(hr)) {
-        CC_LOG_ERROR("D3D12QueryPool fetchResults: CreateCommandAllocator failed.");
+        CC_LOG_ERROR("D3D12QueryPool fetchResults: command allocator reset failed.");
         return;
     }
 
-    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> cmdList;
-    hr = devicePtr->CreateCommandList(
-        0, D3D12_COMMAND_LIST_TYPE_DIRECT,
-        allocator.Get(), nullptr,
-        IID_PPV_ARGS(&cmdList));
+    hr = _impl->commandList->Reset(_impl->commandAllocator.Get(), nullptr);
     if (FAILED(hr)) {
-        CC_LOG_ERROR("D3D12QueryPool fetchResults: CreateCommandList failed.");
+        CC_LOG_ERROR("D3D12QueryPool fetchResults: command list reset failed.");
         return;
     }
 
@@ -232,7 +265,7 @@ void CCD3D12QueryPool::fetchResults() {
 
     const uint32_t queryCount = static_cast<uint32_t>(_impl->completedIds.size());
 
-    cmdList->ResolveQueryData(
+    _impl->commandList->ResolveQueryData(
         _impl->queryHeap.Get(),
         queryType,
         0, // start index
@@ -240,42 +273,27 @@ void CCD3D12QueryPool::fetchResults() {
         _impl->readbackBuffer.Get(),
         0); // aligned offset
 
-    hr = cmdList->Close();
+    hr = _impl->commandList->Close();
     if (FAILED(hr)) {
         CC_LOG_ERROR("D3D12QueryPool fetchResults: Close failed.");
         return;
     }
 
-    ID3D12CommandList *lists[] = {cmdList.Get()};
+    ID3D12CommandList *lists[] = {_impl->commandList.Get()};
     queuePtr->ExecuteCommandLists(1, lists);
 
-    // Wait for GPU to finish
-    Microsoft::WRL::ComPtr<ID3D12Fence> fence;
-    hr = devicePtr->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
+    ++_impl->fenceValue;
+    hr = queuePtr->Signal(_impl->fence.Get(), _impl->fenceValue);
     if (FAILED(hr)) {
-        CC_LOG_ERROR("D3D12QueryPool fetchResults: CreateFence failed.");
         return;
     }
 
-    HANDLE fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-    if (!fenceEvent) {
-        CC_LOG_ERROR("D3D12QueryPool fetchResults: CreateEvent failed.");
-        return;
-    }
-
-    hr = queuePtr->Signal(fence.Get(), 1);
-    if (FAILED(hr)) {
-        CloseHandle(fenceEvent);
-        return;
-    }
-
-    if (fence->GetCompletedValue() < 1) {
-        hr = fence->SetEventOnCompletion(1, fenceEvent);
+    if (_impl->fence->GetCompletedValue() < _impl->fenceValue) {
+        hr = _impl->fence->SetEventOnCompletion(_impl->fenceValue, _impl->fenceEvent);
         if (SUCCEEDED(hr)) {
-            WaitForSingleObject(fenceEvent, 5000); // 5s timeout
+            WaitForSingleObject(_impl->fenceEvent, 5000);
         }
     }
-    CloseHandle(fenceEvent);
 
     // Map readback buffer and read results
     void *mappedData = nullptr;

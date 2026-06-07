@@ -463,3 +463,17 @@ Connect the ByteRover provider before relying on `brv query` for project context
 **Context**: Adding D3D12 vertex-input reflection to `D3D12PipelineState.cpp`
 **Error**: The first patch used an approximate helper-function signature and failed because the file used `mode` rather than the expected parameter name.
 **Resolution**: Read the exact surrounding function headers before large patches, then split helper insertion and logic replacement into smaller patches.
+
+[ERR-20260607-013] rg-windows-glob-path
+
+**Logged**: 2026-06-07
+**Context**: Searching D3D12 renderer logs on Windows
+**Error**: `rg ... native/cocos/renderer/gfx-d3d12/D3D12*.cpp` failed because the glob-like path was passed as a literal invalid Windows path.
+**Resolution**: Search the directory and filter by pattern, or use `rg -g "D3D12*.cpp" ... native/cocos/renderer/gfx-d3d12`.
+
+[ERR-20260608-001] rg-powershell-file-glob-argument
+
+**Logged**: 2026-06-08
+**Context**: Verifying D3D12 buffer and command-buffer regression patterns on Windows
+**Error**: `rg ... native/cocos/renderer/gfx-d3d12/D3D12Buffer.* ...` failed because PowerShell passed the wildcard-like file path as an invalid literal path.
+**Resolution**: Use explicit file paths or search the directory with `--glob "D3D12Buffer.*"` when constraining ripgrep matches on Windows.
