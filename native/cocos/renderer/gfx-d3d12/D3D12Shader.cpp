@@ -41,7 +41,9 @@
 
 #include <cstdio>
 #include <cstdarg>
+#include <cstring>
 #include <regex>
+#include <wrl/client.h>
 
 namespace cc {
 namespace gfx {
@@ -163,6 +165,47 @@ void ensureGlslangInit() {
     }
 }
 
+bool isSystemValueSemantic(const char *semanticName) {
+    return semanticName && _strnicmp(semanticName, "SV_", 3) == 0;
+}
+
+void reflectVertexInputSignature(const std::vector<uint8_t> &dxbc,
+                                 std::vector<CCD3D12Shader::VertexInputSignature> &signature) {
+    signature.clear();
+    if (dxbc.empty()) {
+        return;
+    }
+
+    Microsoft::WRL::ComPtr<ID3D12ShaderReflection> reflection;
+    HRESULT hr = D3DReflect(dxbc.data(), dxbc.size(), IID_PPV_ARGS(&reflection));
+    if (FAILED(hr) || !reflection) {
+        CC_LOG_WARNING("D3D12Shader: D3DReflect failed for vertex shader. HRESULT=0x%08x",
+                       static_cast<unsigned>(hr));
+        return;
+    }
+
+    D3D12_SHADER_DESC shaderDesc{};
+    hr = reflection->GetDesc(&shaderDesc);
+    if (FAILED(hr)) {
+        CC_LOG_WARNING("D3D12Shader: vertex shader reflection GetDesc failed. HRESULT=0x%08x",
+                       static_cast<unsigned>(hr));
+        return;
+    }
+
+    signature.reserve(shaderDesc.InputParameters);
+    for (UINT i = 0; i < shaderDesc.InputParameters; ++i) {
+        D3D12_SIGNATURE_PARAMETER_DESC paramDesc{};
+        hr = reflection->GetInputParameterDesc(i, &paramDesc);
+        if (FAILED(hr) || isSystemValueSemantic(paramDesc.SemanticName)) {
+            continue;
+        }
+        signature.push_back({
+            paramDesc.SemanticName ? paramDesc.SemanticName : "",
+            paramDesc.SemanticIndex,
+        });
+    }
+}
+
 } // anonymous namespace
 
 struct CCD3D12Shader::Impl {
@@ -177,6 +220,8 @@ struct CCD3D12Shader::Impl {
     // Entry point names (SPIRV-Cross HLSL convention)
     ccstd::string vertexEntry{"vert_main"};
     ccstd::string fragmentEntry{"frag_main"};
+
+    std::vector<VertexInputSignature> vertexInputSignature;
 
     std::vector<uint8_t> *getDXBCBuffer(ShaderStageFlagBit stage) {
         switch (stage) {
@@ -457,6 +502,8 @@ bool CCD3D12Shader::compileGLSLToDXBC(ShaderStageFlagBit stage,
 }
 
 void CCD3D12Shader::doInit(const ShaderInfo &info) {
+    _impl->vertexInputSignature.clear();
+
     for (const auto &stage : _stages) {
         std::vector<uint8_t> *dxbcBuffer = _impl->getDXBCBuffer(stage.stage);
         ccstd::string *entryName = nullptr;
@@ -502,6 +549,10 @@ void CCD3D12Shader::doInit(const ShaderInfo &info) {
                 dxbcBuffer->clear();
             }
         }
+
+        if (stage.stage == ShaderStageFlagBit::VERTEX && !dxbcBuffer->empty()) {
+            reflectVertexInputSignature(*dxbcBuffer, _impl->vertexInputSignature);
+        }
     }
 
     CC_LOG_INFO("D3D12Shader '%s' initialized with %u stages.",
@@ -516,6 +567,7 @@ void CCD3D12Shader::doDestroy() {
         _impl->computeDXBC.clear();
         _impl->hullDXBC.clear();
         _impl->domainDXBC.clear();
+        _impl->vertexInputSignature.clear();
     }
 }
 
@@ -563,6 +615,11 @@ const ccstd::string &CCD3D12Shader::getVertexEntry() const {
 const ccstd::string &CCD3D12Shader::getFragmentEntry() const {
     static const ccstd::string empty;
     return _impl ? _impl->fragmentEntry : empty;
+}
+
+const std::vector<CCD3D12Shader::VertexInputSignature> &CCD3D12Shader::getVertexInputSignature() const {
+    static const std::vector<VertexInputSignature> empty;
+    return _impl ? _impl->vertexInputSignature : empty;
 }
 
 bool CCD3D12Shader::hasBytecode(ShaderStageFlagBit stage) const {

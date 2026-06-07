@@ -25,6 +25,7 @@
 #pragma once
 
 #include "cocos/base/Ptr.h"
+#include "cocos/base/std/hash/hash.h"
 #include "gfx-base/GFXDef.h"
 
 namespace cc {
@@ -32,6 +33,38 @@ namespace scene {
 class Pass;
 }
 namespace pipeline {
+
+struct PipelineStateKey {
+    ccstd::hash_t passHash{0};
+    ccstd::hash_t renderPassHash{0};
+    ccstd::hash_t iaHash{0};
+    uint32_t shaderID{0};
+    uint32_t subpass{0};
+
+    bool operator==(const PipelineStateKey &other) const {
+        return passHash == other.passHash &&
+               renderPassHash == other.renderPassHash &&
+               iaHash == other.iaHash &&
+               shaderID == other.shaderID &&
+               subpass == other.subpass;
+    }
+
+    bool operator!=(const PipelineStateKey &other) const {
+        return !(*this == other);
+    }
+};
+
+struct PipelineStateKeyHasher {
+    ccstd::hash_t operator()(const PipelineStateKey &key) const {
+        ccstd::hash_t hash{0};
+        ccstd::hash_combine(hash, key.passHash);
+        ccstd::hash_combine(hash, key.renderPassHash);
+        ccstd::hash_combine(hash, key.iaHash);
+        ccstd::hash_combine(hash, key.shaderID);
+        ccstd::hash_combine(hash, key.subpass);
+        return hash;
+    }
+};
 
 class CC_DLL PipelineStateManager {
 public:
@@ -43,7 +76,7 @@ public:
     static void destroyAll();
 
 private:
-    static ccstd::unordered_map<ccstd::hash_t, IntrusivePtr<gfx::PipelineState>> psoHashMap;
+    static ccstd::unordered_map<PipelineStateKey, IntrusivePtr<gfx::PipelineState>, PipelineStateKeyHasher> psoHashMap;
 };
 
 } // namespace pipeline

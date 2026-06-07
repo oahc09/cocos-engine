@@ -41,6 +41,11 @@ public:
         size_t size{0};
     };
 
+    struct VertexInputSignature {
+        ccstd::string semanticName;
+        uint32_t semanticIndex{0};
+    };
+
     BytecodeBlob getVertexBytecode() const;
     BytecodeBlob getFragmentBytecode() const;
     BytecodeBlob getGeometryBytecode() const;
@@ -50,6 +55,7 @@ public:
 
     const ccstd::string &getVertexEntry() const;
     const ccstd::string &getFragmentEntry() const;
+    const std::vector<VertexInputSignature> &getVertexInputSignature() const;
 
     bool hasBytecode(ShaderStageFlagBit stage) const;
 

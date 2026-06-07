@@ -36,7 +36,9 @@
         #define NOMINMAX
     #endif
     #include <d3d12.h>
+    #include <cctype>
     #include <cstring>
+    #include <cstdlib>
     #include <dxgiformat.h>
     #include <d3dcompiler.h>
     #include <map>
@@ -249,6 +251,77 @@ DXGI_FORMAT toD3D12VertexFormat(Format fmt) {
     }
 }
 
+struct AttributeSemantic {
+    const char *name{"TEXCOORD"};
+    uint32_t index{0};
+};
+
+uint32_t trailingNumber(const ccstd::string &value) {
+    const char *begin = value.c_str();
+    const char *end = begin + value.size();
+    const char *digitStart = end;
+    while (digitStart > begin && std::isdigit(static_cast<unsigned char>(*(digitStart - 1)))) {
+        --digitStart;
+    }
+    return digitStart < end ? static_cast<uint32_t>(std::atoi(digitStart)) : 0;
+}
+
+AttributeSemantic getAttributeSemantic(const ccstd::string &attributeName, uint32_t fallbackLocation) {
+    if (attributeName == "a_position" || attributeName == "POSITION") {
+        return {"POSITION", 0};
+    }
+    if (attributeName == "a_normal" || attributeName == "NORMAL") {
+        return {"NORMAL", 0};
+    }
+    if (attributeName == "a_tangent" || attributeName == "TANGENT") {
+        return {"TANGENT", 0};
+    }
+    if (attributeName == "a_bitangent" || attributeName == "BITANGENT") {
+        return {"BITANGENT", 0};
+    }
+    if (attributeName == "a_color" || attributeName == "COLOR") {
+        return {"COLOR", 0};
+    }
+    if (attributeName.find("color") != ccstd::string::npos || attributeName.find("COLOR") != ccstd::string::npos) {
+        return {"COLOR", trailingNumber(attributeName)};
+    }
+    if (attributeName == "a_weights" || attributeName == "BLENDWEIGHT") {
+        return {"BLENDWEIGHT", 0};
+    }
+    if (attributeName == "a_joints" || attributeName == "BLENDINDICES") {
+        return {"BLENDINDICES", 0};
+    }
+    if (attributeName.find("texCoord") != ccstd::string::npos ||
+        attributeName.find("texcoord") != ccstd::string::npos ||
+        attributeName.find("TEXCOORD") != ccstd::string::npos ||
+        attributeName.find("uv") != ccstd::string::npos) {
+        return {"TEXCOORD", trailingNumber(attributeName)};
+    }
+    return {"TEXCOORD", fallbackLocation};
+}
+
+const Attribute *findShaderAttributeForReflectedInput(const CCD3D12Shader::VertexInputSignature &input,
+                                                      const AttributeList &shaderAttributes) {
+    // SPIRV-Cross maps GLSL vertex input layout(location = N) to TEXCOORDN in
+    // HLSL. Use the reflected semantic index to recover the engine attribute
+    // name from the shader template, then match that name to the IA stream.
+    if (_stricmp(input.semanticName.c_str(), "TEXCOORD") == 0) {
+        for (const auto &attr : shaderAttributes) {
+            if (attr.location == input.semanticIndex) {
+                return &attr;
+            }
+        }
+    }
+    for (const auto &attr : shaderAttributes) {
+        const auto semantic = getAttributeSemantic(attr.name, attr.location);
+        if (_stricmp(input.semanticName.c_str(), semantic.name) == 0 &&
+            input.semanticIndex == semantic.index) {
+            return &attr;
+        }
+    }
+    return nullptr;
+}
+
 } // namespace
 
 struct CCD3D12PipelineState::Impl {
@@ -424,23 +497,78 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
         psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM; // default
     }
 
-    // Input layout. SPIRV-Cross emits GLSL vertex inputs as TEXCOORD+location in
-    // HLSL, so build the D3D12 layout from the shader's active attributes and
-    // match them back to the IA attributes by name. Some effects (particles,
-    // skinned variants, etc.) conditionally remove attributes via macros; using
-    // the raw IA order as TEXCOORD0..N makes later inputs shift and corrupts VS
-    // data.
+    // Input layout. Reflect the compiled vertex shader so D3D12 follows the
+    // actual DXBC input signature. Program templates can conservatively list
+    // conditionally active attributes (for example particle render modes), but
+    // D3D12 PSOs need the exact shader signature.
     auto &inputElements = _impl->inputElements;
     inputElements.clear();
     const AttributeList &shaderAttributes = _shader ? _shader->getAttributes() : _inputState.attributes;
-    if (!shaderAttributes.empty()) {
-        inputElements.reserve(shaderAttributes.size());
+    const auto &reflectedInputs = d3d12Shader->getVertexInputSignature();
+    if (!reflectedInputs.empty()) {
+        inputElements.reserve(reflectedInputs.size());
         _impl->semanticNames.clear();
-        _impl->semanticNames.reserve(shaderAttributes.size());
+        _impl->semanticNames.reserve(reflectedInputs.size());
 
         // D3D12 classifies vertex input by slot, not by attribute. Keep all
         // elements in the same slot on a single step mode; instanced streams
         // win when conditional attributes leave mixed metadata in the IA.
+        bool slotIsInstanced[256] = {};
+        for (const auto &shaderAttr : shaderAttributes) {
+            for (const auto &attr : _inputState.attributes) {
+                if (attr.name == shaderAttr.name) {
+                    slotIsInstanced[attr.stream] = slotIsInstanced[attr.stream] || attr.isInstanced;
+                    break;
+                }
+            }
+        }
+
+        for (const auto &reflectedInput : reflectedInputs) {
+            const Attribute *shaderAttr = findShaderAttributeForReflectedInput(reflectedInput, shaderAttributes);
+            D3D12_INPUT_ELEMENT_DESC elem{};
+            _impl->semanticNames.push_back(reflectedInput.semanticName);
+            elem.SemanticName = _impl->semanticNames.back().c_str();
+            elem.SemanticIndex = reflectedInput.semanticIndex;
+
+            bool attributeFound = false;
+            uint32_t offsets[256] = {};
+            if (shaderAttr) {
+                for (const auto &attr : _inputState.attributes) {
+                    if (attr.name == shaderAttr->name) {
+                        elem.Format = toD3D12VertexFormat(attr.format);
+                        elem.InputSlot = attr.stream;
+                        elem.AlignedByteOffset = offsets[attr.stream];
+                        elem.InputSlotClass = slotIsInstanced[attr.stream] ? D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA
+                                                                            : D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+                        elem.InstanceDataStepRate = slotIsInstanced[attr.stream] ? 1 : 0;
+                        attributeFound = true;
+                        break;
+                    }
+                    offsets[attr.stream] += GFX_FORMAT_INFOS[static_cast<uint32_t>(attr.format)].size;
+                }
+            }
+
+            if (!attributeFound) {
+                // Keep PSO creation valid if a shader declares an attribute that
+                // the IA does not provide. This mirrors the fallback used by the
+                // Vulkan/WGPU backends: read dummy data from the beginning of
+                // stream 0 instead of shifting all following attributes.
+                elem.Format = shaderAttr ? toD3D12VertexFormat(shaderAttr->format) : DXGI_FORMAT_R32G32B32A32_FLOAT;
+                elem.InputSlot = 0;
+                elem.AlignedByteOffset = 0;
+                elem.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+                elem.InstanceDataStepRate = 0;
+            }
+            inputElements.push_back(elem);
+        }
+
+        psoDesc.InputLayout.pInputElementDescs = inputElements.data();
+        psoDesc.InputLayout.NumElements = static_cast<UINT>(inputElements.size());
+    } else if (!shaderAttributes.empty()) {
+        inputElements.reserve(shaderAttributes.size());
+        _impl->semanticNames.clear();
+        _impl->semanticNames.reserve(shaderAttributes.size());
+
         bool slotIsInstanced[256] = {};
         for (const auto &shaderAttr : shaderAttributes) {
             for (const auto &attr : _inputState.attributes) {
@@ -474,10 +602,6 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
             }
 
             if (!attributeFound) {
-                // Keep PSO creation valid if a shader declares an attribute that
-                // the IA does not provide. This mirrors the fallback used by the
-                // Vulkan/WGPU backends: read dummy data from the beginning of
-                // stream 0 instead of shifting all following attributes.
                 elem.Format = toD3D12VertexFormat(shaderAttr.format);
                 elem.InputSlot = 0;
                 elem.AlignedByteOffset = 0;

@@ -379,3 +379,87 @@ Connect the ByteRover provider before relying on `brv query` for project context
 **Context**: Capturing the already running D3D12 test scene after mip diagnostics
 **Error**: `renderdoccmd inject` reported success, but neither scripted F12 input path produced a capture.
 **Resolution**: Launch the executable through `renderdoccmd capture` from process start and trigger capture after the target scene has loaded.
+
+[ERR-20260607-001] renderdoc-bridge-open-timeout
+
+**Logged**: 2026-06-07
+**Context**: Inspecting MSAA state in the latest D3D12 capture
+**Error**: The RenderDoc MCP bridge timed out while opening `C:\Users\caosh\Desktop\d3d12.rdc`; no qrenderdoc process was available to service the file-based request.
+**Resolution**: Check the qrenderdoc process before using the bridge, and use RenderDoc's headless Python replay API when the UI bridge is unavailable.
+
+[ERR-20260607-002] powershell-rg-wildcard-path
+
+**Logged**: 2026-06-07
+**Context**: Searching D3D12 pipeline state files from PowerShell
+**Error**: Passed wildcard file paths such as `GFXPipelineState.*` directly to `rg`; Windows treated them as invalid paths.
+**Resolution**: Search the containing directories and constrain matches with `-g` when using `rg` from PowerShell.
+
+[ERR-20260607-003] d3d12-unit-test-full-build-timeout
+
+**Logged**: 2026-06-07
+**Context**: Establishing the RED phase for the D3D12 render-pass regression test
+**Error**: The first complete `CocosTest` build exceeded the two-minute command timeout while compiling the engine dependency.
+**Resolution**: Compile the unit-test project's `ClCompile` target first for fast test-source feedback, then use the warmed incremental build for final verification.
+
+[ERR-20260607-004] powershell-get-childitem-multiple-filters
+
+**Logged**: 2026-06-07
+**Context**: Detecting the repository package-manager lock file
+**Error**: Passed an array to PowerShell `Get-ChildItem -Filter`, which only accepts one string pattern.
+**Resolution**: Enumerate files once and filter names with `Where-Object` when matching multiple exact filenames.
+
+[ERR-20260607-005] computer-use-readonly-spinbox
+
+**Logged**: 2026-06-07
+**Context**: Selecting a particle instance in RenderDoc's Mesh Viewer through Computer Use
+**Error**: `set_value` failed because the RenderDoc instance spinbox exposed a read-only UI Automation value.
+**Resolution**: Use the spinbox's visible increment/decrement buttons through coordinate clicks, then verify the displayed instance and table values.
+
+[ERR-20260607-006] computer-use-stale-renderdoc-coordinate
+
+**Logged**: 2026-06-07
+**Context**: Horizontally scrolling RenderDoc's Mesh Viewer after the event list layout changed
+**Error**: Reusing an old scrollbar coordinate selected a different draw event instead of moving the table.
+**Resolution**: Refresh the window screenshot immediately before coordinate drags in RenderDoc and verify the selected EID after each layout-changing action.
+
+[ERR-20260607-007] renderdoc-bridge-ui-buffer-id
+
+**Logged**: 2026-06-07
+**Context**: Reading EID 1322's instance buffer through the RenderDoc MCP bridge
+**Error**: `get_buffer_contents` rejected both `ResourceId::5762` and `5762`, although the RenderDoc UI displayed Buffer 5762 in the input assembler.
+**Resolution**: Do not assume the UI resource number is accepted by this bridge method; obtain the bridge-side buffer identifier from an API that enumerates vertex buffers, or inspect the data through Mesh Viewer.
+
+[ERR-20260607-008] windows-perl-not-on-path
+
+**Logged**: 2026-06-07
+**Context**: Normalizing line endings after patching native PSO manager files
+**Error**: `perl -0777 -pi ...` failed because Perl was not installed or not on PATH in the Windows workspace.
+**Resolution**: Use PowerShell/.NET text normalization or repo-provided formatting tools instead of assuming Unix text utilities are available on Windows.
+
+[ERR-20260607-009] node-repl-top-level-const-redeclare
+
+**Logged**: 2026-06-07
+**Context**: Reading RenderDoc Mesh Viewer state through Computer Use
+**Error**: A reused top-level `const tree` declaration failed with `Identifier 'tree' has already been declared`.
+**Resolution**: Wrap one-off Node REPL inspection code in a local `{ ... }` block or store reusable values on `globalThis`.
+
+[ERR-20260607-010] powershell-select-object-range
+
+**Logged**: 2026-06-07
+**Context**: Reading a line slice from `cocos/particle/enum.ts`
+**Error**: `Select-Object -Index 55..80` failed because PowerShell did not convert the unparenthesized range expression to an integer array for the parameter.
+**Resolution**: Use `(Get-Content $path)[55..80]` or `Select-Object -Index (55..80)` for line slices.
+
+[ERR-20260607-011] rg-invalid-extra-path
+
+**Logged**: 2026-06-07
+**Context**: Searching native renderer sources for shader attribute filtering
+**Error**: Included a nonexistent path `native/cocos/rendering`, causing `rg` to exit with an error even though other matches were found.
+**Resolution**: Verify directory names with `rg --files` or omit speculative extra paths when broad-searching repository modules.
+
+[ERR-20260607-012] apply-patch-stale-context
+
+**Logged**: 2026-06-07
+**Context**: Adding D3D12 vertex-input reflection to `D3D12PipelineState.cpp`
+**Error**: The first patch used an approximate helper-function signature and failed because the file used `mode` rather than the expected parameter name.
+**Resolution**: Read the exact surrounding function headers before large patches, then split helper insertion and logic replacement into smaller patches.
