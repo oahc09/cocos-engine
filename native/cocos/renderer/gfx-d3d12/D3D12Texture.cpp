@@ -41,6 +41,12 @@
 namespace cc {
 namespace gfx {
 
+SampleCount getD3D12EffectiveSampleCount(SampleCount samples) {
+    // The built-in pipeline requests X4 by default. D3D12 uses X2 as its
+    // backend default while preserving explicit non-default sample counts.
+    return samples == SampleCount::X4 ? SampleCount::X2 : samples;
+}
+
 struct CCD3D12Texture::Impl {
     Microsoft::WRL::ComPtr<ID3D12Resource> resource;
 };
@@ -52,6 +58,7 @@ struct OwnedColorResourceEntry {
     uint32_t width{0};
     uint32_t height{0};
     Format format{Format::UNKNOWN};
+    SampleCount samples{SampleCount::X1};
     uint64_t serial{0};
 };
 
@@ -86,12 +93,14 @@ void registerOwnedColorRenderTarget(CCD3D12Texture *texture) {
                                         return entry.owner == texture;
                                     });
     if (found == textures.end()) {
-        textures.push_back({texture, resource, texture->getWidth(), texture->getHeight(), texture->getFormat(), serial});
+        textures.push_back({texture, resource, texture->getWidth(), texture->getHeight(), texture->getFormat(),
+                            texture->getInfo().samples, serial});
     } else {
         found->resource = resource;
         found->width = texture->getWidth();
         found->height = texture->getHeight();
         found->format = texture->getFormat();
+        found->samples = texture->getInfo().samples;
         found->serial = serial;
     }
 }
@@ -302,6 +311,7 @@ void CCD3D12Texture::doInit(const TextureInfo &info) {
     _isSwapchainTexture = false;
     _swapchain = nullptr;
     _isTextureView = false;
+    _info.samples = getD3D12EffectiveSampleCount(_info.samples);
     _hash = Texture::computeHash(this);
     if (!createResource(_info.width, _info.height)) {
         CC_LOG_ERROR("D3D12Texture: createResource failed for format=%u, %ux%u, usage=0x%x. "
@@ -423,12 +433,12 @@ void CCD3D12Texture::setCurrentState(D3D12_RESOURCE_STATES state) {
     }
 }
 
-void *CCD3D12Texture::findLatestOwnedColorResource(uint32_t width, uint32_t height, Format format) {
+void *CCD3D12Texture::findLatestOwnedColorResource(uint32_t width, uint32_t height, Format format, SampleCount samples) {
     ID3D12Resource *latestMatch = nullptr;
     uint64_t latestSerial = 0;
     uint32_t matchCount = 0;
     for (const auto &entry : ownedColorRenderTargets()) {
-        if (entry.width != width || entry.height != height || entry.format != format) {
+        if (entry.width != width || entry.height != height || entry.format != format || entry.samples != samples) {
             continue;
         }
         auto *resource = entry.resource.Get();
@@ -443,8 +453,9 @@ void *CCD3D12Texture::findLatestOwnedColorResource(uint32_t width, uint32_t heig
     }
     static ID3D12Resource *lastWarnedMultipleMatch{nullptr};
     if (matchCount > 1 && latestMatch != lastWarnedMultipleMatch) {
-        CC_LOG_WARNING("D3D12Texture: multiple owned color RTs match %ux%u format=%u; using latest registered resource %p.",
-                       width, height, static_cast<unsigned>(format), latestMatch);
+        CC_LOG_WARNING("D3D12Texture: multiple owned color RTs match %ux%u format=%u samples=%u; "
+                       "using latest registered resource %p.",
+                       width, height, static_cast<unsigned>(format), static_cast<unsigned>(samples), latestMatch);
         lastWarnedMultipleMatch = latestMatch;
     }
     return latestMatch;

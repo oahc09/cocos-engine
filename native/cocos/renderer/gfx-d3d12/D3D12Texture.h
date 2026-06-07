@@ -38,6 +38,7 @@ namespace gfx {
 class Swapchain;
 
 DXGI_FORMAT toD3D12Format(Format format);
+SampleCount getD3D12EffectiveSampleCount(SampleCount samples);
 
 class CC_DLL CCD3D12Texture final : public Texture {
 public:
@@ -50,7 +51,7 @@ public:
     // Returns true if this texture wraps a swapchain back buffer (color attachment)
     bool isSwapchainColorTexture() const;
 
-    static void *findLatestOwnedColorResource(uint32_t width, uint32_t height, Format format);
+    static void *findLatestOwnedColorResource(uint32_t width, uint32_t height, Format format, SampleCount samples);
 
     // Returns the parent swapchain for swapchain textures, nullptr otherwise
     Swapchain *getSwapchain() const { return _isSwapchainTexture ? _swapchain : nullptr; }

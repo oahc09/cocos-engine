@@ -702,6 +702,176 @@ void CCD3D12CommandBuffer::end() {
     _impl->isRecording = false;
 }
 
+void CCD3D12CommandBuffer::transitionColorAttachment(uint32_t attachment, D3D12_RESOURCE_STATES state) {
+    auto *framebuffer = _impl->activeFramebuffer;
+    if (!framebuffer || attachment >= framebuffer->getColorTextureCount()) {
+        CC_LOG_WARNING("D3D12 render pass: color attachment index %u is outside framebuffer color count %u.",
+                       attachment, framebuffer ? framebuffer->getColorTextureCount() : 0);
+        return;
+    }
+
+    auto *resource = static_cast<ID3D12Resource *>(framebuffer->getColorResource(attachment));
+    if (!resource) {
+        return;
+    }
+
+    auto *texture = framebuffer->getColorTexture(attachment);
+    const bool hasTextureState = texture && framebuffer->hasColorTextureState(attachment);
+    const D3D12_RESOURCE_STATES fallback =
+        texture && texture->isSwapchainColorTexture()
+            ? D3D12_RESOURCE_STATE_RENDER_TARGET
+            : D3D12_RESOURCE_STATE_COMMON;
+    const D3D12_RESOURCE_STATES previousState =
+        hasTextureState
+            ? texture->getCurrentState()
+            : CCD3D12Texture::getTrackedResourceState(resource, fallback);
+    if (previousState == state) {
+        return;
+    }
+
+    D3D12_RESOURCE_BARRIER barrier{};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+    barrier.Transition.pResource = resource;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barrier.Transition.StateBefore = previousState;
+    barrier.Transition.StateAfter = state;
+    _impl->commandList->ResourceBarrier(1, &barrier);
+
+    if (hasTextureState) {
+        texture->setCurrentState(state);
+    } else {
+        CCD3D12Texture::setTrackedResourceState(resource, state);
+    }
+}
+
+void CCD3D12CommandBuffer::bindSubpassRenderTargets(uint32_t subpassIndex) {
+    auto *framebuffer = _impl->activeFramebuffer;
+    if (!framebuffer) {
+        return;
+    }
+
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandles[MAX_ATTACHMENTS]{};
+    uint32_t rtvCount = 0;
+    auto appendColor = [&](uint32_t attachment) {
+        if (rtvCount >= MAX_ATTACHMENTS) {
+            CC_LOG_WARNING("D3D12 render pass: too many color attachments; truncating to %u.", MAX_ATTACHMENTS);
+            return;
+        }
+        transitionColorAttachment(attachment, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        const auto handle = framebuffer->getRTVHandle(attachment);
+        if (handle.ptr == 0) {
+            CC_LOG_WARNING("D3D12 render pass: RTV handle[%u] is NULL.", attachment);
+            return;
+        }
+        rtvHandles[rtvCount++].ptr = handle.ptr;
+    };
+
+    bool usesDepthStencil = framebuffer->getDSVHandle().ptr != 0;
+    const auto &subpasses = _impl->activeRenderPass->getSubpasses();
+    if (subpasses.empty()) {
+        for (uint32_t attachment = 0; attachment < framebuffer->getColorTextureCount(); ++attachment) {
+            appendColor(attachment);
+        }
+    } else if (subpassIndex < subpasses.size()) {
+        const auto &subpass = subpasses[subpassIndex];
+        for (uint32_t attachment : subpass.colors) {
+            appendColor(attachment);
+        }
+        usesDepthStencil = usesDepthStencil && subpass.depthStencil != INVALID_BINDING;
+    } else {
+        CC_LOG_WARNING("D3D12 render pass: subpass %u is outside subpass count %zu.",
+                       subpassIndex, subpasses.size());
+        usesDepthStencil = false;
+    }
+
+    D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle{};
+    dsvHandle.ptr = framebuffer->getDSVHandle().ptr;
+    _impl->commandList->OMSetRenderTargets(
+        rtvCount,
+        rtvCount > 0 ? rtvHandles : nullptr,
+        FALSE,
+        usesDepthStencil ? &dsvHandle : nullptr);
+}
+
+void CCD3D12CommandBuffer::resolveSubpass(uint32_t subpassIndex) {
+    if (!_impl->activeRenderPass || !_impl->activeFramebuffer) {
+        return;
+    }
+
+    const auto &subpasses = _impl->activeRenderPass->getSubpasses();
+    if (subpasses.empty() || subpassIndex >= subpasses.size()) {
+        return;
+    }
+
+    const auto &subpass = subpasses[subpassIndex];
+    if (subpass.resolves.empty()) {
+        return;
+    }
+
+    _impl->commandList->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
+
+    auto *framebuffer = _impl->activeFramebuffer;
+    for (uint32_t colorIndex = 0; colorIndex < subpass.colors.size(); ++colorIndex) {
+        const uint32_t sourceAttachment = subpass.colors[colorIndex];
+        uint32_t destinationAttachment = INVALID_BINDING;
+        if (sourceAttachment < subpass.resolves.size()) {
+            destinationAttachment = subpass.resolves[sourceAttachment];
+        } else if (colorIndex < subpass.resolves.size()) {
+            destinationAttachment = subpass.resolves[colorIndex];
+        }
+        if (destinationAttachment == INVALID_BINDING) {
+            continue;
+        }
+        if (sourceAttachment >= framebuffer->getColorTextureCount() ||
+            destinationAttachment >= framebuffer->getColorTextureCount()) {
+            CC_LOG_WARNING("D3D12 resolve: attachment pair %u -> %u is outside framebuffer color count %u.",
+                           sourceAttachment, destinationAttachment, framebuffer->getColorTextureCount());
+            continue;
+        }
+
+        auto *source = static_cast<ID3D12Resource *>(framebuffer->getColorResource(sourceAttachment));
+        auto *destination = static_cast<ID3D12Resource *>(framebuffer->getColorResource(destinationAttachment));
+        if (!source || !destination || source == destination) {
+            continue;
+        }
+
+        const auto sourceDesc = source->GetDesc();
+        const auto destinationDesc = destination->GetDesc();
+        if (sourceDesc.SampleDesc.Count <= 1 || destinationDesc.SampleDesc.Count != 1) {
+            CC_LOG_WARNING("D3D12 resolve skipped invalid sample counts: attachment %u has %u samples, "
+                           "attachment %u has %u samples.",
+                           sourceAttachment, sourceDesc.SampleDesc.Count,
+                           destinationAttachment, destinationDesc.SampleDesc.Count);
+            continue;
+        }
+        if (sourceDesc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+            destinationDesc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D) {
+            CC_LOG_WARNING("D3D12 resolve only supports Texture2D render-pass attachments.");
+            continue;
+        }
+
+        transitionColorAttachment(sourceAttachment, D3D12_RESOURCE_STATE_RESOLVE_SOURCE);
+        transitionColorAttachment(destinationAttachment, D3D12_RESOURCE_STATE_RESOLVE_DEST);
+
+        const uint32_t layerCount = std::min<uint32_t>(sourceDesc.DepthOrArraySize, destinationDesc.DepthOrArraySize);
+        for (uint32_t layer = 0; layer < layerCount; ++layer) {
+            _impl->commandList->ResolveSubresource(
+                destination, layer,
+                source, layer,
+                sourceDesc.Format);
+        }
+
+        transitionColorAttachment(sourceAttachment, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        auto *destinationTexture = framebuffer->getColorTexture(destinationAttachment);
+        const D3D12_RESOURCE_STATES destinationState =
+            destinationTexture && destinationTexture->isSwapchainColorTexture()
+                ? D3D12_RESOURCE_STATE_RENDER_TARGET
+                : D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        transitionColorAttachment(destinationAttachment, destinationState);
+    }
+}
+
 void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *fbo, const Rect &renderArea, const Color *colors, float depth, uint32_t stencil, CommandBuffer *const *secondaryCBs, uint32_t secondaryCBCount) {
     (void)secondaryCBs;
     (void)secondaryCBCount;
@@ -835,12 +1005,9 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
         _impl->commandList->ResourceBarrier(prePassBarrierCount, prePassBarriers);
     }
 
-    // Set render targets
-    _impl->commandList->OMSetRenderTargets(
-        colorCount,
-        rtvHandles,
-        FALSE,
-        hasDSV ? &dsvHandle : nullptr);
+    // Resolve attachments are part of the framebuffer but are not regular MRTs.
+    // Bind only the color attachments declared by the first subpass.
+    bindSubpassRenderTargets(0);
 
     const D3D12_RECT safeRenderArea = makeSafeRenderAreaRect(renderArea, fboWidth, fboHeight);
     const bool hasSafeRenderArea = safeRenderArea.right > safeRenderArea.left &&
@@ -894,6 +1061,17 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
         }
     }
 
+    if (renderPass && !renderPass->getSubpasses().empty()) {
+        const auto &firstSubpass = renderPass->getSubpasses()[0];
+        for (uint32_t input : firstSubpass.inputs) {
+            const bool isColorOutput =
+                std::find(firstSubpass.colors.begin(), firstSubpass.colors.end(), input) != firstSubpass.colors.end();
+            if (!isColorOutput) {
+                transitionColorAttachment(input, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            }
+        }
+    }
+
     // Set viewport from render area
     D3D12_VIEWPORT vp{};
     vp.TopLeftX = static_cast<float>(safeRenderArea.left);
@@ -914,6 +1092,9 @@ void CCD3D12CommandBuffer::endRenderPass() {
         CC_LOG_ERROR("D3D12 bundle cannot end a render pass.");
         return;
     }
+
+    resolveSubpass(_impl->currentSubpass);
+    _impl->commandList->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
 
     D3D12_RESOURCE_BARRIER postPassBarriers[MAX_PASS_BARRIERS];
     uint32_t postPassBarrierCount = 0;
@@ -1480,48 +1661,13 @@ void CCD3D12CommandBuffer::nextSubpass() {
         return;
     }
 
+    resolveSubpass(_impl->currentSubpass);
+
     auto *framebuffer = _impl->activeFramebuffer;
     const auto &subpass = subpasses[nextSubpassIndex];
     auto containsAttachment = [](const ccstd::vector<uint32_t> &attachments, uint32_t index) {
         return std::find(attachments.begin(), attachments.end(), index) != attachments.end();
     };
-    auto transitionColor = [this, framebuffer](uint32_t index, D3D12_RESOURCE_STATES nextState) {
-        if (index >= framebuffer->getColorTextureCount()) {
-            CC_LOG_WARNING("D3D12 nextSubpass: color attachment index %u is outside framebuffer color count %u.",
-                           index, framebuffer->getColorTextureCount());
-            return;
-        }
-
-        auto *resource = static_cast<ID3D12Resource *>(framebuffer->getColorResource(index));
-        if (!resource) {
-            return;
-        }
-
-        auto *texture = framebuffer->getColorTexture(index);
-        const bool hasTextureState = texture && framebuffer->hasColorTextureState(index);
-        const D3D12_RESOURCE_STATES prevState = hasTextureState
-                                                   ? texture->getCurrentState()
-                                                   : CCD3D12Texture::getTrackedResourceState(resource, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        if (prevState == nextState) {
-            return;
-        }
-
-        D3D12_RESOURCE_BARRIER barrier{};
-        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-        barrier.Transition.pResource = resource;
-        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        barrier.Transition.StateBefore = prevState;
-        barrier.Transition.StateAfter = nextState;
-        _impl->commandList->ResourceBarrier(1, &barrier);
-
-        if (hasTextureState) {
-            texture->setCurrentState(nextState);
-        } else {
-            CCD3D12Texture::setTrackedResourceState(resource, nextState);
-        }
-    };
-
     for (uint32_t input : subpass.inputs) {
         if (containsAttachment(subpass.colors, input)) {
             CC_LOG_WARNING("D3D12 nextSubpass: input/color self-dependency on attachment %u is not natively expressible; "
@@ -1529,30 +1675,11 @@ void CCD3D12CommandBuffer::nextSubpass() {
                            input);
             continue;
         }
-        transitionColor(input, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        transitionColorAttachment(input, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     }
 
-    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandles[MAX_ATTACHMENTS]{};
-    uint32_t rtvCount = 0;
-    for (uint32_t color : subpass.colors) {
-        if (rtvCount >= MAX_ATTACHMENTS) {
-            CC_LOG_WARNING("D3D12 nextSubpass: too many color attachments; truncating to %u.", MAX_ATTACHMENTS);
-            break;
-        }
-        transitionColor(color, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        auto handle = framebuffer->getRTVHandle(color);
-        if (handle.ptr == 0) {
-            CC_LOG_WARNING("D3D12 nextSubpass: RTV handle[%u] is NULL.", color);
-            continue;
-        }
-        rtvHandles[rtvCount++].ptr = handle.ptr;
-    }
-
-    D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle{};
     const bool hasDSV = subpass.depthStencil != INVALID_BINDING;
     if (hasDSV) {
-        auto dsvPair = framebuffer->getDSVHandle();
-        dsvHandle.ptr = dsvPair.ptr;
         if (_impl->activeDepthStencil && _impl->activeDepthTexture) {
             const D3D12_RESOURCE_STATES prevState = _impl->activeDepthTexture->getCurrentState();
             if (prevState != D3D12_RESOURCE_STATE_DEPTH_WRITE) {
@@ -1569,8 +1696,7 @@ void CCD3D12CommandBuffer::nextSubpass() {
         }
     }
 
-    _impl->commandList->OMSetRenderTargets(rtvCount, rtvCount > 0 ? rtvHandles : nullptr, FALSE,
-                                           (hasDSV && dsvHandle.ptr != 0) ? &dsvHandle : nullptr);
+    bindSubpassRenderTargets(nextSubpassIndex);
     _impl->currentSubpass = nextSubpassIndex;
 }
 

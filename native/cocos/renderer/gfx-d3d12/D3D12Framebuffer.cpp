@@ -109,6 +109,7 @@ struct CCD3D12Framebuffer::Impl {
     ccstd::vector<uint32_t> colorRepairWidths;
     ccstd::vector<uint32_t> colorRepairHeights;
     ccstd::vector<Format> colorRepairFormats;
+    ccstd::vector<SampleCount> colorRepairSamples;
     CCD3D12Texture *depthStencilTexture{nullptr};
     ccstd::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> colorResources;
     Microsoft::WRL::ComPtr<ID3D12Resource> depthStencilResource;
@@ -141,6 +142,7 @@ void CCD3D12Framebuffer::doInit(const FramebufferInfo &info) {
     _impl->colorRepairWidths.clear();
     _impl->colorRepairHeights.clear();
     _impl->colorRepairFormats.clear();
+    _impl->colorRepairSamples.clear();
     _impl->colorResources.clear();
     _impl->depthStencilTexture = nullptr;
     _impl->depthStencilResource.Reset();
@@ -162,6 +164,7 @@ void CCD3D12Framebuffer::doInit(const FramebufferInfo &info) {
     _impl->colorRepairWidths.assign(colorCount, 0);
     _impl->colorRepairHeights.assign(colorCount, 0);
     _impl->colorRepairFormats.assign(colorCount, Format::UNKNOWN);
+    _impl->colorRepairSamples.assign(colorCount, SampleCount::X1);
     _impl->colorResources.resize(colorCount);
     for (uint32_t i = 0; i < colorCount; ++i) {
         _impl->colorTextures[i] = static_cast<CCD3D12Texture *>(_colorTextures[i]);
@@ -210,7 +213,8 @@ void CCD3D12Framebuffer::doInit(const FramebufferInfo &info) {
                                                   depthTexture->getHeight() != texture->getHeight());
                 if (mixedOffscreenDepth) {
                     auto *replacementResource = static_cast<ID3D12Resource *>(CCD3D12Texture::findLatestOwnedColorResource(
-                        depthTexture->getWidth(), depthTexture->getHeight(), texture->getFormat()));
+                        depthTexture->getWidth(), depthTexture->getHeight(), texture->getFormat(),
+                        depthTexture->getInfo().samples));
                     if (replacementResource) {
                         CC_LOG_WARNING("D3D12Framebuffer: mixed swapchain color/offscreen depth repaired with owned RT. "
                                        "color[%u] swapchain %ux%u replaced with owned RT resource %p %ux%u.",
@@ -221,6 +225,7 @@ void CCD3D12Framebuffer::doInit(const FramebufferInfo &info) {
                         _impl->colorRepairWidths[i] = depthTexture->getWidth();
                         _impl->colorRepairHeights[i] = depthTexture->getHeight();
                         _impl->colorRepairFormats[i] = texture->getFormat();
+                        _impl->colorRepairSamples[i] = depthTexture->getInfo().samples;
                         _impl->colorResources[i] = replacementResource;
                         d3dDevice->CreateRenderTargetView(replacementResource, nullptr, handleSlot);
                         _impl->rtvHandles[i] = handleSlot;
@@ -305,6 +310,7 @@ void CCD3D12Framebuffer::doDestroy() {
         _impl->colorRepairWidths.clear();
         _impl->colorRepairHeights.clear();
         _impl->colorRepairFormats.clear();
+        _impl->colorRepairSamples.clear();
         _impl->colorResources.clear();
         _impl->depthStencilTexture = nullptr;
         _impl->depthStencilResource.Reset();
@@ -330,7 +336,8 @@ void CCD3D12Framebuffer::refreshRepairedColorResource(uint32_t index) const {
     auto *latestResource = static_cast<ID3D12Resource *>(CCD3D12Texture::findLatestOwnedColorResource(
         _impl->colorRepairWidths[index],
         _impl->colorRepairHeights[index],
-        _impl->colorRepairFormats[index]));
+        _impl->colorRepairFormats[index],
+        _impl->colorRepairSamples[index]));
     if (!latestResource) {
         return;
     }

@@ -89,6 +89,9 @@ protected:
 
 private:
     void applyDynamicPipelineState();
+    void transitionColorAttachment(uint32_t attachment, D3D12_RESOURCE_STATES state);
+    void bindSubpassRenderTargets(uint32_t subpass);
+    void resolveSubpass(uint32_t subpass);
 
     struct Impl;
     std::unique_ptr<Impl> _impl;

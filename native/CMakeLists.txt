@@ -3602,6 +3602,7 @@ if(MSVC)
         ${CWD}/external/win64/libs/msvcr/*.dll
     )
     target_compile_options(${ENGINE_NAME} PUBLIC /MP
+        /FS
         /bigobj
         /wd4018 # signed/unsigned mismatch
         /wd4221 # no public symbols

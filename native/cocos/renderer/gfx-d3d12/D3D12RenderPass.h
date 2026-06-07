@@ -38,9 +38,12 @@ public:
     // Returns DXGI_FORMAT values packed as uint32_t (avoids including dxgiformat.h in header).
     // PipelineState will interpret these as DXGI_FORMAT.
     const ccstd::vector<uint32_t> &getRTVFormats() const;
+    ccstd::vector<uint32_t> getRTVFormats(uint32_t subpass) const;
     uint32_t getDSVFormat() const;
+    uint32_t getDSVFormat(uint32_t subpass) const;
     uint32_t getColorAttachmentCount() const;
     uint32_t getSampleCount() const;
+    uint32_t getSampleCount(uint32_t subpass) const;
 
 protected:
     void doInit(const RenderPassInfo &info) override;

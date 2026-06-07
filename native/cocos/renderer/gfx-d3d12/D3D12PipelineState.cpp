@@ -26,6 +26,7 @@
 #include "D3D12Device.h"
 #include "D3D12Shader.h"
 #include "D3D12RenderPass.h"
+#include "D3D12Texture.h"
 #include "D3D12PipelineLayout.h"
 #include "D3D12DescriptorSetLayout.h"
 #include "base/Log.h"
@@ -411,13 +412,13 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
     // Render pass formats
     if (_renderPass) {
         auto *d3d12RenderPass = static_cast<CCD3D12RenderPass *>(const_cast<RenderPass *>(_renderPass));
-        const auto &rtvFormats = d3d12RenderPass->getRTVFormats();
+        const auto rtvFormats = d3d12RenderPass->getRTVFormats(_subpass);
         numRenderTargets = static_cast<UINT>(rtvFormats.size());
         psoDesc.NumRenderTargets = numRenderTargets;
         for (UINT i = 0; i < numRenderTargets && i < D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i) {
             psoDesc.RTVFormats[i] = static_cast<DXGI_FORMAT>(rtvFormats[i]);
         }
-        psoDesc.DSVFormat = static_cast<DXGI_FORMAT>(d3d12RenderPass->getDSVFormat());
+        psoDesc.DSVFormat = static_cast<DXGI_FORMAT>(d3d12RenderPass->getDSVFormat(_subpass));
     } else {
         psoDesc.NumRenderTargets = 1;
         psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM; // default
@@ -499,12 +500,15 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
     // Sample description — derive from RenderPass if available
     if (_renderPass) {
         auto *d3d12RenderPass = static_cast<CCD3D12RenderPass *>(const_cast<RenderPass *>(_renderPass));
-        uint32_t sampleCount = d3d12RenderPass->getSampleCount();
-        psoDesc.SampleDesc.Count = (sampleCount > 0) ? sampleCount : 1;
+        const auto requestedSampleCount = static_cast<SampleCount>(d3d12RenderPass->getSampleCount(_subpass));
+        psoDesc.SampleDesc.Count = static_cast<UINT>(getD3D12EffectiveSampleCount(requestedSampleCount));
         psoDesc.SampleDesc.Quality = 0;
     } else {
         psoDesc.SampleDesc.Count = 1;
         psoDesc.SampleDesc.Quality = 0;
+    }
+    if (psoDesc.SampleDesc.Count > 1) {
+        psoDesc.RasterizerState.MultisampleEnable = TRUE;
     }
     psoDesc.SampleMask = 0xFFFFFFFF;
 

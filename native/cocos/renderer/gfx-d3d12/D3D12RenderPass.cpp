@@ -182,8 +182,42 @@ const ccstd::vector<uint32_t> &CCD3D12RenderPass::getRTVFormats() const {
     return _impl ? _impl->rtvFormats : empty;
 }
 
+ccstd::vector<uint32_t> CCD3D12RenderPass::getRTVFormats(uint32_t subpass) const {
+    if (!_impl || _subpasses.empty()) {
+        return _impl ? _impl->rtvFormats : ccstd::vector<uint32_t>{};
+    }
+    if (subpass >= _subpasses.size()) {
+        CC_LOG_WARNING("D3D12RenderPass: subpass %u is outside subpass count %zu.",
+                       subpass, _subpasses.size());
+        return {};
+    }
+
+    ccstd::vector<uint32_t> formats;
+    const auto &colors = _subpasses[subpass].colors;
+    formats.reserve(colors.size());
+    for (uint32_t attachment : colors) {
+        if (attachment >= _impl->rtvFormats.size()) {
+            CC_LOG_WARNING("D3D12RenderPass: color attachment %u is outside attachment count %zu.",
+                           attachment, _impl->rtvFormats.size());
+            continue;
+        }
+        formats.emplace_back(_impl->rtvFormats[attachment]);
+    }
+    return formats;
+}
+
 uint32_t CCD3D12RenderPass::getDSVFormat() const {
     return _impl ? _impl->dsvFormat : 0;
+}
+
+uint32_t CCD3D12RenderPass::getDSVFormat(uint32_t subpass) const {
+    if (!_impl || _subpasses.empty()) {
+        return _impl ? _impl->dsvFormat : 0;
+    }
+    if (subpass >= _subpasses.size() || _subpasses[subpass].depthStencil == INVALID_BINDING) {
+        return 0;
+    }
+    return _impl->dsvFormat;
 }
 
 uint32_t CCD3D12RenderPass::getColorAttachmentCount() const {
@@ -192,6 +226,28 @@ uint32_t CCD3D12RenderPass::getColorAttachmentCount() const {
 
 uint32_t CCD3D12RenderPass::getSampleCount() const {
     return _impl ? _impl->sampleCount : 1;
+}
+
+uint32_t CCD3D12RenderPass::getSampleCount(uint32_t subpass) const {
+    if (!_impl || _subpasses.empty()) {
+        return _impl ? _impl->sampleCount : 1;
+    }
+    if (subpass >= _subpasses.size()) {
+        return 1;
+    }
+
+    uint32_t sampleCount = 1;
+    const auto &subpassInfo = _subpasses[subpass];
+    for (uint32_t attachment : subpassInfo.colors) {
+        if (attachment < _colorAttachments.size()) {
+            sampleCount = std::max(sampleCount, static_cast<uint32_t>(_colorAttachments[attachment].sampleCount));
+        }
+    }
+    if (subpassInfo.depthStencil != INVALID_BINDING &&
+        _depthStencilAttachment.format != Format::UNKNOWN) {
+        sampleCount = std::max(sampleCount, static_cast<uint32_t>(_depthStencilAttachment.sampleCount));
+    }
+    return sampleCount;
 }
 
 } // namespace gfx
