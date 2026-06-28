@@ -31,6 +31,7 @@
     #ifndef NOMINMAX
         #define NOMINMAX
     #endif
+    #include <chrono>
     #include <d3d12.h>
     #include <wrl/client.h>
 
@@ -38,6 +39,12 @@ namespace cc {
 namespace gfx {
 
 namespace {
+using D3D12PerfClock = std::chrono::steady_clock;
+
+uint64_t elapsedMs(D3D12PerfClock::time_point start) {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(D3D12PerfClock::now() - start).count());
+}
 
 D3D12_SHADER_VISIBILITY toD3D12ShaderVisibility(ShaderStageFlags stageFlags) {
     if (hasAnyFlags(stageFlags, ShaderStageFlagBit::ALL)) {
@@ -101,6 +108,7 @@ CCD3D12PipelineLayout::~CCD3D12PipelineLayout() {
 
 void CCD3D12PipelineLayout::doInit(const PipelineLayoutInfo &info) {
     (void)info;
+    const auto initStart = D3D12PerfClock::now();
     _impl->cbvSrvUavRootParameterIndices.assign(_setLayouts.size(), -1);
     _impl->samplerRootParameterIndices.assign(_setLayouts.size(), -1);
 
@@ -252,8 +260,10 @@ void CCD3D12PipelineLayout::doInit(const PipelineLayoutInfo &info) {
     // Serialize the root signature
     Microsoft::WRL::ComPtr<ID3DBlob> signatureBlob;
     Microsoft::WRL::ComPtr<ID3DBlob> errorBlob;
+    const auto serializeStart = D3D12PerfClock::now();
     HRESULT hr = D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1,
                                               &signatureBlob, &errorBlob);
+    const auto serializeMs = elapsedMs(serializeStart);
     if (FAILED(hr)) {
         if (errorBlob) {
             CC_LOG_ERROR("D3D12PipelineLayout: D3D12SerializeRootSignature failed: %s",
@@ -265,9 +275,11 @@ void CCD3D12PipelineLayout::doInit(const PipelineLayoutInfo &info) {
         return;
     }
 
+    const auto createStart = D3D12PerfClock::now();
     hr = d3dDevice->CreateRootSignature(0, signatureBlob->GetBufferPointer(),
                                          signatureBlob->GetBufferSize(),
                                          IID_PPV_ARGS(&_impl->rootSignature));
+    const auto createMs = elapsedMs(createStart);
     if (FAILED(hr)) {
         CC_LOG_ERROR("D3D12PipelineLayout: CreateRootSignature failed. HRESULT=0x%08x",
                      static_cast<unsigned>(hr));
@@ -277,6 +289,13 @@ void CCD3D12PipelineLayout::doInit(const PipelineLayoutInfo &info) {
     CC_LOG_INFO("D3D12 PipelineLayout initialized: %u set layouts, %u root parameters",
                 static_cast<uint32_t>(_setLayouts.size()),
                 static_cast<uint32_t>(rootParameters.size()));
+    CC_LOG_INFO("[D3D12-PERF] PipelineLayoutInit setLayouts=%u rootParameters=%u descriptorRanges=%u serializeRootSigMs=%llu createRootSigMs=%llu totalMs=%llu",
+                static_cast<uint32_t>(_setLayouts.size()),
+                static_cast<uint32_t>(rootParameters.size()),
+                static_cast<uint32_t>(allRanges.size()),
+                static_cast<unsigned long long>(serializeMs),
+                static_cast<unsigned long long>(createMs),
+                static_cast<unsigned long long>(elapsedMs(initStart)));
 }
 
 void CCD3D12PipelineLayout::doDestroy() {

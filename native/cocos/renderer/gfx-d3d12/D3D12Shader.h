@@ -67,9 +67,14 @@ private:
     BytecodeBlob getStageBytecode(ShaderStageFlagBit stage) const;
 
     // Compile GLSL4 source -> SPIR-V -> HLSL -> DXBC
+    void scheduleStagePrecompile(ShaderStageFlagBit stage);
+    void waitForBackgroundCompiles();
+    bool ensureStageBytecode(ShaderStageFlagBit stage) const;
+
     bool compileGLSLToDXBC(ShaderStageFlagBit stage, const ccstd::string &glslSource,
                            const ccstd::string &entryName,
-                           std::vector<uint8_t> &outDXBC);
+                           const ccstd::string &shaderName,
+                           std::vector<uint8_t> &outDXBC) const;
 
     struct Impl;
     std::unique_ptr<Impl> _impl;

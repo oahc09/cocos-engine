@@ -220,9 +220,9 @@ void CCD3D12InputAssembler::doInit(const InputAssemblerInfo &info) {
         }
     }
 
-    CC_LOG_INFO("D3D12InputAssembler initialized with %u attributes, %u vertex buffers.",
-                static_cast<unsigned>(info.attributes.size()),
-                static_cast<unsigned>(info.vertexBuffers.size()));
+    CC_LOG_DEBUG("D3D12InputAssembler initialized with %u attributes, %u vertex buffers.",
+                 static_cast<unsigned>(info.attributes.size()),
+                 static_cast<unsigned>(info.vertexBuffers.size()));
 }
 
 void CCD3D12InputAssembler::doDestroy() {

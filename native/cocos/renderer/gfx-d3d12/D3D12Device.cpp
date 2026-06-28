@@ -46,6 +46,7 @@
 #endif
 #include <algorithm>
 #include <cstring>
+#include <mutex>
 #include <windows.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
@@ -58,6 +59,12 @@ CCD3D12Device *CCD3D12Device::instance = nullptr;
 
 namespace {
 constexpr float D3D12_POC_CLEAR_COLOR[4] = {0.1F, 0.2F, 0.8F, 1.0F};
+
+#if defined(__ID3D12Device9_INTERFACE_DEFINED__) && defined(__ID3D12ShaderCacheSession_INTERFACE_DEFINED__)
+constexpr GUID D3D12_COCOS_DXBC_SHADER_CACHE_GUID = {
+    0x9f4e1b8d, 0x932a, 0x4a64, {0xa8, 0x4e, 0x31, 0x79, 0x50, 0x8f, 0xb8, 0xd2}};
+constexpr uint64_t D3D12_COCOS_DXBC_SHADER_CACHE_VERSION = 1;
+#endif
 
 D3D12_RESOURCE_BARRIER textureTransition(ID3D12Resource *resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
     D3D12_RESOURCE_BARRIER barrier{};
@@ -100,7 +107,7 @@ struct CCD3D12Device::Impl {
     Microsoft::WRL::ComPtr<IDXGIFactory6> dxgiFactory;
     Microsoft::WRL::ComPtr<ID3D12Device> d3dDevice;
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> graphicsQueue;
-    // Device-level command allocator/list for legacy present and copyBuffersToTexture
+    // Device-level command allocator/list for legacy present and readback paths.
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator> commandAllocator;
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commandList;
     Microsoft::WRL::ComPtr<ID3D12Fence> frameFence;
@@ -123,6 +130,15 @@ struct CCD3D12Device::Impl {
     };
     ccstd::vector<UploadPage> uploadPages;
 
+    struct PendingUploadCommandContext {
+        Microsoft::WRL::ComPtr<ID3D12CommandAllocator> commandAllocator;
+        Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commandList;
+        ccstd::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> referencedResources;
+        ccstd::vector<Microsoft::WRL::ComPtr<ID3D12DescriptorHeap>> descriptorHeaps;
+        uint64_t fenceValue{0};
+    };
+    ccstd::vector<PendingUploadCommandContext> pendingUploadCommandContexts;
+
     // Dummy resources for safe null descriptor bindings
     IntrusivePtr<CCD3D12Texture> dummyTexture;
     IntrusivePtr<CCD3D12Buffer>  dummyBuffer;
@@ -131,6 +147,27 @@ struct CCD3D12Device::Impl {
     Microsoft::WRL::ComPtr<ID3D12CommandSignature> drawIndirectSig;       // DrawInstanced
     Microsoft::WRL::ComPtr<ID3D12CommandSignature> drawIndexedIndirectSig; // DrawIndexedInstanced
     Microsoft::WRL::ComPtr<ID3D12CommandSignature> dispatchIndirectSig;   // Dispatch
+
+#if defined(__ID3D12Device9_INTERFACE_DEFINED__) && defined(__ID3D12ShaderCacheSession_INTERFACE_DEFINED__)
+    Microsoft::WRL::ComPtr<ID3D12ShaderCacheSession> shaderCacheSession;
+    std::mutex shaderCacheMutex;
+#endif
+
+    struct FramePerfCounters {
+        uint64_t descriptorFlushes{0};
+        uint64_t copyDescriptorCalls{0};
+        uint64_t copiedDescriptors{0};
+        uint64_t dynamicOffsetRewrites{0};
+        uint64_t dynamicOffsetDescriptors{0};
+        uint64_t setDescriptorHeapCalls{0};
+        uint64_t rootDescriptorTableBinds{0};
+        uint64_t resourceBarrierCalls{0};
+        uint64_t resourceBarriers{0};
+        uint64_t fenceWaits{0};
+        uint64_t fenceWaitMicroseconds{0};
+    };
+    FramePerfCounters framePerfCounters;
+    uint64_t perfFrameIndex{0};
 };
 
 CCD3D12Device *CCD3D12Device::getInstance() {
@@ -159,6 +196,7 @@ bool CCD3D12Device::doInit(const DeviceInfo &info) {
         CC_LOG_ERROR("Failed to initialize D3D12 context.");
         return false;
     }
+    initializeShaderCacheSession();
 
     // Initialize GPU-visible descriptor heap pools
     _impl->gpuDescriptorHeapPool = std::make_unique<D3D12DescriptorHeapPool>();
@@ -263,6 +301,7 @@ bool CCD3D12Device::doInit(const DeviceInfo &info) {
 
 void CCD3D12Device::doDestroy() {
     waitForGpu();
+    _impl->pendingUploadCommandContexts.clear();
 
     // Release dummy resources
     _impl->dummyTexture = nullptr;
@@ -286,12 +325,98 @@ void CCD3D12Device::doDestroy() {
     _impl->commandAllocator.Reset();
     _impl->frameFence.Reset();
     _impl->graphicsQueue.Reset();
+#if defined(__ID3D12Device9_INTERFACE_DEFINED__) && defined(__ID3D12ShaderCacheSession_INTERFACE_DEFINED__)
+    _impl->shaderCacheSession.Reset();
+#endif
     _impl->d3dDevice.Reset();
     _impl->dxgiFactory.Reset();
 
     CC_SAFE_DESTROY_AND_DELETE(_cmdBuff);
     CC_SAFE_DESTROY_AND_DELETE(_queryPool);
     CC_SAFE_DESTROY_AND_DELETE(_queue);
+}
+
+void CCD3D12Device::initializeShaderCacheSession() {
+#if defined(__ID3D12Device9_INTERFACE_DEFINED__) && defined(__ID3D12ShaderCacheSession_INTERFACE_DEFINED__)
+    if (!_impl || !_impl->d3dDevice) {
+        return;
+    }
+
+    Microsoft::WRL::ComPtr<ID3D12Device9> device9;
+    HRESULT hr = _impl->d3dDevice.As(&device9);
+    if (FAILED(hr) || !device9) {
+        CC_LOG_INFO("D3D12 Shader Cache Session unavailable: ID3D12Device9 not supported. HRESULT=0x%08x",
+                    static_cast<unsigned>(hr));
+        return;
+    }
+
+    D3D12_SHADER_CACHE_SESSION_DESC desc{};
+    desc.Identifier = D3D12_COCOS_DXBC_SHADER_CACHE_GUID;
+    desc.Mode = D3D12_SHADER_CACHE_MODE_DISK;
+    desc.Flags = static_cast<D3D12_SHADER_CACHE_FLAGS>(0);
+    desc.MaximumInMemoryCacheSizeBytes = 8U * 1024U * 1024U;
+    desc.MaximumInMemoryCacheEntries = 4096U;
+    desc.MaximumValueFileSizeBytes = 256U * 1024U * 1024U;
+    desc.Version = D3D12_COCOS_DXBC_SHADER_CACHE_VERSION;
+
+    hr = device9->CreateShaderCacheSession(&desc, IID_PPV_ARGS(&_impl->shaderCacheSession));
+    if (SUCCEEDED(hr) && _impl->shaderCacheSession) {
+        CC_LOG_INFO("D3D12 Shader Cache Session initialized for DXBC cache.");
+    } else {
+        CC_LOG_WARNING("D3D12 Shader Cache Session initialization failed. HRESULT=0x%08x",
+                       static_cast<unsigned>(hr));
+    }
+#else
+    CC_LOG_INFO("D3D12 Shader Cache Session unavailable: SDK headers do not expose ID3D12Device9.");
+#endif
+}
+
+bool CCD3D12Device::loadShaderCacheValue(const void *key, uint32_t keySize, std::vector<uint8_t> &outValue) const {
+#if defined(__ID3D12Device9_INTERFACE_DEFINED__) && defined(__ID3D12ShaderCacheSession_INTERFACE_DEFINED__)
+    if (!_impl || !_impl->shaderCacheSession || !key || keySize == 0) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(_impl->shaderCacheMutex);
+
+    UINT valueSize = 0;
+    HRESULT hr = _impl->shaderCacheSession->FindValue(key, keySize, nullptr, &valueSize);
+    if (FAILED(hr) || valueSize == 0) {
+        return false;
+    }
+
+    outValue.resize(valueSize);
+    hr = _impl->shaderCacheSession->FindValue(key, keySize, outValue.data(), &valueSize);
+    if (FAILED(hr) || valueSize == 0) {
+        outValue.clear();
+        return false;
+    }
+
+    outValue.resize(valueSize);
+    return true;
+#else
+    (void)key;
+    (void)keySize;
+    (void)outValue;
+    return false;
+#endif
+}
+
+bool CCD3D12Device::storeShaderCacheValue(const void *key, uint32_t keySize, const std::vector<uint8_t> &value) const {
+#if defined(__ID3D12Device9_INTERFACE_DEFINED__) && defined(__ID3D12ShaderCacheSession_INTERFACE_DEFINED__)
+    if (!_impl || !_impl->shaderCacheSession || !key || keySize == 0 || value.empty()) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(_impl->shaderCacheMutex);
+    HRESULT hr = _impl->shaderCacheSession->StoreValue(key, keySize, value.data(), static_cast<UINT>(value.size()));
+    return SUCCEEDED(hr);
+#else
+    (void)key;
+    (void)keySize;
+    (void)value;
+    return false;
+#endif
 }
 
 void CCD3D12Device::acquire(Swapchain *const *swapchains, uint32_t count) {
@@ -408,7 +533,24 @@ void CCD3D12Device::notifySubmittedFence(void *fence, uint64_t value) {
 }
 
 void CCD3D12Device::retireFrameResources() {
-    if (!_impl || !_impl->lastSubmittedFence || _impl->lastSubmittedFenceValue == 0) {
+    if (!_impl) {
+        return;
+    }
+
+    if (_impl->frameFence) {
+        const uint64_t completedUploadFence = _impl->frameFence->GetCompletedValue();
+        _impl->pendingUploadCommandContexts.erase(
+            std::remove_if(_impl->pendingUploadCommandContexts.begin(),
+                           _impl->pendingUploadCommandContexts.end(),
+                           [completedUploadFence](const Impl::PendingUploadCommandContext &context) {
+                               return context.fenceValue <= completedUploadFence;
+                           }),
+            _impl->pendingUploadCommandContexts.end());
+    }
+
+    const bool hasPendingAsyncUploads = !_impl->pendingUploadCommandContexts.empty();
+
+    if (!_impl->lastSubmittedFence || _impl->lastSubmittedFenceValue == 0) {
         return;
     }
     const uint64_t completedValue = _impl->lastSubmittedFence->GetCompletedValue();
@@ -423,10 +565,99 @@ void CCD3D12Device::retireFrameResources() {
     if (_impl->samplerDescriptorHeapPool) {
         _impl->samplerDescriptorHeapPool->reset();
     }
-    for (auto &page : _impl->uploadPages) {
-        page.offset = 0;
+    if (!hasPendingAsyncUploads) {
+        for (auto &page : _impl->uploadPages) {
+            page.offset = 0;
+        }
     }
     _impl->lastRetiredFenceValue = _impl->lastSubmittedFenceValue;
+}
+
+void CCD3D12Device::recordDescriptorFlush(uint32_t copyCalls, uint32_t copiedDescriptors,
+                                          uint32_t dynamicOffsetRewrites, uint32_t dynamicOffsetDescriptors,
+                                          uint32_t setDescriptorHeapCalls, uint32_t rootDescriptorTableBinds) {
+#if CC_D3D12_PERF_COUNTERS
+    if (!_impl) {
+        return;
+    }
+    auto &counters = _impl->framePerfCounters;
+    ++counters.descriptorFlushes;
+    counters.copyDescriptorCalls += copyCalls;
+    counters.copiedDescriptors += copiedDescriptors;
+    counters.dynamicOffsetRewrites += dynamicOffsetRewrites;
+    counters.dynamicOffsetDescriptors += dynamicOffsetDescriptors;
+    counters.setDescriptorHeapCalls += setDescriptorHeapCalls;
+    counters.rootDescriptorTableBinds += rootDescriptorTableBinds;
+#else
+    (void)copyCalls;
+    (void)copiedDescriptors;
+    (void)dynamicOffsetRewrites;
+    (void)dynamicOffsetDescriptors;
+    (void)setDescriptorHeapCalls;
+    (void)rootDescriptorTableBinds;
+#endif
+}
+
+void CCD3D12Device::recordDescriptorStateBinds(uint32_t setDescriptorHeapCalls, uint32_t rootDescriptorTableBinds) {
+#if CC_D3D12_PERF_COUNTERS
+    if (!_impl) {
+        return;
+    }
+    _impl->framePerfCounters.setDescriptorHeapCalls += setDescriptorHeapCalls;
+    _impl->framePerfCounters.rootDescriptorTableBinds += rootDescriptorTableBinds;
+#else
+    (void)setDescriptorHeapCalls;
+    (void)rootDescriptorTableBinds;
+#endif
+}
+
+void CCD3D12Device::recordResourceBarriers(uint32_t barrierCount) {
+#if CC_D3D12_PERF_COUNTERS
+    if (!_impl || barrierCount == 0) {
+        return;
+    }
+    ++_impl->framePerfCounters.resourceBarrierCalls;
+    _impl->framePerfCounters.resourceBarriers += barrierCount;
+#else
+    (void)barrierCount;
+#endif
+}
+
+void CCD3D12Device::recordFenceWait(uint64_t waitMicroseconds) {
+#if CC_D3D12_PERF_COUNTERS
+    if (!_impl) {
+        return;
+    }
+    ++_impl->framePerfCounters.fenceWaits;
+    _impl->framePerfCounters.fenceWaitMicroseconds += waitMicroseconds;
+#else
+    (void)waitMicroseconds;
+#endif
+}
+
+void CCD3D12Device::reportAndResetFramePerfCounters() {
+#if CC_D3D12_PERF_COUNTERS
+    if (!_impl) {
+        return;
+    }
+    const auto &counters = _impl->framePerfCounters;
+    CC_LOG_INFO("[D3D12-PERF] frame=%llu flushDescriptorSets=%llu CopyDescriptorsSimple=%llu copiedDescriptors=%llu "
+                "dynamicOffsetRewrites=%llu dynamicOffsetDescriptors=%llu SetDescriptorHeaps=%llu rootTableBinds=%llu "
+                "ResourceBarrierCalls=%llu ResourceBarriers=%llu fenceWaits=%llu fenceWaitUs=%llu",
+                static_cast<unsigned long long>(++_impl->perfFrameIndex),
+                static_cast<unsigned long long>(counters.descriptorFlushes),
+                static_cast<unsigned long long>(counters.copyDescriptorCalls),
+                static_cast<unsigned long long>(counters.copiedDescriptors),
+                static_cast<unsigned long long>(counters.dynamicOffsetRewrites),
+                static_cast<unsigned long long>(counters.dynamicOffsetDescriptors),
+                static_cast<unsigned long long>(counters.setDescriptorHeapCalls),
+                static_cast<unsigned long long>(counters.rootDescriptorTableBinds),
+                static_cast<unsigned long long>(counters.resourceBarrierCalls),
+                static_cast<unsigned long long>(counters.resourceBarriers),
+                static_cast<unsigned long long>(counters.fenceWaits),
+                static_cast<unsigned long long>(counters.fenceWaitMicroseconds));
+    _impl->framePerfCounters = {};
+#endif
 }
 
 void *CCD3D12Device::getDrawIndirectSignature() const {
@@ -471,6 +702,7 @@ void CCD3D12Device::present() {
 
     // Transient descriptor/upload pages are reclaimed lazily in acquire()
     // after the queue fence proves the previous submission has completed.
+    reportAndResetFramePerfCounters();
 }
 
 CommandBuffer *CCD3D12Device::createCommandBuffer(const CommandBufferInfo &info, bool hasAgent) {
@@ -532,7 +764,7 @@ PipelineState *CCD3D12Device::createPipelineState() {
 }
 
 void CCD3D12Device::copyBuffersToTexture(const uint8_t *const *buffers, Texture *dst, const BufferTextureCopy *regions, uint32_t count) {
-    if (!buffers || !dst || !regions || count == 0 || !_impl->d3dDevice || !_impl->graphicsQueue || !_impl->commandAllocator || !_impl->commandList) {
+    if (!buffers || !dst || !regions || count == 0 || !_impl->d3dDevice || !_impl->graphicsQueue || !_impl->frameFence) {
         return;
     }
 
@@ -559,22 +791,33 @@ void CCD3D12Device::copyBuffersToTexture(const uint8_t *const *buffers, Texture 
                     textureInfo.layerCount, static_cast<unsigned>(textureInfo.format), count);
     }
 
-    waitForGpu();
-
-    HRESULT hr = _impl->commandAllocator->Reset();
+    Microsoft::WRL::ComPtr<ID3D12CommandAllocator> uploadCommandAllocator;
+    HRESULT hr = _impl->d3dDevice->CreateCommandAllocator(
+        D3D12_COMMAND_LIST_TYPE_DIRECT,
+        IID_PPV_ARGS(&uploadCommandAllocator));
     if (FAILED(hr)) {
-        CC_LOG_ERROR("D3D12 upload command allocator reset failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+        CC_LOG_ERROR("D3D12 upload command allocator creation failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
         return;
     }
 
-    hr = _impl->commandList->Reset(_impl->commandAllocator.Get(), nullptr);
+    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> uploadCommandList;
+    hr = _impl->d3dDevice->CreateCommandList(
+        0,
+        D3D12_COMMAND_LIST_TYPE_DIRECT,
+        uploadCommandAllocator.Get(),
+        nullptr,
+        IID_PPV_ARGS(&uploadCommandList));
     if (FAILED(hr)) {
-        CC_LOG_ERROR("D3D12 upload command list reset failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+        CC_LOG_ERROR("D3D12 upload command list creation failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
         return;
     }
 
-    auto toCopyDest = textureTransition(textureResource, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
-    _impl->commandList->ResourceBarrier(1, &toCopyDest);
+    const D3D12_RESOURCE_STATES previousState = d3d12Texture->getCurrentState();
+    if (previousState != D3D12_RESOURCE_STATE_COPY_DEST) {
+        auto toCopyDest = textureTransition(textureResource, previousState, D3D12_RESOURCE_STATE_COPY_DEST);
+        uploadCommandList->ResourceBarrier(1, &toCopyDest);
+        d3d12Texture->setCurrentState(D3D12_RESOURCE_STATE_COPY_DEST);
+    }
 
     for (uint32_t regionIndex = 0; regionIndex < count; ++regionIndex) {
         if (!buffers[regionIndex]) {
@@ -649,40 +892,76 @@ void CCD3D12Device::copyBuffersToTexture(const uint8_t *const *buffers, Texture 
         srcBox.bottom = region.texExtent.height;
         srcBox.back = copyDepth;
 
-        _impl->commandList->CopyTextureRegion(
+        uploadCommandList->CopyTextureRegion(
             &dstLocation,
             region.texOffset.x,
             region.texOffset.y,
             region.texOffset.z,
             &srcLocation,
             &srcBox);
+
+        d3d12Texture->markBaseMipLayerUploaded(
+            mipLevel,
+            arrayLayer,
+            textureInfo.type == TextureType::TEX3D ? 1 : region.texSubres.layerCount);
     }
 
     ccstd::vector<Microsoft::WRL::ComPtr<ID3D12DescriptorHeap>> mipDescriptorHeaps;
+    const bool shouldGenerateMipmaps = d3d12Texture->shouldGenerateMipmapsAfterUpload();
     const bool generatedMipmaps =
-        generateD3D12Mipmaps(_impl->d3dDevice.Get(), _impl->commandList.Get(), textureResource,
+        shouldGenerateMipmaps &&
+        generateD3D12Mipmaps(_impl->d3dDevice.Get(), uploadCommandList.Get(), textureResource,
                              textureInfo, mipDescriptorHeaps);
+    if (generatedMipmaps) {
+        d3d12Texture->markMipmapsGenerated();
+    }
     if (diagnoseMipUpload) {
         CC_LOG_INFO("[D3D12-MIP-DIAG] generation resource=%p result=%s descriptorHeaps=%zu",
-                    textureResource, generatedMipmaps ? "success" : "failed", mipDescriptorHeaps.size());
+                    textureResource,
+                    shouldGenerateMipmaps ? (generatedMipmaps ? "success" : "failed") : "deferred",
+                    mipDescriptorHeaps.size());
     }
-    auto toCommon = textureTransition(
+    const D3D12_RESOURCE_STATES postUploadState =
+        generatedMipmaps ? D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE : D3D12_RESOURCE_STATE_COPY_DEST;
+    if (postUploadState != previousState) {
+        auto restoreState = textureTransition(
         textureResource,
-        generatedMipmaps ? D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE : D3D12_RESOURCE_STATE_COPY_DEST,
-        D3D12_RESOURCE_STATE_COMMON);
-    _impl->commandList->ResourceBarrier(1, &toCommon);
+            postUploadState,
+            previousState);
+        uploadCommandList->ResourceBarrier(1, &restoreState);
+    }
+    d3d12Texture->setCurrentState(previousState);
 
-    hr = _impl->commandList->Close();
+    hr = uploadCommandList->Close();
     if (FAILED(hr)) {
         CC_LOG_ERROR("D3D12 upload command list close failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
         return;
     }
 
-    ID3D12CommandList *commandLists[] = {_impl->commandList.Get()};
+    ID3D12CommandList *commandLists[] = {uploadCommandList.Get()};
     _impl->graphicsQueue->ExecuteCommandLists(1, commandLists);
-    waitForGpu();
 
-    mipDescriptorHeaps.clear();
+    ++_impl->fenceValue;
+    hr = _impl->graphicsQueue->Signal(_impl->frameFence.Get(), _impl->fenceValue);
+    if (FAILED(hr)) {
+        CC_LOG_ERROR("D3D12 upload fence signal failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+        waitForGpu();
+        return;
+    }
+
+    Impl::PendingUploadCommandContext pendingContext;
+    pendingContext.commandAllocator = std::move(uploadCommandAllocator);
+    pendingContext.commandList = std::move(uploadCommandList);
+    pendingContext.referencedResources.emplace_back(textureResource);
+    pendingContext.descriptorHeaps = std::move(mipDescriptorHeaps);
+    pendingContext.fenceValue = _impl->fenceValue;
+    _impl->pendingUploadCommandContexts.emplace_back(std::move(pendingContext));
+    if (diagnoseMipUpload) {
+        CC_LOG_INFO("[D3D12-MIP-DIAG] upload submitted async resource=%p fence=%llu pendingContexts=%zu",
+                    textureResource,
+                    static_cast<unsigned long long>(_impl->fenceValue),
+                    _impl->pendingUploadCommandContexts.size());
+    }
 }
 
 void CCD3D12Device::copyTextureToBuffers(Texture *src, uint8_t *const *buffers, const BufferTextureCopy *regions, uint32_t count) {
@@ -1155,9 +1434,6 @@ void CCD3D12Device::waitForGpu() {
             return;
         }
         WaitForSingleObject(_impl->fenceEvent, INFINITE);
-    }
-    for (auto &page : _impl->uploadPages) {
-        page.offset = 0;
     }
 }
 

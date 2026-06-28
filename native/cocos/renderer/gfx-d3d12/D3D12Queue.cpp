@@ -34,7 +34,11 @@
     #include <wrl/client.h>
 
 namespace {
-#ifndef NDEBUG
+#ifndef CC_D3D12_QUEUE_DIAG
+    #define CC_D3D12_QUEUE_DIAG 0
+#endif
+
+#if !defined(NDEBUG) && CC_D3D12_QUEUE_DIAG
 void dumpQueueDebugMessages(ID3D12Device *device, const char *checkpoint) {
     if (!device) {
         return;

@@ -26,6 +26,7 @@
 
 #include "gfx-base/GFXTexture.h"
 #include <memory>
+#include <vector>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -63,6 +64,10 @@ public:
     static void setTrackedResourceState(void *resource, D3D12_RESOURCE_STATES state);
     static void clearTrackedResourceState(void *resource);
 
+    void markBaseMipLayerUploaded(uint32_t mipLevel, uint32_t baseLayer, uint32_t layerCount);
+    bool shouldGenerateMipmapsAfterUpload() const;
+    void markMipmapsGenerated();
+
 protected:
     void doInit(const TextureInfo &info) override;
     void doInit(const TextureViewInfo &info) override;
@@ -78,6 +83,8 @@ private:
 
     bool _isSwapchainTexture{false};
     D3D12_RESOURCE_STATES _currentState = D3D12_RESOURCE_STATE_COMMON;
+    ccstd::vector<uint8_t> _baseMipUploadedLayers;
+    bool _mipmapsGenerated{false};
 };
 
 } // namespace gfx

@@ -25,7 +25,13 @@
 #pragma once
 
 #include "gfx-base/GFXDevice.h"
+#include <cstdint>
 #include <memory>
+#include <vector>
+
+#ifndef CC_D3D12_PERF_COUNTERS
+    #define CC_D3D12_PERF_COUNTERS 1
+#endif
 
 namespace cc {
 namespace gfx {
@@ -93,6 +99,14 @@ public:
     D3D12UploadAllocation allocateUploadBuffer(uint64_t size, uint64_t alignment);
     void notifySubmittedFence(void *fence, uint64_t value);
     void retireFrameResources();
+    bool loadShaderCacheValue(const void *key, uint32_t keySize, std::vector<uint8_t> &outValue) const;
+    bool storeShaderCacheValue(const void *key, uint32_t keySize, const std::vector<uint8_t> &value) const;
+    void recordDescriptorFlush(uint32_t copyCalls, uint32_t copiedDescriptors,
+                               uint32_t dynamicOffsetRewrites, uint32_t dynamicOffsetDescriptors,
+                               uint32_t setDescriptorHeapCalls, uint32_t rootDescriptorTableBinds);
+    void recordDescriptorStateBinds(uint32_t setDescriptorHeapCalls, uint32_t rootDescriptorTableBinds);
+    void recordResourceBarriers(uint32_t barrierCount);
+    void recordFenceWait(uint64_t waitMicroseconds);
 
 protected:
     static CCD3D12Device *instance;
@@ -122,9 +136,11 @@ protected:
     SampleCount getMaxSampleCount(Format format, TextureUsage usage, TextureFlags flags) const override;
 
     bool initializeD3D12Context();
+    void initializeShaderCacheSession();
     void initFormatFeatures();
     void initCapabilities();
     void waitForGpu();
+    void reportAndResetFramePerfCounters();
 
     struct Impl;
     std::unique_ptr<Impl> _impl;

@@ -27,6 +27,7 @@
 #include "D3D12Texture.h"
 #include "base/Log.h"
 #include "base/Macros.h"
+#include <chrono>
 
     #ifndef NOMINMAX
         #define NOMINMAX
@@ -38,6 +39,12 @@
 
 namespace cc {
 namespace gfx {
+
+namespace {
+constexpr UINT D3D12_PRESENT_SYNC_INTERVAL = 0;
+constexpr UINT D3D12_PRESENT_FLAGS = 0;
+constexpr uint64_t D3D12_PRESENT_DIAG_THRESHOLD_MS = 2;
+} // namespace
 
 struct CCD3D12Swapchain::Impl {
     static constexpr uint32_t BACK_BUFFER_COUNT = 2;
@@ -146,13 +153,16 @@ bool CCD3D12Swapchain::present() {
         return false;
     }
 
-    // Test both syncInterval values:
-    // - syncInterval=1: VSync, guaranteed to display, but may black-screen with sync submit
-    // - syncInterval=0: Immediate, no VSync, but content may not display on some drivers
-    // Try syncInterval=1 first — if the rendering pipeline is correct (which pixel readback
-    // confirms), VSync present should show the content.
-    const UINT syncInterval = 1;
-    HRESULT hr = _impl->swapChain->Present(syncInterval, 0);
+    const auto presentStart = std::chrono::steady_clock::now();
+    HRESULT hr = _impl->swapChain->Present(D3D12_PRESENT_SYNC_INTERVAL, D3D12_PRESENT_FLAGS);
+    const auto presentEnd = std::chrono::steady_clock::now();
+    const auto presentMs = std::chrono::duration_cast<std::chrono::milliseconds>(presentEnd - presentStart).count();
+    if (presentMs >= D3D12_PRESENT_DIAG_THRESHOLD_MS) {
+        CC_LOG_INFO("[D3D12-PERF] SwapchainPresent syncInterval=%u flags=%u totalMs=%llu",
+                    D3D12_PRESENT_SYNC_INTERVAL,
+                    D3D12_PRESENT_FLAGS,
+                    static_cast<unsigned long long>(presentMs));
+    }
     if (FAILED(hr)) {
         CC_LOG_ERROR("IDXGISwapChain::Present failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
         return false;

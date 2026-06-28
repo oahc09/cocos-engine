@@ -31,10 +31,13 @@
 #include "D3D12DescriptorSetLayout.h"
 #include "base/Log.h"
 #include "gfx-base/GFXDef.h"
+#include "platform/FileUtils.h"
 
     #ifndef NOMINMAX
         #define NOMINMAX
     #endif
+    #include <chrono>
+    #include <cstdio>
     #include <d3d12.h>
     #include <cctype>
     #include <cstring>
@@ -43,12 +46,235 @@
     #include <d3dcompiler.h>
     #include <map>
     #include <tuple>
+    #include <vector>
     #include <wrl/client.h>
 
 namespace cc {
 namespace gfx {
 
 namespace {
+using D3D12PerfClock = std::chrono::steady_clock;
+
+constexpr uint32_t CC_D3D12_PSO_CACHE_VERSION = 1;
+constexpr uint64_t FNV1A64_OFFSET = 14695981039346656037ULL;
+constexpr uint64_t FNV1A64_PRIME = 1099511628211ULL;
+
+uint64_t elapsedMs(D3D12PerfClock::time_point start) {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(D3D12PerfClock::now() - start).count());
+}
+
+void appendHashBytes(uint64_t &hash, const void *data, size_t size) {
+    const auto *bytes = static_cast<const uint8_t *>(data);
+    for (size_t i = 0; i < size; ++i) {
+        hash ^= bytes[i];
+        hash *= FNV1A64_PRIME;
+    }
+}
+
+template <class T>
+void appendHashValue(uint64_t &hash, const T &value) {
+    appendHashBytes(hash, &value, sizeof(T));
+}
+
+void appendHashString(uint64_t &hash, const char *value) {
+    if (!value) {
+        const uint8_t terminator = 0;
+        appendHashBytes(hash, &terminator, 1);
+        return;
+    }
+    appendHashBytes(hash, value, std::strlen(value));
+    const uint8_t terminator = 0;
+    appendHashBytes(hash, &terminator, 1);
+}
+
+ccstd::string toHex(uint64_t value) {
+    char buffer[17] = {};
+    std::snprintf(buffer, sizeof(buffer), "%016llx", static_cast<unsigned long long>(value));
+    return buffer;
+}
+
+ccstd::string joinCachePath(const ccstd::string &base, const ccstd::string &child) {
+    if (base.empty()) {
+        return child;
+    }
+    const char last = base[base.size() - 1];
+    if (last == '/' || last == '\\') {
+        return base + child;
+    }
+    return base + "/" + child;
+}
+
+ccstd::string getPSOCacheDirectory(cc::FileUtils *fileUtils) {
+    if (!fileUtils) {
+        return "";
+    }
+    ccstd::string root = fileUtils->getWritablePath();
+    if (root.empty()) {
+        return "";
+    }
+    root = joinCachePath(root, "d3d12-pso-cache");
+    return joinCachePath(root, "v" + std::to_string(CC_D3D12_PSO_CACHE_VERSION));
+}
+
+void appendShaderBytecodeHash(uint64_t &hash, const D3D12_SHADER_BYTECODE &bytecode) {
+    appendHashValue(hash, bytecode.BytecodeLength);
+    if (bytecode.pShaderBytecode && bytecode.BytecodeLength > 0) {
+        appendHashBytes(hash, bytecode.pShaderBytecode, bytecode.BytecodeLength);
+    }
+}
+
+void appendRenderTargetBlendHash(uint64_t &hash, const D3D12_RENDER_TARGET_BLEND_DESC &desc) {
+    appendHashValue(hash, desc.BlendEnable);
+    appendHashValue(hash, desc.LogicOpEnable);
+    appendHashValue(hash, desc.SrcBlend);
+    appendHashValue(hash, desc.DestBlend);
+    appendHashValue(hash, desc.BlendOp);
+    appendHashValue(hash, desc.SrcBlendAlpha);
+    appendHashValue(hash, desc.DestBlendAlpha);
+    appendHashValue(hash, desc.BlendOpAlpha);
+    appendHashValue(hash, desc.LogicOp);
+    appendHashValue(hash, desc.RenderTargetWriteMask);
+}
+
+void appendDepthStencilOpHash(uint64_t &hash, const D3D12_DEPTH_STENCILOP_DESC &desc) {
+    appendHashValue(hash, desc.StencilFailOp);
+    appendHashValue(hash, desc.StencilDepthFailOp);
+    appendHashValue(hash, desc.StencilPassOp);
+    appendHashValue(hash, desc.StencilFunc);
+}
+
+ccstd::string makeGraphicsPSOCacheKey(const D3D12_GRAPHICS_PIPELINE_STATE_DESC &desc) {
+    uint64_t hashA = FNV1A64_OFFSET;
+    uint64_t hashB = FNV1A64_OFFSET ^ 0x9e3779b97f4a7c15ULL;
+    appendHashValue(hashA, CC_D3D12_PSO_CACHE_VERSION);
+
+    appendShaderBytecodeHash(hashA, desc.VS);
+    appendShaderBytecodeHash(hashA, desc.PS);
+    appendShaderBytecodeHash(hashA, desc.DS);
+    appendShaderBytecodeHash(hashA, desc.HS);
+    appendShaderBytecodeHash(hashA, desc.GS);
+
+    appendHashValue(hashA, desc.BlendState.AlphaToCoverageEnable);
+    appendHashValue(hashA, desc.BlendState.IndependentBlendEnable);
+    for (const auto &rt : desc.BlendState.RenderTarget) {
+        appendRenderTargetBlendHash(hashA, rt);
+    }
+
+    appendHashValue(hashA, desc.SampleMask);
+
+    appendHashValue(hashA, desc.RasterizerState.FillMode);
+    appendHashValue(hashA, desc.RasterizerState.CullMode);
+    appendHashValue(hashA, desc.RasterizerState.FrontCounterClockwise);
+    appendHashValue(hashA, desc.RasterizerState.DepthBias);
+    appendHashValue(hashA, desc.RasterizerState.DepthBiasClamp);
+    appendHashValue(hashA, desc.RasterizerState.SlopeScaledDepthBias);
+    appendHashValue(hashA, desc.RasterizerState.DepthClipEnable);
+    appendHashValue(hashA, desc.RasterizerState.MultisampleEnable);
+    appendHashValue(hashA, desc.RasterizerState.AntialiasedLineEnable);
+    appendHashValue(hashA, desc.RasterizerState.ForcedSampleCount);
+    appendHashValue(hashA, desc.RasterizerState.ConservativeRaster);
+
+    appendHashValue(hashA, desc.DepthStencilState.DepthEnable);
+    appendHashValue(hashA, desc.DepthStencilState.DepthWriteMask);
+    appendHashValue(hashA, desc.DepthStencilState.DepthFunc);
+    appendHashValue(hashA, desc.DepthStencilState.StencilEnable);
+    appendHashValue(hashA, desc.DepthStencilState.StencilReadMask);
+    appendHashValue(hashA, desc.DepthStencilState.StencilWriteMask);
+    appendDepthStencilOpHash(hashA, desc.DepthStencilState.FrontFace);
+    appendDepthStencilOpHash(hashA, desc.DepthStencilState.BackFace);
+
+    appendHashValue(hashA, desc.InputLayout.NumElements);
+    for (UINT i = 0; i < desc.InputLayout.NumElements; ++i) {
+        const auto &elem = desc.InputLayout.pInputElementDescs[i];
+        appendHashString(hashA, elem.SemanticName);
+        appendHashValue(hashA, elem.SemanticIndex);
+        appendHashValue(hashA, elem.Format);
+        appendHashValue(hashA, elem.InputSlot);
+        appendHashValue(hashA, elem.AlignedByteOffset);
+        appendHashValue(hashA, elem.InputSlotClass);
+        appendHashValue(hashA, elem.InstanceDataStepRate);
+    }
+
+    appendHashValue(hashA, desc.PrimitiveTopologyType);
+    appendHashValue(hashA, desc.NumRenderTargets);
+    for (auto format : desc.RTVFormats) {
+        appendHashValue(hashA, format);
+    }
+    appendHashValue(hashA, desc.DSVFormat);
+    appendHashValue(hashA, desc.SampleDesc.Count);
+    appendHashValue(hashA, desc.SampleDesc.Quality);
+    appendHashValue(hashA, desc.NodeMask);
+    appendHashValue(hashA, desc.Flags);
+
+    appendHashValue(hashB, desc.Flags);
+    appendHashValue(hashB, desc.NodeMask);
+    appendHashValue(hashB, desc.SampleDesc.Quality);
+    appendHashValue(hashB, desc.SampleDesc.Count);
+    appendHashValue(hashB, desc.DSVFormat);
+    for (auto format : desc.RTVFormats) {
+        appendHashValue(hashB, format);
+    }
+    appendHashValue(hashB, desc.NumRenderTargets);
+    appendHashValue(hashB, desc.PrimitiveTopologyType);
+    appendShaderBytecodeHash(hashB, desc.GS);
+    appendShaderBytecodeHash(hashB, desc.HS);
+    appendShaderBytecodeHash(hashB, desc.DS);
+    appendShaderBytecodeHash(hashB, desc.PS);
+    appendShaderBytecodeHash(hashB, desc.VS);
+    appendHashValue(hashB, CC_D3D12_PSO_CACHE_VERSION);
+
+    return toHex(hashA) + toHex(hashB);
+}
+
+bool loadFileCachedPSO(const ccstd::string &cacheKey, std::vector<uint8_t> &outBlob) {
+    auto *fileUtils = cc::FileUtils::getInstance();
+    const ccstd::string cacheDir = getPSOCacheDirectory(fileUtils);
+    if (cacheDir.empty()) {
+        return false;
+    }
+
+    const ccstd::string cachePath = joinCachePath(cacheDir, cacheKey + ".pso");
+    cc::Data cachedData = fileUtils->getDataFromFile(cachePath);
+    if (cachedData.isNull() || cachedData.getSize() == 0) {
+        return false;
+    }
+
+    const uint8_t *bytes = cachedData.getBytes();
+    outBlob.assign(bytes, bytes + cachedData.getSize());
+    return !outBlob.empty();
+}
+
+bool storeFileCachedPSO(const ccstd::string &cacheKey, ID3D12PipelineState *pipelineState) {
+    if (!pipelineState) {
+        return false;
+    }
+
+    Microsoft::WRL::ComPtr<ID3DBlob> cachedBlob;
+    if (FAILED(pipelineState->GetCachedBlob(&cachedBlob)) || !cachedBlob || cachedBlob->GetBufferSize() == 0) {
+        return false;
+    }
+
+    auto *fileUtils = cc::FileUtils::getInstance();
+    const ccstd::string cacheDir = getPSOCacheDirectory(fileUtils);
+    if (cacheDir.empty()) {
+        return false;
+    }
+    if (!fileUtils->createDirectory(cacheDir)) {
+        CC_LOG_WARNING("D3D12PipelineState: failed to create PSO cache directory '%s'.", cacheDir.c_str());
+        return false;
+    }
+
+    const ccstd::string cachePath = joinCachePath(cacheDir, cacheKey + ".pso");
+    cc::Data data;
+    data.copy(static_cast<const uint8_t *>(cachedBlob->GetBufferPointer()),
+              static_cast<uint32_t>(cachedBlob->GetBufferSize()));
+    if (!fileUtils->writeDataToFile(data, cachePath)) {
+        CC_LOG_WARNING("D3D12PipelineState: failed to write PSO cache entry '%s'.", cachePath.c_str());
+        return false;
+    }
+    return true;
+}
 
 ID3D12RootSignature *getOrCreateEmptyRootSignature(ID3D12Device *device) {
     static Microsoft::WRL::ComPtr<ID3D12RootSignature> s_emptyRootSig;
@@ -349,6 +575,7 @@ CCD3D12PipelineState::~CCD3D12PipelineState() {
 
 void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
     (void)info;
+    const auto initStart = D3D12PerfClock::now();
     if (!_impl) return;
 
     _impl->pipelineState.Reset();
@@ -646,14 +873,46 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
         return;
     }
 
+    const ccstd::string psoCacheKey = makeGraphicsPSOCacheKey(psoDesc);
+    std::vector<uint8_t> cachedPsoBlob;
+    const bool psoCacheHit = loadFileCachedPSO(psoCacheKey, cachedPsoBlob);
+    if (psoCacheHit) {
+        psoDesc.CachedPSO.pCachedBlob = cachedPsoBlob.data();
+        psoDesc.CachedPSO.CachedBlobSizeInBytes = cachedPsoBlob.size();
+    }
+
+    const auto createPsoStart = D3D12PerfClock::now();
     HRESULT hr = d3dDevice->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&_impl->pipelineState));
+    if (FAILED(hr) && psoCacheHit) {
+        CC_LOG_WARNING("D3D12PipelineState: cached PSO rejected, retrying without cache. HRESULT=0x%08x key=%s",
+                       static_cast<unsigned>(hr), psoCacheKey.c_str());
+        psoDesc.CachedPSO = {};
+        hr = d3dDevice->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&_impl->pipelineState));
+    }
+    const auto createPsoMs = elapsedMs(createPsoStart);
     if (FAILED(hr)) {
         CC_LOG_ERROR("D3D12PipelineState: CreateGraphicsPipelineState failed. HRESULT=0x%08x",
                      static_cast<unsigned>(hr));
     } else {
         _impl->rootSignature = psoDesc.pRootSignature;
         _impl->baseDesc = psoDesc;
+        _impl->baseDesc.CachedPSO = {};
+        const bool psoCacheStored = psoCacheHit ? false : storeFileCachedPSO(psoCacheKey, _impl->pipelineState.Get());
+        if (psoCacheHit) {
+            CC_LOG_INFO("[D3D12-PERF] PipelineStateCacheHit key=%s bytes=%u",
+                        psoCacheKey.c_str(), static_cast<unsigned>(cachedPsoBlob.size()));
+        } else if (psoCacheStored) {
+            CC_LOG_INFO("[D3D12-PERF] PipelineStateCacheStore key=%s", psoCacheKey.c_str());
+        }
         CC_LOG_INFO("D3D12PipelineState created successfully.");
+        CC_LOG_INFO("[D3D12-PERF] PipelineStateInit shader='%s' renderTargets=%u inputElements=%u sampleCount=%u psoCache=%s createGraphicsPsoMs=%llu totalMs=%llu",
+                    _shader ? _shader->getName().c_str() : "",
+                    static_cast<unsigned>(psoDesc.NumRenderTargets),
+                    static_cast<unsigned>(psoDesc.InputLayout.NumElements),
+                    static_cast<unsigned>(psoDesc.SampleDesc.Count),
+                    psoCacheHit ? "hit" : (psoCacheStored ? "store" : "miss"),
+                    static_cast<unsigned long long>(createPsoMs),
+                    static_cast<unsigned long long>(elapsedMs(initStart)));
     }
 }
 
@@ -713,7 +972,9 @@ void *CCD3D12PipelineState::getDynamicID3D12PipelineState(float depthBias, float
     variantDesc.InputLayout.NumElements = static_cast<UINT>(_impl->inputElements.size());
 
     Microsoft::WRL::ComPtr<ID3D12PipelineState> variant;
+    const auto createVariantStart = D3D12PerfClock::now();
     HRESULT hr = d3dDevice->CreateGraphicsPipelineState(&variantDesc, IID_PPV_ARGS(&variant));
+    const auto createVariantMs = elapsedMs(createVariantStart);
     if (FAILED(hr)) {
         CC_LOG_ERROR("D3D12PipelineState: dynamic PSO variant creation failed. HRESULT=0x%08x",
                      static_cast<unsigned>(hr));
@@ -722,6 +983,11 @@ void *CCD3D12PipelineState::getDynamicID3D12PipelineState(float depthBias, float
 
     auto *result = variant.Get();
     _impl->dynamicPipelineStates.emplace(key, std::move(variant));
+    CC_LOG_INFO("[D3D12-PERF] DynamicPipelineStateInit depthBias=%d stencilReadMask=%u stencilWriteMask=%u createGraphicsPsoMs=%llu",
+                static_cast<int>(depthBias),
+                static_cast<unsigned>(stencilReadMask),
+                static_cast<unsigned>(stencilWriteMask),
+                static_cast<unsigned long long>(createVariantMs));
     return result;
 }
 

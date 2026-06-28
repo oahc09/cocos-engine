@@ -374,8 +374,8 @@ void CCD3D12DescriptorSet::doInit(const DescriptorSetInfo &info) {
         desc.dirty = true;
     }
 
-    CC_LOG_INFO("D3D12 DescriptorSet initialized: %zu descriptors (CBV/SRV/UAV=%u, Sampler=%u)",
-                _impl->descriptors.size(), _impl->cbvSrvUavDescriptorCount, _impl->samplerDescriptorCount);
+    CC_LOG_DEBUG("D3D12 DescriptorSet initialized: %zu descriptors (CBV/SRV/UAV=%u, Sampler=%u)",
+                 _impl->descriptors.size(), _impl->cbvSrvUavDescriptorCount, _impl->samplerDescriptorCount);
 }
 
 void CCD3D12DescriptorSet::doDestroy() {

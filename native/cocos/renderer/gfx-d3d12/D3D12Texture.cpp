@@ -308,6 +308,8 @@ CCD3D12Texture::~CCD3D12Texture() {
 void CCD3D12Texture::doInit(const TextureInfo &info) {
     (void)info;
     unregisterOwnedColorRenderTarget(this);
+    _baseMipUploadedLayers.clear();
+    _mipmapsGenerated = false;
     _isSwapchainTexture = false;
     _swapchain = nullptr;
     _isTextureView = false;
@@ -327,6 +329,8 @@ void CCD3D12Texture::doInit(const TextureInfo &info) {
 
 void CCD3D12Texture::doInit(const TextureViewInfo &info) {
     unregisterOwnedColorRenderTarget(this);
+    _baseMipUploadedLayers.clear();
+    _mipmapsGenerated = false;
     auto *texture = static_cast<CCD3D12Texture *>(info.texture);
     if (!texture) {
         return;
@@ -345,6 +349,8 @@ void CCD3D12Texture::doInit(const TextureViewInfo &info) {
 void CCD3D12Texture::doInit(const SwapchainTextureInfo &info) {
     (void)info;
     unregisterOwnedColorRenderTarget(this);
+    _baseMipUploadedLayers.clear();
+    _mipmapsGenerated = false;
     _isTextureView = false;
     _isSwapchainTexture = hasFlag(_info.usage, TextureUsageBit::COLOR_ATTACHMENT) &&
                           !hasFlag(_info.usage, TextureUsageBit::DEPTH_STENCIL_ATTACHMENT);
@@ -363,6 +369,8 @@ void CCD3D12Texture::doInit(const SwapchainTextureInfo &info) {
 
 void CCD3D12Texture::doDestroy() {
     unregisterOwnedColorRenderTarget(this);
+    _baseMipUploadedLayers.clear();
+    _mipmapsGenerated = false;
     if (_impl) {
         clearTrackedResourceState(_impl->resource.Get());
         _impl->resource.Reset();
@@ -376,6 +384,8 @@ void CCD3D12Texture::doResize(uint32_t width, uint32_t height, uint32_t size) {
     if (_isTextureView || _isSwapchainTexture) {
         return;
     }
+    _baseMipUploadedLayers.clear();
+    _mipmapsGenerated = false;
     createResource(width, height);
     // Resizing recreates the underlying ID3D12Resource in COMMON state.
     // Keep the tracked state in sync so the next render pass uses a valid
@@ -431,6 +441,54 @@ void CCD3D12Texture::setCurrentState(D3D12_RESOURCE_STATES state) {
     if (_impl && _impl->resource) {
         setTrackedResourceState(_impl->resource.Get(), state);
     }
+}
+
+void CCD3D12Texture::markBaseMipLayerUploaded(uint32_t mipLevel, uint32_t baseLayer, uint32_t layerCount) {
+    if (!hasFlag(_info.flags, TextureFlagBit::GEN_MIPMAP) ||
+        _info.levelCount <= 1 || _info.type == TextureType::TEX3D || mipLevel != 0) {
+        return;
+    }
+
+    const bool deferUntilAllCubeFacesUploaded = _info.type == TextureType::CUBE && _info.layerCount > 1;
+    const uint32_t trackedLayers = deferUntilAllCubeFacesUploaded ? std::max<uint32_t>(_info.layerCount, 1) : 1;
+    if (_baseMipUploadedLayers.size() != trackedLayers) {
+        _baseMipUploadedLayers.assign(trackedLayers, 0);
+    }
+
+    if (!deferUntilAllCubeFacesUploaded) {
+        _baseMipUploadedLayers[0] = 1;
+    } else {
+        const uint32_t safeLayerCount = std::max<uint32_t>(layerCount, 1);
+        const uint32_t endLayer = std::min<uint32_t>(baseLayer + safeLayerCount, trackedLayers);
+        for (uint32_t layer = baseLayer; layer < endLayer; ++layer) {
+            _baseMipUploadedLayers[layer] = 1;
+        }
+    }
+    _mipmapsGenerated = false;
+}
+
+bool CCD3D12Texture::shouldGenerateMipmapsAfterUpload() const {
+    if (!hasFlag(_info.flags, TextureFlagBit::GEN_MIPMAP) ||
+        _info.levelCount <= 1 || _info.type == TextureType::TEX3D || _mipmapsGenerated) {
+        return false;
+    }
+
+    const bool deferUntilAllCubeFacesUploaded = _info.type == TextureType::CUBE && _info.layerCount > 1;
+    const uint32_t trackedLayers = deferUntilAllCubeFacesUploaded ? std::max<uint32_t>(_info.layerCount, 1) : 1;
+    if (_baseMipUploadedLayers.size() != trackedLayers) {
+        return false;
+    }
+
+    for (uint8_t uploaded : _baseMipUploadedLayers) {
+        if (uploaded == 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void CCD3D12Texture::markMipmapsGenerated() {
+    _mipmapsGenerated = true;
 }
 
 void *CCD3D12Texture::findLatestOwnedColorResource(uint32_t width, uint32_t height, Format format, SampleCount samples) {
