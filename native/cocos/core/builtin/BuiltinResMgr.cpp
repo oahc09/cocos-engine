@@ -28,11 +28,13 @@
 #include "core/assets/Material.h"
 #include "core/assets/Texture2D.h"
 #include "core/assets/TextureCube.h"
+#include "base/Log.h"
 #include "math/Color.h"
 #include "platform/Image.h"
 #include "rapidjson/document.h"
 #include "renderer/core/ProgramLib.h"
 #include "scene/Pass.h"
+#include <chrono>
 
 namespace cc {
 
@@ -165,7 +167,17 @@ Asset *BuiltinResMgr::getAsset(const ccstd::string &uuid) {
 }
 
 bool BuiltinResMgr::initBuiltinRes() {
+    static uint32_t initCallCount = 0;
+    const uint32_t callIndex = ++initCallCount;
+    const auto startTime = std::chrono::steady_clock::now();
+    CC_LOG_INFO("[INIT-PERF] BuiltinResMgr::initBuiltinRes begin call=%u existingResources=%zu",
+                callIndex, _resources.size());
+
     if (_isInitialized) {
+        const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - startTime);
+        CC_LOG_INFO("[INIT-PERF] BuiltinResMgr::initBuiltinRes skip call=%u resources=%zu elapsedMs=%lld",
+                    callIndex, _resources.size(), static_cast<long long>(elapsedMs.count()));
         return true;
     }
 
@@ -218,6 +230,10 @@ bool BuiltinResMgr::initBuiltinRes() {
 
     // initMaterials();
 
+    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - startTime);
+    CC_LOG_INFO("[INIT-PERF] BuiltinResMgr::initBuiltinRes end call=%u resources=%zu elapsedMs=%lld",
+                callIndex, _resources.size(), static_cast<long long>(elapsedMs.count()));
     return true;
 }
 
@@ -243,6 +259,9 @@ void BuiltinResMgr::initTexture2DWithUuid(const ccstd::string &uuid, const uint8
 }
 
 void BuiltinResMgr::initTextureCubeWithUuid(const ccstd::string &uuid, const uint8_t *data, size_t dataBytes, uint32_t width, uint32_t height) {
+    CC_LOG_INFO("[INIT-PERF] BuiltinResMgr::initTextureCube uuid='%s' size=%ux%u bytes=%zu resourcesBefore=%zu",
+                uuid.c_str(), width, height, dataBytes, _resources.size());
+
     IMemoryImageSource imageSource;
     imageSource.width = width;
     imageSource.height = height;

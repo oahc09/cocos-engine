@@ -368,6 +368,9 @@ void CCD3D12Texture::doInit(const SwapchainTextureInfo &info) {
 }
 
 void CCD3D12Texture::doDestroy() {
+    if (auto *device = CCD3D12Device::getInstance()) {
+        device->discardDeferredCubeUploadsForTexture(this);
+    }
     unregisterOwnedColorRenderTarget(this);
     _baseMipUploadedLayers.clear();
     _mipmapsGenerated = false;
@@ -383,6 +386,9 @@ void CCD3D12Texture::doResize(uint32_t width, uint32_t height, uint32_t size) {
     (void)size;
     if (_isTextureView || _isSwapchainTexture) {
         return;
+    }
+    if (auto *device = CCD3D12Device::getInstance()) {
+        device->discardDeferredCubeUploadsForTexture(this);
     }
     _baseMipUploadedLayers.clear();
     _mipmapsGenerated = false;
@@ -595,14 +601,7 @@ bool CCD3D12Texture::createResource(uint32_t width, uint32_t height) {
 
     D3D12_CLEAR_VALUE clearValue{};
     D3D12_CLEAR_VALUE *optimizedClearValue = nullptr;
-    if (hasFlag(_info.usage, TextureUsageBit::COLOR_ATTACHMENT)) {
-        clearValue.Format = viewFormat;
-        clearValue.Color[0] = 0.0F;
-        clearValue.Color[1] = 0.0F;
-        clearValue.Color[2] = 0.0F;
-        clearValue.Color[3] = 1.0F;
-        optimizedClearValue = &clearValue;
-    } else if (hasFlag(_info.usage, TextureUsageBit::DEPTH_STENCIL_ATTACHMENT)) {
+    if (hasFlag(_info.usage, TextureUsageBit::DEPTH_STENCIL_ATTACHMENT)) {
         clearValue.Format = viewFormat;
         clearValue.DepthStencil.Depth = 1.0F;
         clearValue.DepthStencil.Stencil = 0;

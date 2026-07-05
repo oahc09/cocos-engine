@@ -77,6 +77,26 @@ void recordD3D12ResourceBarriers(uint32_t barrierCount) {
 }
 #endif
 
+void retainCommandListResource(ccstd::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> &resources,
+                               ID3D12Resource *resource) {
+    if (!resource) {
+        return;
+    }
+    if (auto *device = CCD3D12Device::getInstance(); device && device->isSwapchainBackBuffer(resource)) {
+        return;
+    }
+    const auto found = std::find_if(resources.begin(), resources.end(),
+                                    [resource](const Microsoft::WRL::ComPtr<ID3D12Resource> &retained) {
+                                        return retained.Get() == resource;
+                                    });
+    if (found != resources.end()) {
+        return;
+    }
+    Microsoft::WRL::ComPtr<ID3D12Resource> retained;
+    retained = resource;
+    resources.push_back(std::move(retained));
+}
+
 D3D12_RECT makeSafeRenderAreaRect(const Rect &renderArea, uint32_t framebufferWidth, uint32_t framebufferHeight) {
     const int32_t fbWidth = static_cast<int32_t>(framebufferWidth);
     const int32_t fbHeight = static_cast<int32_t>(framebufferHeight);
@@ -1027,6 +1047,8 @@ void CCD3D12CommandBuffer::resolveSubpass(uint32_t subpassIndex) {
         if (!source || !destination || source == destination) {
             continue;
         }
+        retainCommandListResource(_impl->pendingUploadResources, source);
+        retainCommandListResource(_impl->pendingUploadResources, destination);
 
         const auto sourceDesc = source->GetDesc();
         const auto destinationDesc = destination->GetDesc();
@@ -1088,6 +1110,7 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
     if (swapchain) {
         auto *backBuffer = static_cast<ID3D12Resource *>(swapchain->getCurrentBackBufferHandle());
         if (backBuffer) {
+            retainCommandListResource(_impl->pendingUploadResources, backBuffer);
             D3D12_RESOURCE_BARRIER barrier{};
             barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
             barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
@@ -1121,6 +1144,7 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
         auto *d3d12Tex = d3d12Fbo->getColorTexture(i);
         auto *resource = static_cast<ID3D12Resource *>(d3d12Fbo->getColorResource(i));
         if (!resource) continue;
+        retainCommandListResource(_impl->pendingUploadResources, resource);
 
         const bool hasTextureState = d3d12Tex && d3d12Fbo->hasColorTextureState(i);
         _impl->activeColorTargets.push_back({resource, d3d12Tex, hasTextureState});
@@ -1169,6 +1193,7 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
     auto *depthStencilTexture = d3d12Fbo->getDepthStencilTexture();
     auto *depthStencilResource = static_cast<ID3D12Resource *>(d3d12Fbo->getDepthStencilResource());
     if (hasDSV && depthStencilResource) {
+        retainCommandListResource(_impl->pendingUploadResources, depthStencilResource);
         D3D12_RESOURCE_STATES dsPrevState = depthStencilTexture ? depthStencilTexture->getCurrentState() : D3D12_RESOURCE_STATE_COMMON;
         if (dsPrevState != D3D12_RESOURCE_STATE_DEPTH_WRITE) {
             D3D12_RESOURCE_BARRIER depthBarrier{};
@@ -1992,6 +2017,7 @@ void CCD3D12CommandBuffer::draw(const DrawInfo &info) {
             auto *d3d12Buf = static_cast<CCD3D12Buffer *>(indirectBuf);
             ID3D12Resource *resource = static_cast<ID3D12Resource *>(d3d12Buf->getD3D12ResourceHandle());
             if (resource) {
+                retainCommandListResource(_impl->pendingUploadResources, resource);
                 auto *device = CCD3D12Device::getInstance();
                 if (info.indexCount > 0) {
                     auto *sig = static_cast<ID3D12CommandSignature *>(device->getDrawIndexedIndirectSignature());
@@ -2043,6 +2069,7 @@ void CCD3D12CommandBuffer::updateBuffer(Buffer *buff, const void *data, uint32_t
     // buffers, are updated through a GPU copy so descriptors keep stable backing.
     auto *resource = static_cast<ID3D12Resource *>(d3d12Buffer->getD3D12ResourceHandle());
     if (!resource) return;
+    retainCommandListResource(_impl->pendingUploadResources, resource);
 
     if (!d3d12Buffer->isD3D12UploadHeap()) {
         auto *device = CCD3D12Device::getInstance();
@@ -2106,6 +2133,7 @@ void CCD3D12CommandBuffer::copyBuffersToTexture(const uint8_t *const *buffers, T
     auto *d3d12Texture = static_cast<CCD3D12Texture *>(texture);
     auto *textureResource = static_cast<ID3D12Resource *>(d3d12Texture->getD3D12ResourceHandle());
     if (!textureResource) return;
+    retainCommandListResource(_impl->pendingUploadResources, textureResource);
 
     auto *device = CCD3D12Device::getInstance();
     if (!device) return;
@@ -2255,6 +2283,8 @@ void CCD3D12CommandBuffer::blitTexture(Texture *srcTexture, Texture *dstTexture,
     auto *srcResource = static_cast<ID3D12Resource *>(srcD3D12->getD3D12ResourceHandle());
     auto *dstResource = static_cast<ID3D12Resource *>(dstD3D12->getD3D12ResourceHandle());
     if (!srcResource || !dstResource) return;
+    retainCommandListResource(_impl->pendingUploadResources, srcResource);
+    retainCommandListResource(_impl->pendingUploadResources, dstResource);
 
     const auto &srcInfo = srcTexture->getInfo();
     const auto &dstInfo = dstTexture->getInfo();
@@ -2370,6 +2400,8 @@ void CCD3D12CommandBuffer::copyTexture(Texture *srcTexture, Texture *dstTexture,
         CC_LOG_WARNING("[D3D12] copyTexture: null resource (src=%p dst=%p)", srcResource, dstResource);
         return;
     }
+    retainCommandListResource(_impl->pendingUploadResources, srcResource);
+    retainCommandListResource(_impl->pendingUploadResources, dstResource);
 
     const auto &srcInfo = srcTexture->getInfo();
     const auto &dstInfo = dstTexture->getInfo();
@@ -2500,6 +2532,8 @@ void CCD3D12CommandBuffer::resolveTexture(Texture *srcTexture, Texture *dstTextu
     auto *srcResource = static_cast<ID3D12Resource *>(srcD3D12->getD3D12ResourceHandle());
     auto *dstResource = static_cast<ID3D12Resource *>(dstD3D12->getD3D12ResourceHandle());
     if (!srcResource || !dstResource) return;
+    retainCommandListResource(_impl->pendingUploadResources, srcResource);
+    retainCommandListResource(_impl->pendingUploadResources, dstResource);
 
     const auto &srcInfo = srcTexture->getInfo();
     const auto &dstInfo = dstTexture->getInfo();

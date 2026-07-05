@@ -38,7 +38,9 @@ namespace gfx {
 
 class D3D12DescriptorHeapPool;
 
+class CCD3D12Queue;
 class CCD3D12Swapchain;
+class CCD3D12Texture;
 
 struct D3D12UploadAllocation {
     void *resource{nullptr};
@@ -99,6 +101,7 @@ public:
     D3D12UploadAllocation allocateUploadBuffer(uint64_t size, uint64_t alignment);
     void notifySubmittedFence(void *fence, uint64_t value);
     void retireFrameResources();
+    bool isSwapchainBackBuffer(void *resource) const;
     bool loadShaderCacheValue(const void *key, uint32_t keySize, std::vector<uint8_t> &outValue) const;
     bool storeShaderCacheValue(const void *key, uint32_t keySize, const std::vector<uint8_t> &value) const;
     void recordDescriptorFlush(uint32_t copyCalls, uint32_t copiedDescriptors,
@@ -112,6 +115,9 @@ protected:
     static CCD3D12Device *instance;
 
     friend class DeviceManager;
+    friend class CCD3D12Queue;
+    friend class CCD3D12Swapchain;
+    friend class CCD3D12Texture;
 
     bool doInit(const DeviceInfo &info) override;
     void doDestroy() override;
@@ -131,6 +137,11 @@ protected:
     PipelineState *createPipelineState() override;
 
     void copyBuffersToTexture(const uint8_t *const *buffers, Texture *dst, const BufferTextureCopy *regions, uint32_t count) override;
+    void copyBuffersToTextureImmediate(const uint8_t *const *buffers, Texture *dst, const BufferTextureCopy *regions, uint32_t count);
+    void flushDeferredCubeUploads();
+    void flushDeferredCubeUploadsForTexture(Texture *texture);
+    void discardDeferredCubeUploadsForTexture(Texture *texture);
+    bool tryDeferCubeFaceUpload(const uint8_t *const *buffers, Texture *dst, const BufferTextureCopy *regions, uint32_t count);
     void copyTextureToBuffers(Texture *src, uint8_t *const *buffers, const BufferTextureCopy *region, uint32_t count) override;
     void getQueryPoolResults(QueryPool *queryPool) override;
     SampleCount getMaxSampleCount(Format format, TextureUsage usage, TextureFlags flags) const override;

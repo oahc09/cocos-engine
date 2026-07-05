@@ -139,6 +139,16 @@ struct CCD3D12Device::Impl {
     };
     ccstd::vector<PendingUploadCommandContext> pendingUploadCommandContexts;
 
+    struct DeferredCubeUpload {
+        Texture *texture{nullptr};
+        ID3D12Resource *resource{nullptr};
+        ccstd::vector<ccstd::vector<uint8_t>> layerData;
+        ccstd::vector<BufferTextureCopy> layerRegions;
+        uint32_t receivedMask{0};
+        uint32_t receivedCount{0};
+    };
+    ccstd::vector<DeferredCubeUpload> deferredCubeUploads;
+
     // Dummy resources for safe null descriptor bindings
     IntrusivePtr<CCD3D12Texture> dummyTexture;
     IntrusivePtr<CCD3D12Buffer>  dummyBuffer;
@@ -300,8 +310,12 @@ bool CCD3D12Device::doInit(const DeviceInfo &info) {
 }
 
 void CCD3D12Device::doDestroy() {
+    if (_impl) {
+        _impl->deferredCubeUploads.clear();
+    }
     waitForGpu();
     _impl->pendingUploadCommandContexts.clear();
+    _impl->deferredCubeUploads.clear();
 
     // Release dummy resources
     _impl->dummyTexture = nullptr;
@@ -573,6 +587,19 @@ void CCD3D12Device::retireFrameResources() {
     _impl->lastRetiredFenceValue = _impl->lastSubmittedFenceValue;
 }
 
+bool CCD3D12Device::isSwapchainBackBuffer(void *resource) const {
+    if (!resource) {
+        return false;
+    }
+
+    for (auto *swapchain : _d3d12Swapchains) {
+        if (swapchain && swapchain->containsBackBuffer(resource)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void CCD3D12Device::recordDescriptorFlush(uint32_t copyCalls, uint32_t copiedDescriptors,
                                           uint32_t dynamicOffsetRewrites, uint32_t dynamicOffsetDescriptors,
                                           uint32_t setDescriptorHeapCalls, uint32_t rootDescriptorTableBinds) {
@@ -677,6 +704,8 @@ void CCD3D12Device::present() {
         return;
     }
 
+    flushDeferredCubeUploads();
+
     // Use _d3d12Swapchains instead of getSwapchains() — the DeviceAgent/DeviceValidator
     // layers wrap swapchains and store them in THEIR _swapchains (private to Device base).
     // Our _d3d12Swapchains tracks the raw CCD3D12Swapchain objects created by this device.
@@ -763,7 +792,186 @@ PipelineState *CCD3D12Device::createPipelineState() {
     return ccnew CCD3D12PipelineState;
 }
 
+void CCD3D12Device::flushDeferredCubeUploads() {
+    if (!_impl || _impl->deferredCubeUploads.empty()) {
+        return;
+    }
+
+    auto pendingUploads = std::move(_impl->deferredCubeUploads);
+    _impl->deferredCubeUploads.clear();
+
+    for (auto &pending : pendingUploads) {
+        if (!pending.texture || pending.receivedCount == 0) {
+            continue;
+        }
+
+        ccstd::vector<const uint8_t *> buffers;
+        ccstd::vector<BufferTextureCopy> regions;
+        buffers.reserve(pending.receivedCount);
+        regions.reserve(pending.receivedCount);
+        for (size_t layer = 0; layer < pending.layerData.size(); ++layer) {
+            if (pending.layerData[layer].empty()) {
+                continue;
+            }
+            buffers.push_back(pending.layerData[layer].data());
+            regions.push_back(pending.layerRegions[layer]);
+        }
+        if (buffers.empty()) {
+            continue;
+        }
+
+#ifndef NDEBUG
+        CC_LOG_INFO("[D3D12-MIP-DIAG] flush deferred cube upload resource=%p regions=%u complete=%s",
+                    pending.resource,
+                    static_cast<uint32_t>(regions.size()),
+                    pending.receivedCount == pending.layerData.size() ? "true" : "false");
+#endif
+        copyBuffersToTextureImmediate(buffers.data(), pending.texture, regions.data(), static_cast<uint32_t>(regions.size()));
+    }
+}
+
+void CCD3D12Device::flushDeferredCubeUploadsForTexture(Texture *texture) {
+    if (!_impl || !texture || _impl->deferredCubeUploads.empty()) {
+        return;
+    }
+
+    auto *d3d12Texture = static_cast<CCD3D12Texture *>(texture);
+    auto *textureResource = static_cast<ID3D12Resource *>(d3d12Texture->getD3D12ResourceHandle());
+    ccstd::vector<Impl::DeferredCubeUpload> retainedUploads;
+    ccstd::vector<Impl::DeferredCubeUpload> matchingUploads;
+    retainedUploads.reserve(_impl->deferredCubeUploads.size());
+    matchingUploads.reserve(_impl->deferredCubeUploads.size());
+
+    for (auto &pending : _impl->deferredCubeUploads) {
+        if (pending.texture == texture || (textureResource && pending.resource == textureResource)) {
+            matchingUploads.emplace_back(std::move(pending));
+        } else {
+            retainedUploads.emplace_back(std::move(pending));
+        }
+    }
+
+    if (matchingUploads.empty()) {
+        _impl->deferredCubeUploads = std::move(retainedUploads);
+        return;
+    }
+
+    _impl->deferredCubeUploads = std::move(matchingUploads);
+    flushDeferredCubeUploads();
+    _impl->deferredCubeUploads = std::move(retainedUploads);
+}
+
+void CCD3D12Device::discardDeferredCubeUploadsForTexture(Texture *texture) {
+    if (!_impl || !texture || _impl->deferredCubeUploads.empty()) {
+        return;
+    }
+
+    const auto beforeCount = _impl->deferredCubeUploads.size();
+    _impl->deferredCubeUploads.erase(
+        std::remove_if(_impl->deferredCubeUploads.begin(), _impl->deferredCubeUploads.end(),
+                       [texture](const Impl::DeferredCubeUpload &pending) {
+                           return pending.texture == texture;
+                       }),
+        _impl->deferredCubeUploads.end());
+#ifndef NDEBUG
+    if (_impl->deferredCubeUploads.size() != beforeCount) {
+        CC_LOG_INFO("[D3D12-MIP-DIAG] discard deferred cube upload texture=%p removed=%zu",
+                    texture,
+                    beforeCount - _impl->deferredCubeUploads.size());
+    }
+#endif
+}
+
+bool CCD3D12Device::tryDeferCubeFaceUpload(const uint8_t *const *buffers, Texture *dst, const BufferTextureCopy *regions, uint32_t count) {
+    if (!_impl || !buffers || !buffers[0] || !dst || !regions || count != 1) {
+        return false;
+    }
+
+    const auto &textureInfo = dst->getInfo();
+    const auto &region = regions[0];
+    if (textureInfo.type != TextureType::CUBE ||
+        !hasFlag(textureInfo.flags, TextureFlagBit::GEN_MIPMAP) ||
+        textureInfo.levelCount <= 1 ||
+        textureInfo.layerCount == 0 ||
+        textureInfo.layerCount > 32 ||
+        region.texSubres.mipLevel != 0 ||
+        region.texSubres.layerCount > 1 ||
+        region.texSubres.baseArrayLayer >= textureInfo.layerCount ||
+        region.texOffset.x != 0 ||
+        region.texOffset.y != 0 ||
+        region.texOffset.z != 0 ||
+        region.texExtent.width != textureInfo.width ||
+        region.texExtent.height != textureInfo.height ||
+        std::max<uint32_t>(region.texExtent.depth, 1) != 1) {
+        return false;
+    }
+
+    const uint32_t sourceRowTexels = region.buffStride > 0 ? region.buffStride : region.texExtent.width;
+    const uint32_t sourceRows = region.buffTexHeight > 0 ? region.buffTexHeight : region.texExtent.height;
+    const uint32_t sourceBytes = formatSize(textureInfo.format, sourceRowTexels, sourceRows, 1);
+    if (sourceBytes == 0) {
+        return false;
+    }
+
+    auto *d3d12Texture = static_cast<CCD3D12Texture *>(dst);
+    auto *textureResource = static_cast<ID3D12Resource *>(d3d12Texture->getD3D12ResourceHandle());
+    if (!textureResource) {
+        return false;
+    }
+
+    auto found = std::find_if(_impl->deferredCubeUploads.begin(), _impl->deferredCubeUploads.end(),
+                              [textureResource](const Impl::DeferredCubeUpload &pending) {
+                                  return pending.resource == textureResource;
+                              });
+    if (found == _impl->deferredCubeUploads.end()) {
+        Impl::DeferredCubeUpload pending;
+        pending.texture = dst;
+        pending.resource = textureResource;
+        pending.layerData.resize(textureInfo.layerCount);
+        pending.layerRegions.resize(textureInfo.layerCount);
+        _impl->deferredCubeUploads.emplace_back(std::move(pending));
+        found = std::prev(_impl->deferredCubeUploads.end());
+    }
+
+    const uint32_t layer = region.texSubres.baseArrayLayer;
+    const uint32_t layerBit = 1U << layer;
+    if ((found->receivedMask & layerBit) != 0) {
+        flushDeferredCubeUploadsForTexture(dst);
+        return false;
+    }
+
+    auto storedRegion = region;
+    storedRegion.buffOffset = 0;
+    found->layerData[layer].resize(sourceBytes);
+    std::memcpy(found->layerData[layer].data(), buffers[0] + region.buffOffset, sourceBytes);
+    found->layerRegions[layer] = storedRegion;
+    found->receivedMask |= layerBit;
+    ++found->receivedCount;
+
+    if (found->receivedCount < textureInfo.layerCount) {
+        return true;
+    }
+
+#ifndef NDEBUG
+    CC_LOG_INFO("[D3D12-MIP-DIAG] defer complete cube upload resource=%p size=%ux%u layers=%u regions=%u",
+                textureResource,
+                textureInfo.width,
+                textureInfo.height,
+                textureInfo.layerCount,
+                found->receivedCount);
+#endif
+    return true;
+}
+
 void CCD3D12Device::copyBuffersToTexture(const uint8_t *const *buffers, Texture *dst, const BufferTextureCopy *regions, uint32_t count) {
+    if (tryDeferCubeFaceUpload(buffers, dst, regions, count)) {
+        return;
+    }
+
+    flushDeferredCubeUploadsForTexture(dst);
+    copyBuffersToTextureImmediate(buffers, dst, regions, count);
+}
+
+void CCD3D12Device::copyBuffersToTextureImmediate(const uint8_t *const *buffers, Texture *dst, const BufferTextureCopy *regions, uint32_t count) {
     if (!buffers || !dst || !regions || count == 0 || !_impl->d3dDevice || !_impl->graphicsQueue || !_impl->frameFence) {
         return;
     }

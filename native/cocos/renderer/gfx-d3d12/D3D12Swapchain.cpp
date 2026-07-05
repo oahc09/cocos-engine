@@ -94,6 +94,10 @@ void CCD3D12Swapchain::doInit(const SwapchainInfo &info) {
 
 void CCD3D12Swapchain::doDestroy() {
     if (_impl) {
+        if (auto *device = CCD3D12Device::getInstance(); device && _impl->swapChain) {
+            device->waitForGpu();
+            device->retireFrameResources();
+        }
         for (auto &backBuffer : _impl->backBuffers) {
             backBuffer.Reset();
         }
@@ -109,14 +113,24 @@ void CCD3D12Swapchain::doDestroy() {
 
 void CCD3D12Swapchain::doResize(uint32_t width, uint32_t height, SurfaceTransform transform) {
     (void)transform;
+    if (!_impl) {
+        return;
+    }
+    if (_impl->ready && _colorTexture && _colorTexture->getWidth() == width && _colorTexture->getHeight() == height) {
+        return;
+    }
+
+    const bool resized = createOrResizeSwapchain(width, height);
+    _impl->ready = resized || (_impl->swapChain && _impl->backBuffers[0].Get() != nullptr);
+    if (!resized) {
+        return;
+    }
+
     if (_colorTexture) {
         _colorTexture->resize(width, height);
     }
     if (_depthStencilTexture) {
         _depthStencilTexture->resize(width, height);
-    }
-    if (_impl) {
-        _impl->ready = createOrResizeSwapchain(width, height);
     }
 }
 
@@ -146,6 +160,20 @@ uintptr_t CCD3D12Swapchain::getCurrentRTVHandle() const {
 
 uint32_t CCD3D12Swapchain::getCurrentBackBufferIndex() const {
     return _impl ? _impl->currentBackBufferIndex : 0;
+}
+
+bool CCD3D12Swapchain::containsBackBuffer(void *resource) const {
+    if (!_impl || !resource) {
+        return false;
+    }
+
+    auto *candidate = static_cast<ID3D12Resource *>(resource);
+    for (const auto &backBuffer : _impl->backBuffers) {
+        if (backBuffer.Get() == candidate) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool CCD3D12Swapchain::present() {
@@ -228,12 +256,19 @@ bool CCD3D12Swapchain::createOrResizeSwapchain(uint32_t width, uint32_t height) 
             return false;
         }
     } else {
+        device->waitForGpu();
+        device->retireFrameResources();
         for (auto &backBuffer : _impl->backBuffers) {
             backBuffer.Reset();
         }
         hr = _impl->swapChain->ResizeBuffers(Impl::BACK_BUFFER_COUNT, width, height, DXGI_FORMAT_R8G8B8A8_UNORM, 0);
         if (FAILED(hr)) {
             CC_LOG_ERROR("ResizeBuffers failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+            if (!createRenderTargetViews()) {
+                CC_LOG_ERROR("D3D12 swapchain failed to restore existing back buffers after ResizeBuffers failure.");
+            } else {
+                _impl->currentBackBufferIndex = _impl->swapChain->GetCurrentBackBufferIndex();
+            }
             return false;
         }
     }

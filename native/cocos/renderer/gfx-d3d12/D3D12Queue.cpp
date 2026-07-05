@@ -152,6 +152,8 @@ void CCD3D12Queue::submit(CommandBuffer *const *cmdBuffs, uint32_t count) {
 
     if (count == 0 || !cmdBuffs) return;
 
+    device->flushDeferredCubeUploads();
+
     // Collect command lists from the command buffers
     ccstd::vector<ID3D12CommandList *> commandLists;
     commandLists.reserve(count);

@@ -42,6 +42,7 @@ public:
     void *getCurrentBackBufferHandle() const;
     uintptr_t getCurrentRTVHandle() const;
     uint32_t getCurrentBackBufferIndex() const;
+    bool containsBackBuffer(void *resource) const;
     bool present();
 
 protected:
