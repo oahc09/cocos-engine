@@ -89,6 +89,9 @@ public:
     D3D12DescriptorHeapPool *getGPUDescriptorHeapPool() const;
     // GPU-visible sampler heap pool
     D3D12DescriptorHeapPool *getSamplerDescriptorHeapPool() const;
+    // Persistent CPU-only descriptor pools used by DescriptorSet staging storage.
+    D3D12DescriptorHeapPool *getCPUDescriptorHeapPool() const;
+    D3D12DescriptorHeapPool *getCPUSamplerDescriptorHeapPool() const;
 
     // Dummy resources for null descriptor bindings (safe SRV/UAV fallback)
     class CCD3D12Texture *getDummyTexture() const;
@@ -138,6 +141,7 @@ protected:
 
     void copyBuffersToTexture(const uint8_t *const *buffers, Texture *dst, const BufferTextureCopy *regions, uint32_t count) override;
     void copyBuffersToTextureImmediate(const uint8_t *const *buffers, Texture *dst, const BufferTextureCopy *regions, uint32_t count);
+    void unregisterSwapchain(CCD3D12Swapchain *swapchain);
     void flushDeferredCubeUploads();
     void flushDeferredCubeUploadsForTexture(Texture *texture);
     void discardDeferredCubeUploadsForTexture(Texture *texture);

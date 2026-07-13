@@ -24,6 +24,7 @@
 
 #include "D3D12DescriptorSet.h"
 #include "D3D12Buffer.h"
+#include "D3D12DescriptorHeapPool.h"
 #include "D3D12DescriptorSetLayout.h"
 #include "D3D12Device.h"
 #include "D3D12Texture.h"
@@ -287,9 +288,9 @@ struct DescriptorData {
 struct CCD3D12DescriptorSet::Impl {
     ccstd::vector<DescriptorData> descriptors;
 
-    // CPU-visible descriptor heap (staging area)
-    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> cbvSrvUavHeap;
-    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> samplerHeap;
+    // Persistent suballocations from device-level CPU-visible staging pools.
+    D3D12DescriptorHeapPool::Allocation cbvSrvUavAllocation;
+    D3D12DescriptorHeapPool::Allocation samplerAllocation;
     uint32_t cbvSrvUavDescriptorCount{0};
     uint32_t samplerDescriptorCount{0};
 
@@ -301,6 +302,62 @@ struct CCD3D12DescriptorSet::Impl {
 
     bool needsCbvSrvUav{false};
     bool needsSampler{false};
+
+    bool ensureStagingAllocations(CCD3D12Device *device) {
+        if (!device) {
+            return false;
+        }
+
+        auto ensureAllocation = [&](D3D12DescriptorHeapPool *pool,
+                                    uint32_t descriptorCount,
+                                    bool required,
+                                    D3D12DescriptorHeapPool::Allocation &allocation,
+                                    D3D12_CPU_DESCRIPTOR_HANDLE &cpuStart,
+                                    uint32_t &descriptorSize,
+                                    const char *name) {
+            if (!required || descriptorCount == 0) {
+                cpuStart = {};
+                descriptorSize = 0;
+                return true;
+            }
+
+            if (!pool) {
+                CC_LOG_ERROR("D3D12DescriptorSet: %s staging pool unavailable.", name);
+                return false;
+            }
+
+            descriptorSize = pool->getDescriptorSize();
+            if (!allocation.isValid) {
+                allocation = pool->allocate(descriptorCount);
+            }
+            auto *heap = static_cast<ID3D12DescriptorHeap *>(pool->getHeap(allocation.heapIndex));
+            cpuStart.ptr = reinterpret_cast<SIZE_T>(allocation.cpuHandle);
+            if (!allocation.isValid || !heap || cpuStart.ptr == 0 || descriptorSize == 0) {
+                CC_LOG_ERROR("D3D12DescriptorSet: failed to allocate %s staging descriptors "
+                             "(descriptors=%u, poolHeaps=%u, increment=%u).",
+                             name, descriptorCount, pool->getHeapCount(), descriptorSize);
+                if (allocation.isValid) {
+                    pool->deallocate(allocation);
+                }
+                allocation = {};
+                cpuStart = {};
+                return false;
+            }
+            return true;
+        };
+
+        const bool cbvReady = ensureAllocation(
+            device->getCPUDescriptorHeapPool(),
+            cbvSrvUavDescriptorCount, needsCbvSrvUav,
+            cbvSrvUavAllocation, cbvSrvUavCpuStart, cbvSrvUavDescriptorSize,
+            "CBV_SRV_UAV");
+        const bool samplerReady = ensureAllocation(
+            device->getCPUSamplerDescriptorHeapPool(),
+            samplerDescriptorCount, needsSampler,
+            samplerAllocation, samplerCpuStart, samplerDescriptorSize,
+            "Sampler");
+        return cbvReady && samplerReady;
+    }
 };
 
 CCD3D12DescriptorSet::CCD3D12DescriptorSet()
@@ -335,43 +392,14 @@ void CCD3D12DescriptorSet::doInit(const DescriptorSetInfo &info) {
         return;
     }
 
-    _impl->cbvSrvUavDescriptorSize = d3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-    _impl->samplerDescriptorSize = d3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
-
-    // Create CPU-visible staging heaps for this descriptor set
-    if (_impl->needsCbvSrvUav && _impl->cbvSrvUavDescriptorCount > 0) {
-        D3D12_DESCRIPTOR_HEAP_DESC heapDesc{};
-        heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        heapDesc.NumDescriptors = _impl->cbvSrvUavDescriptorCount;
-        heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE; // CPU-visible only for staging
-        heapDesc.NodeMask = 0;
-
-        HRESULT hr = d3dDevice->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&_impl->cbvSrvUavHeap));
-        if (FAILED(hr)) {
-            CC_LOG_ERROR("D3D12DescriptorSet: failed to create CBV_SRV_UAV heap. HRESULT=0x%08x", static_cast<unsigned>(hr));
-            return;
-        }
-        _impl->cbvSrvUavCpuStart = _impl->cbvSrvUavHeap->GetCPUDescriptorHandleForHeapStart();
-    }
-
-    if (_impl->needsSampler && _impl->samplerDescriptorCount > 0) {
-        D3D12_DESCRIPTOR_HEAP_DESC heapDesc{};
-        heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
-        heapDesc.NumDescriptors = _impl->samplerDescriptorCount;
-        heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-        heapDesc.NodeMask = 0;
-
-        HRESULT hr = d3dDevice->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&_impl->samplerHeap));
-        if (FAILED(hr)) {
-            CC_LOG_ERROR("D3D12DescriptorSet: failed to create Sampler heap. HRESULT=0x%08x", static_cast<unsigned>(hr));
-            return;
-        }
-        _impl->samplerCpuStart = _impl->samplerHeap->GetCPUDescriptorHandleForHeapStart();
-    }
-
     // Mark all descriptors as dirty initially
     for (auto &desc : _impl->descriptors) {
         desc.dirty = true;
+    }
+
+    if (!_impl->ensureStagingAllocations(device)) {
+        _isDirty = true;
+        return;
     }
 
     CC_LOG_DEBUG("D3D12 DescriptorSet initialized: %zu descriptors (CBV/SRV/UAV=%u, Sampler=%u)",
@@ -381,14 +409,25 @@ void CCD3D12DescriptorSet::doInit(const DescriptorSetInfo &info) {
 void CCD3D12DescriptorSet::doDestroy() {
     if (_impl) {
         _impl->descriptors.clear();
-        if (_impl->cbvSrvUavHeap) {
-            _impl->cbvSrvUavHeap.Reset();
+        auto *device = CCD3D12Device::getInstance();
+        auto *cbvPool = device ? device->getCPUDescriptorHeapPool() : nullptr;
+        auto *samplerPool = device ? device->getCPUSamplerDescriptorHeapPool() : nullptr;
+        if (cbvPool && _impl->cbvSrvUavAllocation.isValid) {
+            cbvPool->deallocate(_impl->cbvSrvUavAllocation);
         }
-        if (_impl->samplerHeap) {
-            _impl->samplerHeap.Reset();
+        if (samplerPool && _impl->samplerAllocation.isValid) {
+            samplerPool->deallocate(_impl->samplerAllocation);
         }
+        _impl->cbvSrvUavAllocation = {};
+        _impl->samplerAllocation = {};
         _impl->cbvSrvUavDescriptorCount = 0;
         _impl->samplerDescriptorCount = 0;
+        _impl->cbvSrvUavCpuStart = {};
+        _impl->samplerCpuStart = {};
+        _impl->cbvSrvUavDescriptorSize = 0;
+        _impl->samplerDescriptorSize = 0;
+        _impl->needsCbvSrvUav = false;
+        _impl->needsSampler = false;
     }
 }
 
@@ -403,6 +442,16 @@ void CCD3D12DescriptorSet::forceUpdate() {
     auto *device = CCD3D12Device::getInstance();
     auto *d3dDevice = static_cast<ID3D12Device *>(device ? device->getD3D12DeviceHandle() : nullptr);
     if (!d3dDevice) return;
+
+    if (!_impl->ensureStagingAllocations(device)) {
+        _isDirty = true;
+        return;
+    }
+    _impl->cbvSrvUavCpuStart.ptr = _impl->needsCbvSrvUav
+                                           ? reinterpret_cast<SIZE_T>(_impl->cbvSrvUavAllocation.cpuHandle)
+                                           : 0;
+    const D3D12_CPU_DESCRIPTOR_HANDLE samplerCpuStart =
+        {_impl->needsSampler ? reinterpret_cast<SIZE_T>(_impl->samplerAllocation.cpuHandle) : 0};
 
     // Helper: write a dummy texture SRV to a heap slot (for null texture bindings)
     auto writeDummyTextureSRV = [&](D3D12_CPU_DESCRIPTOR_HANDLE handle) {
@@ -603,13 +652,13 @@ void CCD3D12DescriptorSet::forceUpdate() {
                         D3D12_SAMPLER_DESC samplerDesc = makeSamplerDesc(samplerInfo);
 
                         D3D12_CPU_DESCRIPTOR_HANDLE handle;
-                        handle.ptr = _impl->samplerCpuStart.ptr + samplerOffset * _impl->samplerDescriptorSize;
+                        handle.ptr = samplerCpuStart.ptr + samplerOffset * _impl->samplerDescriptorSize;
                         d3dDevice->CreateSampler(&samplerDesc, handle);
                     } else if (samplerOffset < _impl->samplerDescriptorCount) {
                         // Null sampler binding: write default sampler to keep heap slot valid.
                         D3D12_SAMPLER_DESC defaultSampler = makeDefaultSamplerDesc();
                         D3D12_CPU_DESCRIPTOR_HANDLE handle;
-                        handle.ptr = _impl->samplerCpuStart.ptr + samplerOffset * _impl->samplerDescriptorSize;
+                        handle.ptr = samplerCpuStart.ptr + samplerOffset * _impl->samplerDescriptorSize;
                         d3dDevice->CreateSampler(&defaultSampler, handle);
                     }
                     ++samplerOffset;
@@ -647,13 +696,13 @@ void CCD3D12DescriptorSet::forceUpdate() {
                         D3D12_SAMPLER_DESC samplerDesc = makeSamplerDesc(samplerInfo);
 
                         D3D12_CPU_DESCRIPTOR_HANDLE handle;
-                        handle.ptr = _impl->samplerCpuStart.ptr + samplerOffset * _impl->samplerDescriptorSize;
+                        handle.ptr = samplerCpuStart.ptr + samplerOffset * _impl->samplerDescriptorSize;
                         d3dDevice->CreateSampler(&samplerDesc, handle);
                     } else if (samplerOffset < _impl->samplerDescriptorCount) {
                         // Null sampler binding: write default sampler to keep heap slot valid.
                         D3D12_SAMPLER_DESC defaultSampler = makeDefaultSamplerDesc();
                         D3D12_CPU_DESCRIPTOR_HANDLE handle;
-                        handle.ptr = _impl->samplerCpuStart.ptr + samplerOffset * _impl->samplerDescriptorSize;
+                        handle.ptr = samplerCpuStart.ptr + samplerOffset * _impl->samplerDescriptorSize;
                         d3dDevice->CreateSampler(&defaultSampler, handle);
                     }
                     ++samplerOffset;
@@ -726,11 +775,31 @@ void CCD3D12DescriptorSet::forceUpdate() {
 }
 
 void *CCD3D12DescriptorSet::getCbvSrvUavDescriptorHeap() const {
-    return (_impl && _impl->cbvSrvUavHeap) ? _impl->cbvSrvUavHeap.Get() : nullptr;
+    auto *device = CCD3D12Device::getInstance();
+    auto *pool = device ? device->getCPUDescriptorHeapPool() : nullptr;
+    return (_impl && pool && _impl->cbvSrvUavAllocation.isValid)
+               ? pool->getHeap(_impl->cbvSrvUavAllocation.heapIndex)
+               : nullptr;
 }
 
 void *CCD3D12DescriptorSet::getSamplerDescriptorHeap() const {
-    return (_impl && _impl->samplerHeap) ? _impl->samplerHeap.Get() : nullptr;
+    auto *device = CCD3D12Device::getInstance();
+    auto *pool = device ? device->getCPUSamplerDescriptorHeapPool() : nullptr;
+    return (_impl && pool && _impl->samplerAllocation.isValid)
+               ? pool->getHeap(_impl->samplerAllocation.heapIndex)
+               : nullptr;
+}
+
+uint64_t CCD3D12DescriptorSet::getCbvSrvUavCPUDescriptorHandle() const {
+    return (_impl && _impl->cbvSrvUavAllocation.isValid)
+               ? reinterpret_cast<uint64_t>(_impl->cbvSrvUavAllocation.cpuHandle)
+               : 0;
+}
+
+uint64_t CCD3D12DescriptorSet::getSamplerCPUDescriptorHandle() const {
+    return (_impl && _impl->samplerAllocation.isValid)
+               ? reinterpret_cast<uint64_t>(_impl->samplerAllocation.cpuHandle)
+               : 0;
 }
 
 uint32_t CCD3D12DescriptorSet::getCbvSrvUavDescriptorCount() const {
@@ -751,6 +820,13 @@ void CCD3D12DescriptorSet::applyDynamicOffsets(uint32_t dynamicOffsetCount, cons
     if (!d3dDevice) {
         return;
     }
+    if (!_impl->ensureStagingAllocations(device)) {
+        _isDirty = true;
+        return;
+    }
+    _impl->cbvSrvUavCpuStart.ptr = _impl->needsCbvSrvUav
+                                           ? reinterpret_cast<SIZE_T>(_impl->cbvSrvUavAllocation.cpuHandle)
+                                           : 0;
 
     auto writeDummyCBV = [&](D3D12_CPU_DESCRIPTOR_HANDLE handle) {
         auto *dummyBuf = device->getDummyBuffer();

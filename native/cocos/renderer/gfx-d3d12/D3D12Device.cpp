@@ -121,6 +121,9 @@ struct CCD3D12Device::Impl {
     // GPU-visible descriptor heap pools for shader access
     std::unique_ptr<D3D12DescriptorHeapPool> gpuDescriptorHeapPool;    // CBV_SRV_UAV, shaderVisible
     std::unique_ptr<D3D12DescriptorHeapPool> samplerDescriptorHeapPool; // SAMPLER, shaderVisible
+    // Persistent CPU-only staging pools. Unlike GPU pools, these are not reset per frame.
+    std::unique_ptr<D3D12DescriptorHeapPool> cpuDescriptorHeapPool;
+    std::unique_ptr<D3D12DescriptorHeapPool> cpuSamplerDescriptorHeapPool;
 
     struct UploadPage {
         Microsoft::WRL::ComPtr<ID3D12Resource> resource;
@@ -217,6 +220,14 @@ bool CCD3D12Device::doInit(const DeviceInfo &info) {
     _impl->samplerDescriptorHeapPool->initialize(
         D3D12DescriptorHeapPool::HeapType::SAMPLER, 2048, true);
 
+    _impl->cpuDescriptorHeapPool = std::make_unique<D3D12DescriptorHeapPool>();
+    _impl->cpuDescriptorHeapPool->initialize(
+        D3D12DescriptorHeapPool::HeapType::CBV_SRV_UAV, 16384, false);
+
+    _impl->cpuSamplerDescriptorHeapPool = std::make_unique<D3D12DescriptorHeapPool>();
+    _impl->cpuSamplerDescriptorHeapPool->initialize(
+        D3D12DescriptorHeapPool::HeapType::SAMPLER, 2048, false);
+
     CC_LOG_INFO("D3D12 descriptor heap pools initialized.");
 
     QueueInfo queueInfo;
@@ -284,6 +295,8 @@ bool CCD3D12Device::doInit(const DeviceInfo &info) {
     CC_LOG_INFO("CAPS: maxVertexUniformVectors=%u, maxFragmentUniformVectors=%u, maxTextureSize=%u",
                 _caps.maxVertexUniformVectors, _caps.maxFragmentUniformVectors, _caps.maxTextureSize);
 
+    reopenD3D12ShaderCachePersistence();
+
     // Create command signatures for indirect draw / dispatch
     {
         // DrawIndirect: matches D3D12_DRAW_ARGUMENTS { VertexCountPerInstance, InstanceCount, StartVertexLocation, StartInstanceLocation }
@@ -310,6 +323,8 @@ bool CCD3D12Device::doInit(const DeviceInfo &info) {
 }
 
 void CCD3D12Device::doDestroy() {
+    drainD3D12ShaderCachePersistence();
+    _d3d12Swapchains.clear();
     if (_impl) {
         _impl->deferredCubeUploads.clear();
     }
@@ -322,6 +337,14 @@ void CCD3D12Device::doDestroy() {
     _impl->dummyBuffer = nullptr;
 
     // Shutdown descriptor heap pools first
+    if (_impl->cpuSamplerDescriptorHeapPool) {
+        _impl->cpuSamplerDescriptorHeapPool->shutdown();
+        _impl->cpuSamplerDescriptorHeapPool.reset();
+    }
+    if (_impl->cpuDescriptorHeapPool) {
+        _impl->cpuDescriptorHeapPool->shutdown();
+        _impl->cpuDescriptorHeapPool.reset();
+    }
     if (_impl->samplerDescriptorHeapPool) {
         _impl->samplerDescriptorHeapPool->shutdown();
         _impl->samplerDescriptorHeapPool.reset();
@@ -340,7 +363,10 @@ void CCD3D12Device::doDestroy() {
     _impl->frameFence.Reset();
     _impl->graphicsQueue.Reset();
 #if defined(__ID3D12Device9_INTERFACE_DEFINED__) && defined(__ID3D12ShaderCacheSession_INTERFACE_DEFINED__)
-    _impl->shaderCacheSession.Reset();
+    {
+        std::lock_guard<std::mutex> lock(_impl->shaderCacheMutex);
+        _impl->shaderCacheSession.Reset();
+    }
 #endif
     _impl->d3dDevice.Reset();
     _impl->dxgiFactory.Reset();
@@ -387,11 +413,14 @@ void CCD3D12Device::initializeShaderCacheSession() {
 
 bool CCD3D12Device::loadShaderCacheValue(const void *key, uint32_t keySize, std::vector<uint8_t> &outValue) const {
 #if defined(__ID3D12Device9_INTERFACE_DEFINED__) && defined(__ID3D12ShaderCacheSession_INTERFACE_DEFINED__)
-    if (!_impl || !_impl->shaderCacheSession || !key || keySize == 0) {
+    if (!_impl || !key || keySize == 0) {
         return false;
     }
 
     std::lock_guard<std::mutex> lock(_impl->shaderCacheMutex);
+    if (!_impl->shaderCacheSession) {
+        return false;
+    }
 
     UINT valueSize = 0;
     HRESULT hr = _impl->shaderCacheSession->FindValue(key, keySize, nullptr, &valueSize);
@@ -418,11 +447,23 @@ bool CCD3D12Device::loadShaderCacheValue(const void *key, uint32_t keySize, std:
 
 bool CCD3D12Device::storeShaderCacheValue(const void *key, uint32_t keySize, const std::vector<uint8_t> &value) const {
 #if defined(__ID3D12Device9_INTERFACE_DEFINED__) && defined(__ID3D12ShaderCacheSession_INTERFACE_DEFINED__)
-    if (!_impl || !_impl->shaderCacheSession || !key || keySize == 0 || value.empty()) {
+    if (!_impl || !key || keySize == 0 || value.empty()) {
         return false;
     }
 
     std::lock_guard<std::mutex> lock(_impl->shaderCacheMutex);
+    if (!_impl->shaderCacheSession) {
+        return false;
+    }
+
+    // StoreValue reports an error when the key already exists. File-cache
+    // hydration can race for identical fullSourceKeys, so make the operation
+    // idempotent while holding the same session mutex.
+    UINT existingValueSize = 0;
+    const HRESULT findHr = _impl->shaderCacheSession->FindValue(key, keySize, nullptr, &existingValueSize);
+    if (SUCCEEDED(findHr) && existingValueSize > 0) {
+        return true;
+    }
     HRESULT hr = _impl->shaderCacheSession->StoreValue(key, keySize, value.data(), static_cast<UINT>(value.size()));
     return SUCCEEDED(hr);
 #else
@@ -585,6 +626,15 @@ void CCD3D12Device::retireFrameResources() {
         }
     }
     _impl->lastRetiredFenceValue = _impl->lastSubmittedFenceValue;
+}
+
+void CCD3D12Device::unregisterSwapchain(CCD3D12Swapchain *swapchain) {
+    if (!swapchain) {
+        return;
+    }
+    _d3d12Swapchains.erase(
+        std::remove(_d3d12Swapchains.begin(), _d3d12Swapchains.end(), swapchain),
+        _d3d12Swapchains.end());
 }
 
 bool CCD3D12Device::isSwapchainBackBuffer(void *resource) const {
@@ -1663,6 +1713,14 @@ D3D12DescriptorHeapPool *CCD3D12Device::getGPUDescriptorHeapPool() const {
 
 D3D12DescriptorHeapPool *CCD3D12Device::getSamplerDescriptorHeapPool() const {
     return _impl ? _impl->samplerDescriptorHeapPool.get() : nullptr;
+}
+
+D3D12DescriptorHeapPool *CCD3D12Device::getCPUDescriptorHeapPool() const {
+    return _impl ? _impl->cpuDescriptorHeapPool.get() : nullptr;
+}
+
+D3D12DescriptorHeapPool *CCD3D12Device::getCPUSamplerDescriptorHeapPool() const {
+    return _impl ? _impl->cpuSamplerDescriptorHeapPool.get() : nullptr;
 }
 
 } // namespace gfx

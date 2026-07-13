@@ -94,9 +94,12 @@ void CCD3D12Swapchain::doInit(const SwapchainInfo &info) {
 
 void CCD3D12Swapchain::doDestroy() {
     if (_impl) {
-        if (auto *device = CCD3D12Device::getInstance(); device && _impl->swapChain) {
-            device->waitForGpu();
-            device->retireFrameResources();
+        if (auto *device = CCD3D12Device::getInstance()) {
+            device->unregisterSwapchain(this);
+            if (_impl->swapChain) {
+                device->waitForGpu();
+                device->retireFrameResources();
+            }
         }
         for (auto &backBuffer : _impl->backBuffers) {
             backBuffer.Reset();

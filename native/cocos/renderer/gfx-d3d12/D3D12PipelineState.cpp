@@ -873,9 +873,13 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
         return;
     }
 
+    const auto psoKeyStart = D3D12PerfClock::now();
     const ccstd::string psoCacheKey = makeGraphicsPSOCacheKey(psoDesc);
+    const uint64_t psoKeyMs = elapsedMs(psoKeyStart);
     std::vector<uint8_t> cachedPsoBlob;
+    const auto psoCacheReadStart = D3D12PerfClock::now();
     const bool psoCacheHit = loadFileCachedPSO(psoCacheKey, cachedPsoBlob);
+    const uint64_t psoCacheReadMs = elapsedMs(psoCacheReadStart);
     if (psoCacheHit) {
         psoDesc.CachedPSO.pCachedBlob = cachedPsoBlob.data();
         psoDesc.CachedPSO.CachedBlobSizeInBytes = cachedPsoBlob.size();
@@ -883,13 +887,27 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
 
     const auto createPsoStart = D3D12PerfClock::now();
     HRESULT hr = d3dDevice->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&_impl->pipelineState));
+    const HRESULT initialCreateHR = hr;
+    const uint64_t initialCreatePsoMs = elapsedMs(createPsoStart);
+    bool psoCacheRejected = false;
+    uint64_t fallbackCreatePsoMs = 0;
     if (FAILED(hr) && psoCacheHit) {
+        psoCacheRejected = true;
         CC_LOG_WARNING("D3D12PipelineState: cached PSO rejected, retrying without cache. HRESULT=0x%08x key=%s",
                        static_cast<unsigned>(hr), psoCacheKey.c_str());
         psoDesc.CachedPSO = {};
+        const auto fallbackCreatePsoStart = D3D12PerfClock::now();
         hr = d3dDevice->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&_impl->pipelineState));
+        fallbackCreatePsoMs = elapsedMs(fallbackCreatePsoStart);
     }
     const auto createPsoMs = elapsedMs(createPsoStart);
+    CC_LOG_INFO("[D3D12-PERF] PipelineStateCacheDecision shader='%s' key=%s rootSignature=%p keyMs=%llu cacheHit=%u cacheReadMs=%llu cacheBytes=%u initialHr=0x%08x initialCreateMs=%llu cacheRejected=%u fallbackCreateMs=%llu finalHr=0x%08x",
+                _shader ? _shader->getName().c_str() : "", psoCacheKey.c_str(), psoDesc.pRootSignature,
+                static_cast<unsigned long long>(psoKeyMs), psoCacheHit ? 1U : 0U,
+                static_cast<unsigned long long>(psoCacheReadMs), static_cast<unsigned>(cachedPsoBlob.size()),
+                static_cast<unsigned>(initialCreateHR), static_cast<unsigned long long>(initialCreatePsoMs),
+                psoCacheRejected ? 1U : 0U, static_cast<unsigned long long>(fallbackCreatePsoMs),
+                static_cast<unsigned>(hr));
     if (FAILED(hr)) {
         CC_LOG_ERROR("D3D12PipelineState: CreateGraphicsPipelineState failed. HRESULT=0x%08x",
                      static_cast<unsigned>(hr));
@@ -897,7 +915,9 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
         _impl->rootSignature = psoDesc.pRootSignature;
         _impl->baseDesc = psoDesc;
         _impl->baseDesc.CachedPSO = {};
+        const auto psoCacheStoreStart = D3D12PerfClock::now();
         const bool psoCacheStored = psoCacheHit ? false : storeFileCachedPSO(psoCacheKey, _impl->pipelineState.Get());
+        const uint64_t psoCacheStoreMs = elapsedMs(psoCacheStoreStart);
         if (psoCacheHit) {
             CC_LOG_INFO("[D3D12-PERF] PipelineStateCacheHit key=%s bytes=%u",
                         psoCacheKey.c_str(), static_cast<unsigned>(cachedPsoBlob.size()));
@@ -905,12 +925,15 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
             CC_LOG_INFO("[D3D12-PERF] PipelineStateCacheStore key=%s", psoCacheKey.c_str());
         }
         CC_LOG_INFO("D3D12PipelineState created successfully.");
-        CC_LOG_INFO("[D3D12-PERF] PipelineStateInit shader='%s' renderTargets=%u inputElements=%u sampleCount=%u psoCache=%s createGraphicsPsoMs=%llu totalMs=%llu",
+        CC_LOG_INFO("[D3D12-PERF] PipelineStateInit shader='%s' renderTargets=%u inputElements=%u sampleCount=%u psoCache=%s psoKeyMs=%llu cacheReadMs=%llu cacheStoreMs=%llu createGraphicsPsoMs=%llu totalMs=%llu",
                     _shader ? _shader->getName().c_str() : "",
                     static_cast<unsigned>(psoDesc.NumRenderTargets),
                     static_cast<unsigned>(psoDesc.InputLayout.NumElements),
                     static_cast<unsigned>(psoDesc.SampleDesc.Count),
                     psoCacheHit ? "hit" : (psoCacheStored ? "store" : "miss"),
+                    static_cast<unsigned long long>(psoKeyMs),
+                    static_cast<unsigned long long>(psoCacheReadMs),
+                    static_cast<unsigned long long>(psoCacheStoreMs),
                     static_cast<unsigned long long>(createPsoMs),
                     static_cast<unsigned long long>(elapsedMs(initStart)));
     }
@@ -983,11 +1006,13 @@ void *CCD3D12PipelineState::getDynamicID3D12PipelineState(float depthBias, float
 
     auto *result = variant.Get();
     _impl->dynamicPipelineStates.emplace(key, std::move(variant));
-    CC_LOG_INFO("[D3D12-PERF] DynamicPipelineStateInit depthBias=%d stencilReadMask=%u stencilWriteMask=%u createGraphicsPsoMs=%llu",
+    CC_LOG_INFO("[D3D12-PERF] DynamicPipelineStateInit shader='%s' depthBias=%d stencilReadMask=%u stencilWriteMask=%u createGraphicsPsoMs=%llu variantCount=%u",
+                _shader ? _shader->getName().c_str() : "",
                 static_cast<int>(depthBias),
                 static_cast<unsigned>(stencilReadMask),
                 static_cast<unsigned>(stencilWriteMask),
-                static_cast<unsigned long long>(createVariantMs));
+                static_cast<unsigned long long>(createVariantMs),
+                static_cast<unsigned>(_impl->dynamicPipelineStates.size()));
     return result;
 }
 

@@ -26,6 +26,8 @@
 #include "D3D12Device.h"
 #include "base/Log.h"
 
+#include <algorithm>
+
     #ifndef NOMINMAX
         #define NOMINMAX
     #endif
@@ -232,6 +234,26 @@ void D3D12DescriptorHeapPool::deallocate(const Allocation &alloc) {
         block.offset = offset;
         block.count = alloc.numDescriptors;
         _impl->freeList.push_back(block);
+
+        std::sort(_impl->freeList.begin(), _impl->freeList.end(),
+                  [](const Impl::FreeBlock &lhs, const Impl::FreeBlock &rhs) {
+                      return lhs.heapIndex < rhs.heapIndex ||
+                             (lhs.heapIndex == rhs.heapIndex && lhs.offset < rhs.offset);
+                  });
+        ccstd::vector<Impl::FreeBlock> merged;
+        merged.reserve(_impl->freeList.size());
+        for (const auto &freeBlock : _impl->freeList) {
+            if (!merged.empty() && merged.back().heapIndex == freeBlock.heapIndex &&
+                merged.back().offset + merged.back().count >= freeBlock.offset) {
+                const uint32_t mergedEnd = std::max(
+                    merged.back().offset + merged.back().count,
+                    freeBlock.offset + freeBlock.count);
+                merged.back().count = mergedEnd - merged.back().offset;
+            } else {
+                merged.push_back(freeBlock);
+            }
+        }
+        _impl->freeList.swap(merged);
     }
 }
 

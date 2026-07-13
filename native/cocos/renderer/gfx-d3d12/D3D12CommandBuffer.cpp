@@ -1736,7 +1736,7 @@ void CCD3D12CommandBuffer::flushDescriptorSets() {
         if (binding.cbvCount > 0 && binding.cbvRootIndex >= 0 && cbvAlloc.isValid && cbvHeap) {
             auto *srcHeap = static_cast<ID3D12DescriptorHeap *>(binding.set->getCbvSrvUavDescriptorHeap());
             if (srcHeap) {
-                D3D12_CPU_DESCRIPTOR_HANDLE srcStart = srcHeap->GetCPUDescriptorHandleForHeapStart();
+                D3D12_CPU_DESCRIPTOR_HANDLE srcStart{binding.set->getCbvSrvUavCPUDescriptorHandle()};
                 D3D12_CPU_DESCRIPTOR_HANDLE dstStart{};
                 dstStart.ptr = reinterpret_cast<SIZE_T>(cbvAlloc.cpuHandle) +
                                static_cast<SIZE_T>(cbvOffset) * cbvDescriptorSize;
@@ -1758,7 +1758,7 @@ void CCD3D12CommandBuffer::flushDescriptorSets() {
         if (binding.samplerCount > 0 && binding.samplerRootIndex >= 0 && samplerAlloc.isValid && samplerHeap) {
             auto *srcHeap = static_cast<ID3D12DescriptorHeap *>(binding.set->getSamplerDescriptorHeap());
             if (srcHeap) {
-                D3D12_CPU_DESCRIPTOR_HANDLE srcStart = srcHeap->GetCPUDescriptorHandleForHeapStart();
+                D3D12_CPU_DESCRIPTOR_HANDLE srcStart{binding.set->getSamplerCPUDescriptorHandle()};
                 D3D12_CPU_DESCRIPTOR_HANDLE dstStart{};
                 dstStart.ptr = reinterpret_cast<SIZE_T>(samplerAlloc.cpuHandle) +
                                static_cast<SIZE_T>(samplerOffset) * samplerDescriptorSize;

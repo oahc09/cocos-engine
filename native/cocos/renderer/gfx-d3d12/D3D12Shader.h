@@ -31,6 +31,10 @@
 namespace cc {
 namespace gfx {
 
+// Device lifecycle gates asynchronous v4 file persistence.
+void reopenD3D12ShaderCachePersistence();
+void drainD3D12ShaderCachePersistence();
+
 class CCD3D12Shader final : public Shader {
 public:
     CCD3D12Shader();
@@ -69,12 +73,14 @@ private:
     // Compile GLSL4 source -> SPIR-V -> HLSL -> DXBC
     void scheduleStagePrecompile(ShaderStageFlagBit stage);
     void waitForBackgroundCompiles();
-    bool ensureStageBytecode(ShaderStageFlagBit stage) const;
+    BytecodeBlob ensureStageBytecode(ShaderStageFlagBit stage) const;
 
-    bool compileGLSLToDXBC(ShaderStageFlagBit stage, const ccstd::string &glslSource,
-                           const ccstd::string &entryName,
-                           const ccstd::string &shaderName,
-                           std::vector<uint8_t> &outDXBC) const;
+    static bool compileGLSLToDXBC(ShaderStageFlagBit stage, const ccstd::string &glslSource,
+                                  const ccstd::string &entryName,
+                                  const ccstd::string &shaderName,
+                                  std::vector<uint8_t> &outDXBC,
+                                  bool cacheOnly = false,
+                                  bool *cacheMiss = nullptr);
 
     struct Impl;
     std::unique_ptr<Impl> _impl;

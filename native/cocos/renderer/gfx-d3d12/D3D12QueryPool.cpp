@@ -290,8 +290,15 @@ void CCD3D12QueryPool::fetchResults() {
 
     if (_impl->fence->GetCompletedValue() < _impl->fenceValue) {
         hr = _impl->fence->SetEventOnCompletion(_impl->fenceValue, _impl->fenceEvent);
-        if (SUCCEEDED(hr)) {
-            WaitForSingleObject(_impl->fenceEvent, 5000);
+        if (FAILED(hr)) {
+            CC_LOG_ERROR("D3D12QueryPool fetchResults: SetEventOnCompletion failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+            return;
+        }
+        const DWORD waitResult = WaitForSingleObject(_impl->fenceEvent, 5000);
+        if (waitResult != WAIT_OBJECT_0) {
+            CC_LOG_ERROR("D3D12QueryPool fetchResults: timed out or failed while waiting for query results. waitResult=%lu",
+                         static_cast<unsigned long>(waitResult));
+            return;
         }
     }
 

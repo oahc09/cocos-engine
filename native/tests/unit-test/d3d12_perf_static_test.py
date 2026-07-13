@@ -92,6 +92,104 @@ def test_dynamic_pso_repeated_state_is_cached() -> None:
     assert "lastDynamicPipelineStateOwner" in body
 
 
+def test_background_cache_probe_skips_legacy_v3_migration() -> None:
+    body = function_body(
+        read("D3D12Shader.cpp"),
+        "bool CCD3D12Shader::compileGLSLToDXBC",
+    )
+    v4_lookup = body.index("fileCacheHit = loadFileCachedDXBC(cacheKey, outDXBC);")
+    legacy_policy = body.index("else if (cacheLookupPolicy.probeLegacyV3)")
+    legacy_v3_lookup = body.index("legacyFileCacheHit = loadFileCachedDXBC")
+
+    assert v4_lookup < legacy_policy < legacy_v3_lookup
+
+
+def test_legacy_v3_migration_defers_only_file_persistence() -> None:
+    body = function_body(
+        read("D3D12Shader.cpp"),
+        "bool CCD3D12Shader::compileGLSLToDXBC",
+    )
+    migration_start = body.index("legacyFileCacheHit = loadFileCachedDXBC")
+    migration_end = body.index("cacheHitBackend = \"file-v3-migrated\"")
+    migration = body[migration_start:migration_end]
+
+    assert "storeD3D12ShaderCacheDXBC(cacheKey, outDXBC)" in migration
+    assert "scheduleFileCachedDXBCPersistence(cacheKey, outDXBC)" in migration
+    assert "storeCachedDXBC(cacheKey, outDXBC)" not in migration
+
+
+def test_device_lifecycle_gates_shader_cache_persistence() -> None:
+    init_body = function_body(read("D3D12Device.cpp"), "bool CCD3D12Device::doInit")
+    destroy_body = function_body(read("D3D12Device.cpp"), "void CCD3D12Device::doDestroy")
+
+    assert "reopenD3D12ShaderCachePersistence();" in init_body
+    drain = destroy_body.index("drainD3D12ShaderCachePersistence();")
+    session_reset = destroy_body.index("shaderCacheSession.Reset();")
+    assert drain < session_reset
+
+
+def test_shader_cache_store_is_idempotent_under_session_mutex() -> None:
+    body = function_body(
+        read("D3D12Device.cpp"),
+        "bool CCD3D12Device::storeShaderCacheValue",
+    )
+    mutex = body.index("std::lock_guard<std::mutex> lock(_impl->shaderCacheMutex);")
+    find = body.index("_impl->shaderCacheSession->FindValue")
+    store = body.index("_impl->shaderCacheSession->StoreValue")
+
+    assert mutex < find < store
+    assert "SUCCEEDED(findHr) && existingValueSize > 0" in body
+
+
+def test_color_attachments_supply_optimized_clear_value() -> None:
+    body = function_body(
+        read("D3D12Texture.cpp"),
+        "bool CCD3D12Texture::createResource",
+    )
+    clear_setup_start = body.index("D3D12_CLEAR_VALUE clearValue")
+    create = body.index("CreateCommittedResource", clear_setup_start)
+    color_setup = body[clear_setup_start:create]
+
+    assert "TextureUsageBit::COLOR_ATTACHMENT" in color_setup
+    assert "clearValue.Format = viewFormat" in color_setup
+    for component in range(4):
+        assert f"clearValue.Color[{component}] = 0.0F" in color_setup
+    assert "optimizedClearValue = &clearValue" in color_setup
+
+
+def test_descriptor_set_recovers_staging_allocations_before_writes() -> None:
+    body = function_body(
+        read("D3D12DescriptorSet.cpp"),
+        "void CCD3D12DescriptorSet::forceUpdate",
+    )
+    readiness = body.index("_impl->ensureStagingAllocations(device)")
+    binding_walk = body.index("for (const auto &binding : bindings)")
+    failure_path = body[readiness:binding_walk]
+
+    assert readiness < binding_walk
+    assert "_isDirty = true" in failure_path
+    assert "cbvSrvUavAllocation.cpuHandle" in failure_path
+    assert "samplerAllocation.cpuHandle" in failure_path
+    assert "cbvSrvUavCpuStart" in failure_path
+    assert "samplerCpuStart" in failure_path
+
+
+def test_descriptor_sets_suballocate_cpu_staging_descriptors() -> None:
+    descriptor_set = read("D3D12DescriptorSet.cpp")
+    device = read("D3D12Device.cpp")
+
+    assert "CreateDescriptorHeap" not in descriptor_set
+    assert "getCPUDescriptorHeapPool" in descriptor_set
+    assert "getCPUSamplerDescriptorHeapPool" in descriptor_set
+    assert "cpuDescriptorHeapPool" in device
+    assert "cpuSamplerDescriptorHeapPool" in device
+    assert "HeapType::CBV_SRV_UAV, 16384, false" in device
+    assert "HeapType::SAMPLER, 2048, false" in device
+    command_buffer = read("D3D12CommandBuffer.cpp")
+    assert "getCbvSrvUavCPUDescriptorHandle" in command_buffer
+    assert "getSamplerCPUDescriptorHandle" in command_buffer
+
+
 if __name__ == "__main__":
     tests = [
         test_submit_and_present_do_not_wait_for_gpu,
@@ -102,6 +200,13 @@ if __name__ == "__main__":
         test_texture_uploads_use_upload_ring_not_region_committed_resources,
         test_query_fetch_reuses_d3d12_objects,
         test_dynamic_pso_repeated_state_is_cached,
+        test_background_cache_probe_skips_legacy_v3_migration,
+        test_legacy_v3_migration_defers_only_file_persistence,
+        test_device_lifecycle_gates_shader_cache_persistence,
+        test_shader_cache_store_is_idempotent_under_session_mutex,
+        test_color_attachments_supply_optimized_clear_value,
+        test_descriptor_set_recovers_staging_allocations_before_writes,
+        test_descriptor_sets_suballocate_cpu_staging_descriptors,
     ]
     for test in tests:
         test()
