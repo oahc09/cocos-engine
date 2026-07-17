@@ -144,10 +144,12 @@ void appendDepthStencilOpHash(uint64_t &hash, const D3D12_DEPTH_STENCILOP_DESC &
     appendHashValue(hash, desc.StencilFunc);
 }
 
-ccstd::string makeGraphicsPSOCacheKey(const D3D12_GRAPHICS_PIPELINE_STATE_DESC &desc) {
+ccstd::string makeGraphicsPSOCacheKey(const D3D12_GRAPHICS_PIPELINE_STATE_DESC &desc,
+                                      uint64_t rootSignatureHash) {
     uint64_t hashA = FNV1A64_OFFSET;
     uint64_t hashB = FNV1A64_OFFSET ^ 0x9e3779b97f4a7c15ULL;
     appendHashValue(hashA, CC_D3D12_PSO_CACHE_VERSION);
+    appendHashValue(hashA, rootSignatureHash);
 
     appendShaderBytecodeHash(hashA, desc.VS);
     appendShaderBytecodeHash(hashA, desc.PS);
@@ -223,6 +225,7 @@ ccstd::string makeGraphicsPSOCacheKey(const D3D12_GRAPHICS_PIPELINE_STATE_DESC &
     appendShaderBytecodeHash(hashB, desc.PS);
     appendShaderBytecodeHash(hashB, desc.VS);
     appendHashValue(hashB, CC_D3D12_PSO_CACHE_VERSION);
+    appendHashValue(hashB, rootSignatureHash);
 
     return toHex(hashA) + toHex(hashB);
 }
@@ -873,8 +876,13 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
         return;
     }
 
+    uint64_t rootSignatureHash = 0;
+    if (_pipelineLayout) {
+        auto *d3d12Layout = static_cast<CCD3D12PipelineLayout *>(_pipelineLayout);
+        rootSignatureHash = d3d12Layout->getRootSignatureHash();
+    }
     const auto psoKeyStart = D3D12PerfClock::now();
-    const ccstd::string psoCacheKey = makeGraphicsPSOCacheKey(psoDesc);
+    const ccstd::string psoCacheKey = makeGraphicsPSOCacheKey(psoDesc, rootSignatureHash);
     const uint64_t psoKeyMs = elapsedMs(psoKeyStart);
     std::vector<uint8_t> cachedPsoBlob;
     const auto psoCacheReadStart = D3D12PerfClock::now();

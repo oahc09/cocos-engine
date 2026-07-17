@@ -51,6 +51,7 @@
     #include <d3dcompiler.h>
     #include <limits>
     #include <unordered_map>
+    #include <unordered_set>
     #include <wrl/client.h>
 
 namespace cc {
@@ -58,11 +59,24 @@ namespace gfx {
 
 // Maximum number of descriptor sets that can be bound simultaneously
 static constexpr uint32_t D3D12_MAX_BOUND_SETS = 4;
+static constexpr uint32_t D3D12_MAX_ROOT_PARAMETERS = 64;
+static constexpr uint32_t D3D12_MAX_VERTEX_BUFFERS = 16;
 
 // Maximum resource barriers per render pass transition (swapchain + color attachments + depth)
 static constexpr uint32_t MAX_PASS_BARRIERS = 16;
 
 namespace {
+uint64_t hashSamplerTableKey(const ccstd::vector<uint32_t> &key) {
+    uint64_t hash = 1469598103934665603ULL;
+    hash ^= static_cast<uint64_t>(key.size());
+    hash *= 1099511628211ULL;
+    for (const uint32_t value : key) {
+        hash ^= static_cast<uint64_t>(value);
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
 #if CC_D3D12_PERF_COUNTERS
 void recordD3D12DescriptorStateBinds(uint32_t setDescriptorHeapCalls, uint32_t rootDescriptorTableBinds) {
     if (auto *device = CCD3D12Device::getInstance()) {
@@ -75,9 +89,18 @@ void recordD3D12ResourceBarriers(uint32_t barrierCount) {
         device->recordResourceBarriers(barrierCount);
     }
 }
+
+void recordBarrierAnalysis(uint32_t textureTransitions, uint32_t bufferTransitions,
+                           uint32_t uavBarriers, uint32_t trackedAlreadyNext) {
+    if (auto *device = CCD3D12Device::getInstance()) {
+        device->recordBarrierAnalysis(textureTransitions, bufferTransitions, uavBarriers, trackedAlreadyNext);
+    }
+}
+
 #endif
 
 void retainCommandListResource(ccstd::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> &resources,
+                               std::unordered_set<ID3D12Resource *> &retainedResources,
                                ID3D12Resource *resource) {
     if (!resource) {
         return;
@@ -85,11 +108,7 @@ void retainCommandListResource(ccstd::vector<Microsoft::WRL::ComPtr<ID3D12Resour
     if (auto *device = CCD3D12Device::getInstance(); device && device->isSwapchainBackBuffer(resource)) {
         return;
     }
-    const auto found = std::find_if(resources.begin(), resources.end(),
-                                    [resource](const Microsoft::WRL::ComPtr<ID3D12Resource> &retained) {
-                                        return retained.Get() == resource;
-                                    });
-    if (found != resources.end()) {
+    if (!retainedResources.emplace(resource).second) {
         return;
     }
     Microsoft::WRL::ComPtr<ID3D12Resource> retained;
@@ -636,6 +655,69 @@ bool generateD3D12Mipmaps(
 }
 
 struct CCD3D12CommandBuffer::Impl {
+    struct PendingDefaultBufferCopy {
+        CCD3D12Buffer *buffer{nullptr};
+        ID3D12Resource *destination{nullptr};
+        uint64_t destinationOffset{0};
+        ID3D12Resource *source{nullptr};
+        uint64_t sourceOffset{0};
+        uint32_t size{0};
+        uint32_t transitionIndex{0};
+    };
+    struct PendingDefaultBufferTransition {
+        ID3D12Resource *resource{nullptr};
+        D3D12_RESOURCE_STATES previousState{D3D12_RESOURCE_STATE_COMMON};
+        uint32_t copyCount{1};
+    };
+
+#if CC_D3D12_PERF_COUNTERS
+    enum PerfDrawSequenceEventKind : uint32_t {
+        PERF_ROOT_TABLE_EVENT = 1,
+        PERF_DRAW_EVENT_STATE = 2,
+        PERF_DRAW_EVENT_ARGUMENTS = 3,
+        PERF_DRAW_EVENT_VERTEX_BUFFER = 4,
+        PERF_DRAW_EVENT_INDEX_BUFFER = 5,
+        PERF_DESCRIPTOR_SOURCE_EVENT = 6,
+        PERF_DYNAMIC_OFFSET_EVENT = 7,
+        PERF_UNIFORM_CBV_EVENT = 8,
+        PERF_DESCRIPTOR_SEMANTIC_EVENT = 9,
+    };
+    struct PerfDrawSequenceEvent {
+        uint32_t kind{0};
+        uint32_t index{0};
+        uint64_t value0{0};
+        uint64_t value1{0};
+        uint64_t value2{0};
+        uint64_t value3{0};
+        uint64_t value4{0};
+        uint64_t value5{0};
+
+        bool operator==(const PerfDrawSequenceEvent &other) const {
+            return kind == other.kind && index == other.index &&
+                   value0 == other.value0 && value1 == other.value1 &&
+                   value2 == other.value2 && value3 == other.value3 &&
+                   value4 == other.value4 && value5 == other.value5;
+        }
+    };
+#endif
+    struct CommandRecordingContext {
+        Microsoft::WRL::ComPtr<ID3D12CommandAllocator> commandAllocator;
+        Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commandList;
+        Microsoft::WRL::ComPtr<ID3D12Fence> lastSubmittedFence;
+        uint64_t lastSubmittedFenceValue{0};
+        ccstd::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> pendingUploadResources;
+        std::unordered_set<ID3D12Resource *> pendingUploadResourceSet;
+        ccstd::vector<Microsoft::WRL::ComPtr<ID3D12DescriptorHeap>> pendingDescriptorHeaps;
+#if CC_D3D12_PERF_COUNTERS
+        ccstd::vector<PerfDrawSequenceEvent> perfPreviousDrawSequence;
+        ccstd::vector<PerfDrawSequenceEvent> perfCurrentDrawSequence;
+        bool perfHasPreviousDrawSequence{false};
+        uint32_t perfDrawSequenceComparisonCount{0};
+#endif
+    };
+    CommandRecordingContext recordingContexts[2];
+    uint32_t activeRecordingContext{1};
+
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator> commandAllocator;
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commandList;
     Microsoft::WRL::ComPtr<ID3D12Device> d3dDevice; // cached ref, not owning
@@ -644,7 +726,29 @@ struct CCD3D12CommandBuffer::Impl {
     PipelineState *boundPipelineState{nullptr};
     PipelineLayout *boundPipelineLayout{nullptr};
     InputAssembler *boundIA{nullptr};
+    ID3D12PipelineState *boundNativePipelineState{nullptr};
+    ID3D12RootSignature *boundRootSignature{nullptr};
+    D3D12_PRIMITIVE_TOPOLOGY boundPrimitiveTopology{D3D_PRIMITIVE_TOPOLOGY_UNDEFINED};
+    bool primitiveTopologyValid{false};
+    float boundBlendFactor[4]{};
+    bool blendFactorValid{false};
+    uint32_t boundStencilRef{0};
+    bool stencilRefValid{false};
+    D3D12_VERTEX_BUFFER_VIEW boundVertexBufferViews[D3D12_MAX_VERTEX_BUFFERS]{};
+    uint32_t boundVertexBufferCount{0};
+    bool vertexBufferStateValid{false};
+    D3D12_INDEX_BUFFER_VIEW boundIndexBufferView{};
+    bool boundHasIndexBuffer{false};
+    bool indexBufferStateValid{false};
+    D3D12_VIEWPORT boundViewport{};
+    bool viewportValid{false};
+    D3D12_RECT boundScissor{};
+    bool scissorValid{false};
     bool isRecording{false};
+#if CC_D3D12_PERF_COUNTERS
+    std::chrono::steady_clock::time_point perfRecordingStart{};
+    bool perfRecordingStartValid{false};
+#endif
 
     // Track swapchain for resource barriers during render pass
     CCD3D12Swapchain *activeSwapchain{nullptr};
@@ -668,16 +772,56 @@ struct CCD3D12CommandBuffer::Impl {
         DescriptorSet *set{nullptr};
         uint32_t setIndex{0};
         ccstd::vector<uint32_t> dynamicOffsets;
+        uint64_t version{0};
+        bool valid{false};
+    };
+    struct CachedGpuDescriptorRange {
+        uint64_t version{0};
+        uint64_t gpuHandle{0};
+        uint32_t descriptorCount{0};
+        uint32_t heapIndex{0};
+        ID3D12DescriptorHeap *heap{nullptr};
+        bool valid{false};
+    };
+    struct CachedGpuDescriptorSet {
+        CCD3D12DescriptorSet *owner{nullptr};
+        CachedGpuDescriptorRange cbvSrvUav;
+        CachedGpuDescriptorRange sampler;
+        ccstd::vector<uint32_t> cbvDynamicOffsets;
+
+        void reset(CCD3D12DescriptorSet *newOwner = nullptr) {
+            owner = newOwner;
+            cbvSrvUav = {};
+            sampler = {};
+            cbvDynamicOffsets.clear();
+        }
+    };
+    struct CachedSamplerTable {
+        ccstd::vector<uint32_t> key;
+        uint64_t gpuHandle{0};
+        uint32_t descriptorCount{0};
+        uint32_t heapIndex{0};
+        ID3D12DescriptorHeap *heap{nullptr};
+    };
+    struct BoundRootTable {
+        uint64_t gpuHandle{0};
         bool valid{false};
     };
     PendingDescriptorSet pendingSets[D3D12_MAX_BOUND_SETS]{};
+    BoundRootTable boundRootTables[D3D12_MAX_ROOT_PARAMETERS]{};
+    CachedGpuDescriptorSet gpuDescriptorCache[D3D12_MAX_BOUND_SETS]{};
+    std::unordered_map<uint64_t, ccstd::vector<CachedSamplerTable>> samplerTableCache;
+    ID3D12DescriptorHeap *samplerTableCacheHeap{nullptr};
+    uint32_t samplerTableCacheHeapIndex{std::numeric_limits<uint32_t>::max()};
+#if CC_D3D12_PERF_COUNTERS
+    ccstd::vector<uint32_t> perfLastSamplerTableKey;
+    ID3D12DescriptorHeap *perfLastSamplerTableHeap{nullptr};
+    uint32_t perfLastSamplerTableHeapIndex{std::numeric_limits<uint32_t>::max()};
+#endif
     uint32_t pendingSetCount{0};
     bool descriptorSetsDirty{false};
     ID3D12DescriptorHeap *boundCbvSrvUavHeap{nullptr};
     ID3D12DescriptorHeap *boundSamplerHeap{nullptr};
-    Microsoft::WRL::ComPtr<ID3D12Fence> lastSubmittedFence;
-    uint64_t lastSubmittedFenceValue{0};
-
     float dynamicDepthBias{0.F};
     float dynamicDepthBiasClamp{0.F};
     float dynamicDepthBiasSlope{0.F};
@@ -693,11 +837,41 @@ struct CCD3D12CommandBuffer::Impl {
     uint32_t lastDynamicStencilReadMask{0xFFFFFFFFU};
     uint32_t lastDynamicStencilWriteMask{0xFFFFFFFFU};
     bool dynamicPipelineStateValid{false};
+#if CC_D3D12_PERF_COUNTERS
+    uint64_t perfPipelineNativeStateChanges{0};
+#endif
+
+#if CC_D3D12_PERF_COUNTERS
+    void appendPerfDrawSequenceEvent(uint32_t kind, uint32_t index,
+                                     uint64_t value0 = 0, uint64_t value1 = 0,
+                                     uint64_t value2 = 0, uint64_t value3 = 0,
+                                     uint64_t value4 = 0, uint64_t value5 = 0) {
+        recordingContexts[activeRecordingContext].perfCurrentDrawSequence.push_back(
+            {kind, index, value0, value1, value2, value3, value4, value5});
+    }
+#endif
 
     // Resources replaced while recording stay alive until this command buffer
     // can be safely reused. Upload heap pages are owned by the device ring.
     ccstd::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> pendingUploadResources;
+    std::unordered_set<ID3D12Resource *> pendingUploadResourceSet;
     ccstd::vector<Microsoft::WRL::ComPtr<ID3D12DescriptorHeap>> pendingDescriptorHeaps;
+    ccstd::vector<PendingDefaultBufferCopy> pendingDefaultBufferCopies;
+    ccstd::vector<PendingDefaultBufferTransition> pendingDefaultBufferTransitions;
+    std::unordered_map<ID3D12Resource *, uint32_t> pendingDefaultBufferTransitionIndices;
+    ccstd::vector<D3D12_RESOURCE_BARRIER> bufferUpdatePreCopyBarriers;
+    ccstd::vector<D3D12_RESOURCE_BARRIER> bufferUpdatePostCopyBarriers;
+    bool bufferUpdateBatchActive{false};
+    bool bufferUpdateBatchDestinationsAreUnique{false};
+#if CC_D3D12_PERF_COUNTERS
+    bool perfUniqueBatchRetentionEnabled{false};
+    uint64_t perfUniqueBatchRetentionCalls{0};
+    uint64_t perfUniqueBatchRetentionInsertions{0};
+    uint64_t perfUniqueBatchRetentionNs{0};
+#endif
+    // Kept after the existing hot recording state so Bundle lifetime tracking
+    // does not shift fields accessed by every draw in primary-only scenes.
+    ccstd::vector<IntrusivePtr<CCD3D12CommandBuffer>> executedBundles[2];
 };
 
 CCD3D12CommandBuffer::CCD3D12CommandBuffer()
@@ -724,61 +898,100 @@ void CCD3D12CommandBuffer::doInit(const CommandBufferInfo &info) {
                                                        ? D3D12_COMMAND_LIST_TYPE_BUNDLE
                                                        : D3D12_COMMAND_LIST_TYPE_DIRECT;
 
-    HRESULT hr = d3dDevice->CreateCommandAllocator(
-        commandListType,
-        IID_PPV_ARGS(&_impl->commandAllocator));
-    if (FAILED(hr)) {
-        CC_LOG_ERROR("D3D12CommandBuffer: CreateCommandAllocator failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
-        return;
-    }
+    for (auto &context : _impl->recordingContexts) {
+        HRESULT hr = d3dDevice->CreateCommandAllocator(
+            commandListType,
+            IID_PPV_ARGS(&context.commandAllocator));
+        if (FAILED(hr)) {
+            CC_LOG_ERROR("D3D12CommandBuffer: CreateCommandAllocator failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+            return;
+        }
 
-    hr = d3dDevice->CreateCommandList(
-        0,
-        commandListType,
-        _impl->commandAllocator.Get(),
-        nullptr,
-        IID_PPV_ARGS(&_impl->commandList));
-    if (FAILED(hr)) {
-        CC_LOG_ERROR("D3D12CommandBuffer: CreateCommandList failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
-        return;
-    }
+        hr = d3dDevice->CreateCommandList(
+            0,
+            commandListType,
+            context.commandAllocator.Get(),
+            nullptr,
+            IID_PPV_ARGS(&context.commandList));
+        if (FAILED(hr)) {
+            CC_LOG_ERROR("D3D12CommandBuffer: CreateCommandList failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+            return;
+        }
 
-    // D3D12 command lists are created in open state, close it initially
-    hr = _impl->commandList->Close();
-    if (FAILED(hr)) {
-        CC_LOG_ERROR("D3D12CommandBuffer: initial Close failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
-        return;
+        // D3D12 command lists are created in open state, close them initially.
+        hr = context.commandList->Close();
+        if (FAILED(hr)) {
+            CC_LOG_ERROR("D3D12CommandBuffer: initial Close failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+            return;
+        }
     }
+    _impl->commandAllocator = _impl->recordingContexts[0].commandAllocator;
+    _impl->commandList = _impl->recordingContexts[0].commandList;
 
     CC_LOG_INFO("D3D12CommandBuffer initialized as %s.",
                 info.type == CommandBufferType::SECONDARY ? "bundle" : "direct list");
 }
 
 void CCD3D12CommandBuffer::doDestroy() {
+    for (auto &context : _impl->recordingContexts) {
+        context.pendingDescriptorHeaps.clear();
+        context.pendingUploadResources.clear();
+        context.pendingUploadResourceSet.clear();
+        context.lastSubmittedFence.Reset();
+        context.commandList.Reset();
+        context.commandAllocator.Reset();
+    }
+    for (auto &executedBundles : _impl->executedBundles) {
+        executedBundles.clear();
+    }
     _impl->commandList.Reset();
     _impl->commandAllocator.Reset();
     _impl->d3dDevice.Reset();
-    _impl->lastSubmittedFence.Reset();
-    _impl->lastSubmittedFenceValue = 0;
     _impl->boundPipelineState = nullptr;
     _impl->boundPipelineLayout = nullptr;
+    for (auto &cachedSet : _impl->gpuDescriptorCache) {
+        cachedSet.reset();
+    }
+    _impl->samplerTableCache.clear();
+    _impl->samplerTableCacheHeap = nullptr;
+    _impl->samplerTableCacheHeapIndex = std::numeric_limits<uint32_t>::max();
+#if CC_D3D12_PERF_COUNTERS
+    _impl->perfLastSamplerTableKey.clear();
+    _impl->perfLastSamplerTableHeap = nullptr;
+    _impl->perfLastSamplerTableHeapIndex = std::numeric_limits<uint32_t>::max();
+#endif
+    _impl->pendingDefaultBufferCopies.clear();
+    _impl->pendingDefaultBufferTransitions.clear();
+    _impl->pendingDefaultBufferTransitionIndices.clear();
+    _impl->bufferUpdatePreCopyBarriers.clear();
+    _impl->bufferUpdatePostCopyBarriers.clear();
+    _impl->bufferUpdateBatchActive = false;
+    _impl->bufferUpdateBatchDestinationsAreUnique = false;
 }
 
 void CCD3D12CommandBuffer::notifySubmitted(void *fence, uint64_t fenceValue) {
     if (!_impl) {
         return;
     }
-    _impl->lastSubmittedFence = static_cast<ID3D12Fence *>(fence);
-    _impl->lastSubmittedFenceValue = fenceValue;
+    auto &context = _impl->recordingContexts[_impl->activeRecordingContext];
+    context.lastSubmittedFence = static_cast<ID3D12Fence *>(fence);
+    context.lastSubmittedFenceValue = fenceValue;
+    for (const auto &bundleCommandBuffer : _impl->executedBundles[_impl->activeRecordingContext]) {
+        bundleCommandBuffer->notifySubmitted(fence, fenceValue);
+    }
 }
 
 void CCD3D12CommandBuffer::waitForFenceValue() {
-    if (!_impl || !_impl->lastSubmittedFence || _impl->lastSubmittedFenceValue == 0) {
+    if (!_impl) {
         return;
     }
-    if (_impl->lastSubmittedFence->GetCompletedValue() >= _impl->lastSubmittedFenceValue) {
-        _impl->lastSubmittedFence.Reset();
-        _impl->lastSubmittedFenceValue = 0;
+    auto &context = _impl->recordingContexts[_impl->activeRecordingContext];
+    if (!context.lastSubmittedFence || context.lastSubmittedFenceValue == 0) {
+        return;
+    }
+    if (context.lastSubmittedFence->GetCompletedValue() >= context.lastSubmittedFenceValue) {
+        context.lastSubmittedFence.Reset();
+        context.lastSubmittedFenceValue = 0;
         return;
     }
 
@@ -787,7 +1000,7 @@ void CCD3D12CommandBuffer::waitForFenceValue() {
         CC_LOG_ERROR("D3D12CommandBuffer::begin - CreateEvent failed while waiting for allocator reuse.");
         return;
     }
-    HRESULT hr = _impl->lastSubmittedFence->SetEventOnCompletion(_impl->lastSubmittedFenceValue, fenceEvent);
+    HRESULT hr = context.lastSubmittedFence->SetEventOnCompletion(context.lastSubmittedFenceValue, fenceEvent);
     if (SUCCEEDED(hr)) {
 #if CC_D3D12_PERF_COUNTERS
         const auto waitStart = std::chrono::steady_clock::now();
@@ -800,24 +1013,301 @@ void CCD3D12CommandBuffer::waitForFenceValue() {
             device->recordFenceWait(static_cast<uint64_t>(std::max<int64_t>(waitUs, 0)));
         }
 #endif
-        _impl->lastSubmittedFence.Reset();
-        _impl->lastSubmittedFenceValue = 0;
+        context.lastSubmittedFence.Reset();
+        context.lastSubmittedFenceValue = 0;
     } else {
         CC_LOG_ERROR("D3D12CommandBuffer::begin - SetEventOnCompletion failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
     }
     CloseHandle(fenceEvent);
 }
 
+void CCD3D12CommandBuffer::startBufferUpdateBatch(bool destinationsAreUnique) {
+    if (!_impl || _impl->bufferUpdateBatchActive) {
+        return;
+    }
+    _impl->pendingDefaultBufferCopies.clear();
+    _impl->pendingDefaultBufferTransitions.clear();
+    _impl->pendingDefaultBufferTransitionIndices.clear();
+    _impl->bufferUpdatePreCopyBarriers.clear();
+    _impl->bufferUpdatePostCopyBarriers.clear();
+    _impl->bufferUpdateBatchDestinationsAreUnique = destinationsAreUnique;
+    _impl->bufferUpdateBatchActive = true;
+#if CC_D3D12_PERF_COUNTERS
+    auto *device = CCD3D12Device::getInstance();
+    _impl->perfUniqueBatchRetentionEnabled =
+        destinationsAreUnique && device && device->isPerfLoggingEnabled();
+    _impl->perfUniqueBatchRetentionCalls = 0;
+    _impl->perfUniqueBatchRetentionInsertions = 0;
+    _impl->perfUniqueBatchRetentionNs = 0;
+#endif
+}
+
+void CCD3D12CommandBuffer::finishBufferUpdateBatch() {
+    if (!_impl || !_impl->bufferUpdateBatchActive) {
+        return;
+    }
+    _impl->bufferUpdateBatchActive = false;
+    _impl->bufferUpdateBatchDestinationsAreUnique = false;
+
+    if (_impl->pendingDefaultBufferCopies.empty()) {
+        _impl->pendingDefaultBufferTransitions.clear();
+        _impl->pendingDefaultBufferTransitionIndices.clear();
+#if CC_D3D12_PERF_COUNTERS
+        _impl->perfUniqueBatchRetentionEnabled = false;
+#endif
+        return;
+    }
+
+#if CC_D3D12_PERF_COUNTERS
+    auto *device = CCD3D12Device::getInstance();
+    const bool perfTimingEnabled = device && device->isPerfLoggingEnabled();
+    const auto batchStart = perfTimingEnabled
+                                ? std::chrono::steady_clock::now()
+                                : std::chrono::steady_clock::time_point{};
+#endif
+
+    auto &preCopyBarriers = _impl->bufferUpdatePreCopyBarriers;
+    auto &postCopyBarriers = _impl->bufferUpdatePostCopyBarriers;
+    preCopyBarriers.clear();
+    postCopyBarriers.clear();
+    preCopyBarriers.reserve(_impl->pendingDefaultBufferTransitions.size());
+    postCopyBarriers.reserve(_impl->pendingDefaultBufferTransitions.size());
+    for (const auto &transition : _impl->pendingDefaultBufferTransitions) {
+        if (!transition.resource || transition.copyCount != 1) {
+            continue;
+        }
+        if (transition.previousState != D3D12_RESOURCE_STATE_COPY_DEST &&
+            transition.previousState != D3D12_RESOURCE_STATE_COMMON) {
+            D3D12_RESOURCE_BARRIER barrier{};
+            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barrier.Transition.pResource = transition.resource;
+            barrier.Transition.StateBefore = transition.previousState;
+            barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+            barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            preCopyBarriers.push_back(barrier);
+        }
+
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = transition.resource;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_GENERIC_READ;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        postCopyBarriers.push_back(barrier);
+    }
+#if CC_D3D12_PERF_COUNTERS
+    const auto barrierBuildEnd = perfTimingEnabled
+                                     ? std::chrono::steady_clock::now()
+                                     : std::chrono::steady_clock::time_point{};
+    uint64_t barrierSubmitNs = 0;
+#endif
+
+    if (!preCopyBarriers.empty()) {
+#if CC_D3D12_PERF_COUNTERS
+        const auto barrierStart = perfTimingEnabled
+                                      ? std::chrono::steady_clock::now()
+                                      : std::chrono::steady_clock::time_point{};
+#endif
+        _impl->commandList->ResourceBarrier(static_cast<UINT>(preCopyBarriers.size()), preCopyBarriers.data());
+#if CC_D3D12_PERF_COUNTERS
+        if (perfTimingEnabled) {
+            barrierSubmitNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - barrierStart).count());
+        }
+        recordD3D12ResourceBarriers(static_cast<uint32_t>(preCopyBarriers.size()));
+#endif
+    }
+#if CC_D3D12_PERF_COUNTERS
+    const auto copyStart = perfTimingEnabled
+                               ? std::chrono::steady_clock::now()
+                               : std::chrono::steady_clock::time_point{};
+#endif
+    for (const auto &copy : _impl->pendingDefaultBufferCopies) {
+        if (copy.transitionIndex >= _impl->pendingDefaultBufferTransitions.size() ||
+            _impl->pendingDefaultBufferTransitions[copy.transitionIndex].copyCount != 1) {
+            continue;
+        }
+        _impl->commandList->CopyBufferRegion(
+            copy.destination, copy.destinationOffset,
+            copy.source, copy.sourceOffset, copy.size);
+    }
+#if CC_D3D12_PERF_COUNTERS
+    const auto copyEnd = perfTimingEnabled
+                             ? std::chrono::steady_clock::now()
+                             : std::chrono::steady_clock::time_point{};
+#endif
+    if (!postCopyBarriers.empty()) {
+#if CC_D3D12_PERF_COUNTERS
+        const auto barrierStart = perfTimingEnabled
+                                      ? std::chrono::steady_clock::now()
+                                      : std::chrono::steady_clock::time_point{};
+#endif
+        _impl->commandList->ResourceBarrier(static_cast<UINT>(postCopyBarriers.size()), postCopyBarriers.data());
+#if CC_D3D12_PERF_COUNTERS
+        if (perfTimingEnabled) {
+            barrierSubmitNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - barrierStart).count());
+        }
+        recordD3D12ResourceBarriers(static_cast<uint32_t>(postCopyBarriers.size()));
+#endif
+    }
+#if CC_D3D12_PERF_COUNTERS
+    const auto stateStart = perfTimingEnabled
+                                ? std::chrono::steady_clock::now()
+                                : std::chrono::steady_clock::time_point{};
+#endif
+    for (const auto &copy : _impl->pendingDefaultBufferCopies) {
+        if (copy.buffer && copy.transitionIndex < _impl->pendingDefaultBufferTransitions.size() &&
+            _impl->pendingDefaultBufferTransitions[copy.transitionIndex].copyCount == 1) {
+            copy.buffer->setCurrentState(D3D12_RESOURCE_STATE_GENERIC_READ);
+        }
+    }
+#if CC_D3D12_PERF_COUNTERS
+    const auto stateEnd = perfTimingEnabled
+                              ? std::chrono::steady_clock::now()
+                              : std::chrono::steady_clock::time_point{};
+    const auto fallbackStart = stateEnd;
+#endif
+
+    // A repeated destination may represent multiple writes or aliased buffer
+    // wrappers. Preserve the original per-copy barrier ordering for that rare
+    // case instead of incorrectly coalescing COPY_DEST transitions.
+    for (const auto &copy : _impl->pendingDefaultBufferCopies) {
+        if (!copy.buffer || copy.transitionIndex >= _impl->pendingDefaultBufferTransitions.size()) {
+            continue;
+        }
+        const auto &transition = _impl->pendingDefaultBufferTransitions[copy.transitionIndex];
+        if (transition.copyCount == 1) {
+            continue;
+        }
+
+        const auto previousState = copy.buffer->getCurrentState();
+        if (previousState != D3D12_RESOURCE_STATE_COPY_DEST &&
+            previousState != D3D12_RESOURCE_STATE_COMMON) {
+            D3D12_RESOURCE_BARRIER toCopyDest{};
+            toCopyDest.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            toCopyDest.Transition.pResource = copy.destination;
+            toCopyDest.Transition.StateBefore = previousState;
+            toCopyDest.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+            toCopyDest.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            _impl->commandList->ResourceBarrier(1, &toCopyDest);
+#if CC_D3D12_PERF_COUNTERS
+            recordD3D12ResourceBarriers(1);
+#endif
+        }
+        _impl->commandList->CopyBufferRegion(
+            copy.destination, copy.destinationOffset,
+            copy.source, copy.sourceOffset, copy.size);
+        D3D12_RESOURCE_BARRIER toRead{};
+        toRead.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        toRead.Transition.pResource = copy.destination;
+        toRead.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        toRead.Transition.StateAfter = D3D12_RESOURCE_STATE_GENERIC_READ;
+        toRead.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        _impl->commandList->ResourceBarrier(1, &toRead);
+#if CC_D3D12_PERF_COUNTERS
+        recordD3D12ResourceBarriers(1);
+#endif
+        copy.buffer->setCurrentState(D3D12_RESOURCE_STATE_GENERIC_READ);
+    }
+
+#if CC_D3D12_PERF_COUNTERS
+    if (device && perfTimingEnabled) {
+        const auto batchEnd = std::chrono::steady_clock::now();
+        const auto batchNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            batchEnd - batchStart).count());
+        const auto buildNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            barrierBuildEnd - batchStart).count());
+        const auto copyNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            copyEnd - copyStart).count());
+        const auto stateNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            stateEnd - stateStart).count());
+        const auto fallbackNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            batchEnd - fallbackStart).count());
+        device->recordHotPathTimings(0, 0, batchNs, 0, 0, 0);
+        device->recordBufferBatchPhaseTimings(
+            batchNs, buildNs, barrierSubmitNs, copyNs, stateNs, fallbackNs);
+    }
+    if (device && _impl->perfUniqueBatchRetentionCalls > 0) {
+        device->recordUniqueBatchRetentionTiming(
+            _impl->perfUniqueBatchRetentionCalls,
+            _impl->perfUniqueBatchRetentionInsertions,
+            _impl->perfUniqueBatchRetentionNs);
+    }
+    _impl->perfUniqueBatchRetentionEnabled = false;
+#endif
+    _impl->pendingDefaultBufferCopies.clear();
+    _impl->pendingDefaultBufferTransitions.clear();
+    _impl->pendingDefaultBufferTransitionIndices.clear();
+}
+
+void CCD3D12CommandBuffer::invalidateDescriptorTables() {
+    for (auto &table : _impl->boundRootTables) {
+        table = {};
+    }
+    if (_impl->pendingSetCount > 0) {
+        _impl->descriptorSetsDirty = true;
+    }
+}
+
+void CCD3D12CommandBuffer::invalidateGraphicsState() {
+    _impl->boundPipelineState = nullptr;
+    _impl->boundPipelineLayout = nullptr;
+    _impl->boundIA = nullptr;
+    _impl->boundNativePipelineState = nullptr;
+    _impl->boundRootSignature = nullptr;
+    _impl->boundCbvSrvUavHeap = nullptr;
+    _impl->boundSamplerHeap = nullptr;
+    _impl->primitiveTopologyValid = false;
+    _impl->blendFactorValid = false;
+    _impl->stencilRefValid = false;
+    _impl->vertexBufferStateValid = false;
+    _impl->indexBufferStateValid = false;
+    _impl->viewportValid = false;
+    _impl->scissorValid = false;
+    _impl->dynamicPipelineStateValid = false;
+    _impl->lastDynamicPipelineStateOwner = nullptr;
+    invalidateDescriptorTables();
+}
+
 void CCD3D12CommandBuffer::begin(RenderPass *renderPass, uint32_t subpass, Framebuffer *frameBuffer) {
     (void)renderPass;
     (void)subpass;
     (void)frameBuffer;
+#if CC_D3D12_PERF_COUNTERS
+    const auto commandBeginStart = std::chrono::steady_clock::now();
+#endif
     if (!_impl->commandAllocator || !_impl->commandList) {
         CC_LOG_ERROR("D3D12CommandBuffer::begin - allocator or command list is null.");
         return;
     }
 
+    auto &previousContext = _impl->recordingContexts[_impl->activeRecordingContext];
+    previousContext.pendingUploadResources = std::move(_impl->pendingUploadResources);
+    previousContext.pendingUploadResourceSet = std::move(_impl->pendingUploadResourceSet);
+    previousContext.pendingDescriptorHeaps = std::move(_impl->pendingDescriptorHeaps);
+    _impl->activeRecordingContext = (_impl->activeRecordingContext + 1) % 2;
+    auto &activeContext = _impl->recordingContexts[_impl->activeRecordingContext];
+    _impl->commandAllocator = activeContext.commandAllocator;
+    _impl->commandList = activeContext.commandList;
+
     waitForFenceValue();
+
+#if CC_D3D12_PERF_COUNTERS
+    if (auto *device = CCD3D12Device::getInstance(); device && device->isPerfLoggingEnabled()) {
+        activeContext.perfCurrentDrawSequence.clear();
+    }
+#endif
+
+    // The selected context's fence has completed, so its retained resources can
+    // be released before recording a new command list into the same allocator.
+    activeContext.pendingUploadResources.clear();
+    activeContext.pendingUploadResourceSet.clear();
+    activeContext.pendingDescriptorHeaps.clear();
+    auto &executedBundles = _impl->executedBundles[_impl->activeRecordingContext];
+    if (!executedBundles.empty()) {
+        executedBundles.clear();
+    }
 
     HRESULT hr = _impl->commandAllocator->Reset();
     if (FAILED(hr)) {
@@ -835,8 +1325,6 @@ void CCD3D12CommandBuffer::begin(RenderPass *renderPass, uint32_t subpass, Frame
     }
 
     _impl->isRecording = true;
-    _impl->boundPipelineState = nullptr;
-    _impl->boundPipelineLayout = nullptr;
     _impl->activeSwapchain = nullptr;
     _impl->activeRenderPass = nullptr;
     _impl->activeFramebuffer = nullptr;
@@ -849,6 +1337,7 @@ void CCD3D12CommandBuffer::begin(RenderPass *renderPass, uint32_t subpass, Frame
     // waitForFenceValue() above guarantees resources referenced by the previous
     // submission are no longer in flight.
     _impl->pendingUploadResources.clear();
+    _impl->pendingUploadResourceSet.clear();
     _impl->pendingDescriptorHeaps.clear();
     // Clear pending descriptor sets
     for (uint32_t i = 0; i < D3D12_MAX_BOUND_SETS; ++i) {
@@ -856,8 +1345,20 @@ void CCD3D12CommandBuffer::begin(RenderPass *renderPass, uint32_t subpass, Frame
     }
     _impl->pendingSetCount = 0;
     _impl->descriptorSetsDirty = false;
+    for (auto &cachedSet : _impl->gpuDescriptorCache) {
+        cachedSet.reset();
+    }
+    _impl->samplerTableCache.clear();
+    _impl->samplerTableCacheHeap = nullptr;
+    _impl->samplerTableCacheHeapIndex = std::numeric_limits<uint32_t>::max();
+#if CC_D3D12_PERF_COUNTERS
+    _impl->perfLastSamplerTableKey.clear();
+    _impl->perfLastSamplerTableHeap = nullptr;
+    _impl->perfLastSamplerTableHeapIndex = std::numeric_limits<uint32_t>::max();
+#endif
     _impl->boundCbvSrvUavHeap = nullptr;
     _impl->boundSamplerHeap = nullptr;
+    invalidateGraphicsState();
     _impl->dynamicDepthBias = 0.F;
     _impl->dynamicDepthBiasClamp = 0.F;
     _impl->dynamicDepthBiasSlope = 0.F;
@@ -871,10 +1372,32 @@ void CCD3D12CommandBuffer::begin(RenderPass *renderPass, uint32_t subpass, Frame
     _numDrawCalls = 0;
     _numInstances = 0;
     _numTriangles = 0;
+#if CC_D3D12_PERF_COUNTERS
+    const auto commandBeginEnd = std::chrono::steady_clock::now();
+    _impl->perfRecordingStart = commandBeginEnd;
+    _impl->perfRecordingStartValid = true;
+    if (auto *device = CCD3D12Device::getInstance()) {
+        device->recordFramePhaseAnalysis(
+            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                commandBeginEnd - commandBeginStart).count()),
+            0, 0, 0, 0, 0, 0, 0);
+    }
+#endif
 }
 
 void CCD3D12CommandBuffer::end() {
     if (!_impl->commandList) return;
+#if CC_D3D12_PERF_COUNTERS
+    const auto commandEndStart = std::chrono::steady_clock::now();
+    const uint64_t commandRecordingNs = _impl->perfRecordingStartValid
+                                            ? static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                  commandEndStart - _impl->perfRecordingStart).count())
+                                            : 0;
+#endif
+
+    if (_type == CommandBufferType::PRIMARY) {
+        CCD3D12Device::getInstance()->flushPendingBufferUpdates(this);
+    }
 
     HRESULT hr = _impl->commandList->Close();
     if (FAILED(hr)) {
@@ -909,6 +1432,73 @@ void CCD3D12CommandBuffer::end() {
         }
     }
     _impl->isRecording = false;
+#if CC_D3D12_PERF_COUNTERS
+    _impl->perfRecordingStartValid = false;
+    if (auto *device = CCD3D12Device::getInstance()) {
+        if (device->isPerfLoggingEnabled()) {
+            auto &activeContext = _impl->recordingContexts[_impl->activeRecordingContext];
+            const bool hadPrevious = activeContext.perfHasPreviousDrawSequence;
+            const bool exactMatch = hadPrevious &&
+                                    activeContext.perfCurrentDrawSequence == activeContext.perfPreviousDrawSequence;
+            uint32_t firstMismatchIndex = std::numeric_limits<uint32_t>::max();
+            if (hadPrevious) {
+                ++activeContext.perfDrawSequenceComparisonCount;
+            }
+            if (hadPrevious && !exactMatch) {
+                const size_t commonCount = std::min(activeContext.perfCurrentDrawSequence.size(),
+                                                    activeContext.perfPreviousDrawSequence.size());
+                size_t mismatch = 0;
+                while (mismatch < commonCount &&
+                       activeContext.perfCurrentDrawSequence[mismatch] == activeContext.perfPreviousDrawSequence[mismatch]) {
+                    ++mismatch;
+                }
+                firstMismatchIndex = static_cast<uint32_t>(std::min<size_t>(
+                    mismatch, std::numeric_limits<uint32_t>::max()));
+                if (activeContext.perfDrawSequenceComparisonCount == 1U ||
+                    activeContext.perfDrawSequenceComparisonCount % 64U == 0U) {
+                    const Impl::PerfDrawSequenceEvent emptyEvent{};
+                    const auto &currentEvent = mismatch < activeContext.perfCurrentDrawSequence.size()
+                                                   ? activeContext.perfCurrentDrawSequence[mismatch]
+                                                   : emptyEvent;
+                    const auto &previousEvent = mismatch < activeContext.perfPreviousDrawSequence.size()
+                                                    ? activeContext.perfPreviousDrawSequence[mismatch]
+                                                    : emptyEvent;
+                    CC_LOG_INFO("[D3D12-PERF-REUSE-MISMATCH] context=%u comparison=%u event=%u "
+                                "currentKind=%u previousKind=%u currentIndex=%u previousIndex=%u "
+                                "currentValues=%llx,%llx,%llx,%llx,%llx,%llx "
+                                "previousValues=%llx,%llx,%llx,%llx,%llx,%llx",
+                                _impl->activeRecordingContext,
+                                activeContext.perfDrawSequenceComparisonCount, firstMismatchIndex,
+                                currentEvent.kind, previousEvent.kind,
+                                currentEvent.index, previousEvent.index,
+                                static_cast<unsigned long long>(currentEvent.value0),
+                                static_cast<unsigned long long>(currentEvent.value1),
+                                static_cast<unsigned long long>(currentEvent.value2),
+                                static_cast<unsigned long long>(currentEvent.value3),
+                                static_cast<unsigned long long>(currentEvent.value4),
+                                static_cast<unsigned long long>(currentEvent.value5),
+                                static_cast<unsigned long long>(previousEvent.value0),
+                                static_cast<unsigned long long>(previousEvent.value1),
+                                static_cast<unsigned long long>(previousEvent.value2),
+                                static_cast<unsigned long long>(previousEvent.value3),
+                                static_cast<unsigned long long>(previousEvent.value4),
+                                static_cast<unsigned long long>(previousEvent.value5));
+                }
+            }
+            device->recordCommandReuseAnalysis(
+                static_cast<uint32_t>(activeContext.perfCurrentDrawSequence.size()),
+                hadPrevious, exactMatch, firstMismatchIndex);
+            activeContext.perfPreviousDrawSequence.swap(activeContext.perfCurrentDrawSequence);
+            activeContext.perfCurrentDrawSequence.clear();
+            activeContext.perfHasPreviousDrawSequence = true;
+        }
+        device->recordFramePhaseAnalysis(
+            0, commandRecordingNs,
+            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - commandEndStart).count()),
+            0, 0, 0, 0, 0);
+    }
+#endif
 }
 
 void CCD3D12CommandBuffer::transitionColorAttachment(uint32_t attachment, D3D12_RESOURCE_STATES state) {
@@ -948,6 +1538,7 @@ void CCD3D12CommandBuffer::transitionColorAttachment(uint32_t attachment, D3D12_
     _impl->commandList->ResourceBarrier(1, &barrier);
 #if CC_D3D12_PERF_COUNTERS
     recordD3D12ResourceBarriers(1);
+    recordBarrierAnalysis(1, 0, 0, 0);
 #endif
 
     if (hasTextureState) {
@@ -1047,8 +1638,8 @@ void CCD3D12CommandBuffer::resolveSubpass(uint32_t subpassIndex) {
         if (!source || !destination || source == destination) {
             continue;
         }
-        retainCommandListResource(_impl->pendingUploadResources, source);
-        retainCommandListResource(_impl->pendingUploadResources, destination);
+        retainCommandListResource(_impl->pendingUploadResources, _impl->pendingUploadResourceSet, source);
+        retainCommandListResource(_impl->pendingUploadResources, _impl->pendingUploadResourceSet, destination);
 
         const auto sourceDesc = source->GetDesc();
         const auto destinationDesc = destination->GetDesc();
@@ -1110,7 +1701,7 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
     if (swapchain) {
         auto *backBuffer = static_cast<ID3D12Resource *>(swapchain->getCurrentBackBufferHandle());
         if (backBuffer) {
-            retainCommandListResource(_impl->pendingUploadResources, backBuffer);
+            retainCommandListResource(_impl->pendingUploadResources, _impl->pendingUploadResourceSet, backBuffer);
             D3D12_RESOURCE_BARRIER barrier{};
             barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
             barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
@@ -1144,7 +1735,7 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
         auto *d3d12Tex = d3d12Fbo->getColorTexture(i);
         auto *resource = static_cast<ID3D12Resource *>(d3d12Fbo->getColorResource(i));
         if (!resource) continue;
-        retainCommandListResource(_impl->pendingUploadResources, resource);
+        retainCommandListResource(_impl->pendingUploadResources, _impl->pendingUploadResourceSet, resource);
 
         const bool hasTextureState = d3d12Tex && d3d12Fbo->hasColorTextureState(i);
         _impl->activeColorTargets.push_back({resource, d3d12Tex, hasTextureState});
@@ -1193,7 +1784,7 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
     auto *depthStencilTexture = d3d12Fbo->getDepthStencilTexture();
     auto *depthStencilResource = static_cast<ID3D12Resource *>(d3d12Fbo->getDepthStencilResource());
     if (hasDSV && depthStencilResource) {
-        retainCommandListResource(_impl->pendingUploadResources, depthStencilResource);
+        retainCommandListResource(_impl->pendingUploadResources, _impl->pendingUploadResourceSet, depthStencilResource);
         D3D12_RESOURCE_STATES dsPrevState = depthStencilTexture ? depthStencilTexture->getCurrentState() : D3D12_RESOURCE_STATE_COMMON;
         if (dsPrevState != D3D12_RESOURCE_STATE_DEPTH_WRITE) {
             D3D12_RESOURCE_BARRIER depthBarrier{};
@@ -1301,8 +1892,12 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
     vp.MinDepth = 0.0f;
     vp.MaxDepth = 1.0f;
     _impl->commandList->RSSetViewports(1, &vp);
+    _impl->boundViewport = vp;
+    _impl->viewportValid = true;
 
     _impl->commandList->RSSetScissorRects(1, &safeRenderArea);
+    _impl->boundScissor = safeRenderArea;
+    _impl->scissorValid = true;
 
     _impl->inRenderPass = true;
 }
@@ -1427,6 +2022,8 @@ void CCD3D12CommandBuffer::execute(CommandBuffer *const *cmdBuffs, uint32_t coun
         return;
     }
 
+    CCD3D12Device::getInstance()->flushPendingBufferUpdates(this);
+
     for (uint32_t i = 0; i < count; ++i) {
         if (!cmdBuffs[i]) continue;
 
@@ -1457,9 +2054,10 @@ void CCD3D12CommandBuffer::execute(CommandBuffer *const *cmdBuffs, uint32_t coun
         }
 
         _impl->commandList->ExecuteBundle(bundle);
-        if (_impl->pendingSetCount > 0) {
-            _impl->descriptorSetsDirty = true;
-        }
+        _impl->executedBundles[_impl->activeRecordingContext].emplace_back(d3d12CmdBuff);
+        // A bundle may change any graphics state. Do not let the primary
+        // command buffer's cache suppress the next explicit bind.
+        invalidateGraphicsState();
         _numDrawCalls += d3d12CmdBuff->getNumDrawCalls();
         _numInstances += d3d12CmdBuff->getNumInstances();
         _numTriangles += d3d12CmdBuff->getNumTris();
@@ -1469,6 +2067,15 @@ void CCD3D12CommandBuffer::execute(CommandBuffer *const *cmdBuffs, uint32_t coun
 void CCD3D12CommandBuffer::bindPipelineState(PipelineState *pso) {
     if (!_impl->commandList || !pso) return;
 
+#if CC_D3D12_PERF_COUNTERS
+    auto *perfDevice = CCD3D12Device::getInstance();
+    const bool perfTimingEnabled = perfDevice && perfDevice->isPerfLoggingEnabled();
+    const auto pipelineBindStart = perfTimingEnabled
+                                       ? std::chrono::steady_clock::now()
+                                       : std::chrono::steady_clock::time_point{};
+    const uint64_t nativeChangesBefore = _impl->perfPipelineNativeStateChanges;
+#endif
+    const bool logicalPipelineChanged = _impl->boundPipelineState != pso;
     auto *d3d12PSO = static_cast<CCD3D12PipelineState *>(pso);
     auto *d3d12PipelineState = static_cast<ID3D12PipelineState *>(d3d12PSO->getID3D12PipelineState());
     if (!d3d12PipelineState) {
@@ -1476,7 +2083,13 @@ void CCD3D12CommandBuffer::bindPipelineState(PipelineState *pso) {
         return;
     }
 
-    _impl->commandList->SetPipelineState(d3d12PipelineState);
+    if (logicalPipelineChanged && _impl->boundNativePipelineState != d3d12PipelineState) {
+        _impl->commandList->SetPipelineState(d3d12PipelineState);
+#if CC_D3D12_PERF_COUNTERS
+        ++_impl->perfPipelineNativeStateChanges;
+#endif
+        _impl->boundNativePipelineState = d3d12PipelineState;
+    }
 
     // Apply blend constants from PSO's BlendState.
     // This matches WebGL backend behavior (gl.blendColor) and is required
@@ -1484,7 +2097,11 @@ void CCD3D12CommandBuffer::bindPipelineState(PipelineState *pso) {
     {
         const auto &bs = pso->getBlendState();
         float blendFactor[4] = { bs.blendColor.x, bs.blendColor.y, bs.blendColor.z, bs.blendColor.w };
-        _impl->commandList->OMSetBlendFactor(blendFactor);
+        if (!_impl->blendFactorValid || std::memcmp(_impl->boundBlendFactor, blendFactor, sizeof(blendFactor)) != 0) {
+            _impl->commandList->OMSetBlendFactor(blendFactor);
+            std::memcpy(_impl->boundBlendFactor, blendFactor, sizeof(blendFactor));
+            _impl->blendFactorValid = true;
+        }
     }
 
     // D3D12 treats stencil reference as dynamic command-list state.
@@ -1492,33 +2109,56 @@ void CCD3D12CommandBuffer::bindPipelineState(PipelineState *pso) {
     {
         const auto &ds = pso->getDepthStencilState();
         const uint32_t stencilRef = ds.stencilTestFront ? ds.stencilRefFront : ds.stencilRefBack;
-        _impl->commandList->OMSetStencilRef(stencilRef);
+        if (!_impl->stencilRefValid || _impl->boundStencilRef != stencilRef) {
+            _impl->commandList->OMSetStencilRef(stencilRef);
+            _impl->boundStencilRef = stencilRef;
+            _impl->stencilRefValid = true;
+        }
     }
 
     // Set primitive topology from PSO
     D3D12_PRIMITIVE_TOPOLOGY topology = static_cast<D3D12_PRIMITIVE_TOPOLOGY>(d3d12PSO->getD3D12PrimitiveTopology());
-    _impl->commandList->IASetPrimitiveTopology(topology);
+    if (!_impl->primitiveTopologyValid || _impl->boundPrimitiveTopology != topology) {
+        _impl->commandList->IASetPrimitiveTopology(topology);
+        _impl->boundPrimitiveTopology = topology;
+        _impl->primitiveTopologyValid = true;
+    }
 
     auto *rootSig = static_cast<ID3D12RootSignature *>(d3d12PSO->getID3D12RootSignature());
-    if (rootSig) {
+    if (rootSig && _impl->boundRootSignature != rootSig) {
         _impl->commandList->SetGraphicsRootSignature(rootSig);
-        // Setting a graphics root signature invalidates root descriptor table
-        // assumptions. Re-emit pending descriptor tables before the next draw.
+        _impl->boundRootSignature = rootSig;
+        // Setting a graphics root signature invalidates all root arguments.
+        invalidateDescriptorTables();
+    }
+
+    auto *pipelineLayout = pso->getPipelineLayout();
+    PipelineLayout *newPipelineLayout = nullptr;
+    if (pipelineLayout && d3d12PSO->usesPipelineLayoutRootSignature()) {
+        newPipelineLayout = const_cast<PipelineLayout *>(pipelineLayout);
+    }
+    if (_impl->boundPipelineLayout != newPipelineLayout) {
+        _impl->boundPipelineLayout = newPipelineLayout;
         if (_impl->pendingSetCount > 0) {
             _impl->descriptorSetsDirty = true;
         }
     }
 
-    auto *pipelineLayout = pso->getPipelineLayout();
-    if (pipelineLayout && d3d12PSO->usesPipelineLayoutRootSignature()) {
-        _impl->boundPipelineLayout = const_cast<PipelineLayout *>(pipelineLayout);
-    } else {
-        _impl->boundPipelineLayout = nullptr;
-    }
-
     _impl->boundPipelineState = pso;
-    _impl->dynamicPipelineStateValid = false;
+    if (logicalPipelineChanged) {
+        _impl->dynamicPipelineStateValid = false;
+    }
     applyDynamicPipelineState();
+#if CC_D3D12_PERF_COUNTERS
+    if (perfDevice && perfTimingEnabled) {
+        const auto pipelineBindNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - pipelineBindStart).count());
+        perfDevice->recordGraphicsBindAnalysis(
+            1, logicalPipelineChanged ? 0U : 1U,
+            static_cast<uint32_t>(_impl->perfPipelineNativeStateChanges - nativeChangesBefore),
+            0, 0, 0, 0, pipelineBindNs, 0);
+    }
+#endif
 }
 
 void CCD3D12CommandBuffer::applyDynamicPipelineState() {
@@ -1566,7 +2206,13 @@ void CCD3D12CommandBuffer::applyDynamicPipelineState() {
         d3d12PSO->getDynamicID3D12PipelineState(depthBias, depthBiasClamp, depthBiasSlope,
                                                 stencilReadMask, stencilWriteMask));
     if (variant) {
-        _impl->commandList->SetPipelineState(variant);
+        if (_impl->boundNativePipelineState != variant) {
+            _impl->commandList->SetPipelineState(variant);
+#if CC_D3D12_PERF_COUNTERS
+            ++_impl->perfPipelineNativeStateChanges;
+#endif
+            _impl->boundNativePipelineState = variant;
+        }
         _impl->lastDynamicPipelineStateOwner = _impl->boundPipelineState;
         _impl->lastDynamicDepthBias = depthBias;
         _impl->lastDynamicDepthBiasClamp = depthBiasClamp;
@@ -1579,18 +2225,56 @@ void CCD3D12CommandBuffer::applyDynamicPipelineState() {
 
 void CCD3D12CommandBuffer::bindDescriptorSet(uint32_t set, DescriptorSet *descriptorSet, uint32_t dynamicOffsetCount, const uint32_t *dynamicOffsets) {
     if (!_impl->commandList || !descriptorSet) return;
+    if (set >= D3D12_MAX_BOUND_SETS) {
+        CC_LOG_ERROR("D3D12CommandBuffer::bindDescriptorSet set index %u exceeds the supported maximum %u.",
+                     set, D3D12_MAX_BOUND_SETS);
+        return;
+    }
+#if CC_D3D12_PERF_COUNTERS
+    auto *perfDevice = CCD3D12Device::getInstance();
+    const bool perfTimingEnabled = perfDevice && perfDevice->isPerfLoggingEnabled();
+    const auto bindDescriptorSetStart = perfTimingEnabled
+                                            ? std::chrono::steady_clock::now()
+                                            : std::chrono::steady_clock::time_point{};
+    const auto recordBindDescriptorSetTiming = [&]() {
+        if (perfTimingEnabled) {
+            const auto elapsed = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - bindDescriptorSetStart).count());
+            perfDevice->recordCommandHotPathAnalysis(1, elapsed, 0, 0);
+        }
+    };
+#endif
 
     // Defer the actual GPU binding until draw time.
     // D3D12 only allows one CBV/SRV/UAV heap and one Sampler heap bound at a time,
     // so we must collect all sets and flush them together before each draw call.
     auto *d3d12Set = static_cast<CCD3D12DescriptorSet *>(descriptorSet);
-    d3d12Set->update(); // dirty-aware CPU staging update
+    // The draw/dispatch path flushes pending buffer uploads before it updates
+    // descriptor sets. Updating here would scan the same slots once before
+    // their final transient-CBV versions are available and again at flush.
+    const uint64_t version = d3d12Set->getVersion();
+    const auto sameDynamicOffsets = [&](const ccstd::vector<uint32_t> &current) {
+        if (current.size() != dynamicOffsetCount) {
+            return false;
+        }
+        return dynamicOffsetCount == 0 ||
+               (dynamicOffsets && std::equal(current.begin(), current.end(), dynamicOffsets));
+    };
 
     // Store in pending list (replace if same set index already recorded)
     bool replaced = false;
     for (uint32_t i = 0; i < _impl->pendingSetCount; ++i) {
         if (_impl->pendingSets[i].valid && _impl->pendingSets[i].setIndex == set) {
+            if (_impl->pendingSets[i].set == descriptorSet &&
+                _impl->pendingSets[i].version == version &&
+                sameDynamicOffsets(_impl->pendingSets[i].dynamicOffsets)) {
+#if CC_D3D12_PERF_COUNTERS
+                recordBindDescriptorSetTiming();
+#endif
+                return;
+            }
             _impl->pendingSets[i].set = descriptorSet;
+            _impl->pendingSets[i].version = version;
             _impl->pendingSets[i].dynamicOffsets.clear();
             if (dynamicOffsetCount > 0 && dynamicOffsets) {
                 _impl->pendingSets[i].dynamicOffsets.assign(dynamicOffsets, dynamicOffsets + dynamicOffsetCount);
@@ -1603,6 +2287,7 @@ void CCD3D12CommandBuffer::bindDescriptorSet(uint32_t set, DescriptorSet *descri
         auto &pendingSet = _impl->pendingSets[_impl->pendingSetCount];
         pendingSet.set = descriptorSet;
         pendingSet.setIndex = set;
+        pendingSet.version = version;
         pendingSet.dynamicOffsets.clear();
         if (dynamicOffsetCount > 0 && dynamicOffsets) {
             pendingSet.dynamicOffsets.assign(dynamicOffsets, dynamicOffsets + dynamicOffsetCount);
@@ -1611,9 +2296,793 @@ void CCD3D12CommandBuffer::bindDescriptorSet(uint32_t set, DescriptorSet *descri
         ++_impl->pendingSetCount;
     }
     _impl->descriptorSetsDirty = true;
+#if CC_D3D12_PERF_COUNTERS
+    recordBindDescriptorSetTiming();
+#endif
+}
+
+bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental() {
+    if (!_impl->descriptorSetsDirty || !_impl->commandList) {
+        return true;
+    }
+
+    auto *device = CCD3D12Device::getInstance();
+    auto *boundLayout = static_cast<CCD3D12PipelineLayout *>(_impl->boundPipelineLayout);
+    if (!device || !boundLayout) {
+        return false;
+    }
+
+    auto *d3dDevice = static_cast<ID3D12Device *>(device->getD3D12DeviceHandle());
+    auto *cbvPool = device->getGPUDescriptorHeapPool();
+    auto *samplerPool = device->getSamplerDescriptorHeapPool();
+    if (!d3dDevice || !cbvPool) {
+        return false;
+    }
+#if CC_D3D12_PERF_COUNTERS
+    const bool perfTimingEnabled = device->isPerfLoggingEnabled();
+    const auto descriptorFullFlushStart = perfTimingEnabled
+                                              ? std::chrono::steady_clock::now()
+                                              : std::chrono::steady_clock::time_point{};
+    uint32_t descriptorCacheSlotLookups = 0;
+    uint32_t descriptorCacheSlotOwnerChanges = 0;
+    uint64_t descriptorCacheProbeNanoseconds = 0;
+    uint64_t descriptorSetUpdateNs = 0;
+#endif
+
+    struct PreparedRange {
+        ID3D12DescriptorHeap *heap{nullptr};
+        uint64_t gpuHandle{0};
+        uint32_t descriptorCount{0};
+        uint32_t heapIndex{0};
+        bool valid{false};
+    };
+    struct SetBindingInfo {
+        CCD3D12DescriptorSet *set{nullptr};
+        Impl::CachedGpuDescriptorSet *cachedSet{nullptr};
+        const ccstd::vector<uint32_t> *dynamicOffsets{nullptr};
+        uint64_t version{0};
+        uint32_t cbvCount{0};
+        uint32_t samplerCount{0};
+        int32_t cbvRootIndex{-1};
+        int32_t samplerRootIndex{-1};
+        PreparedRange cbvRange;
+        PreparedRange samplerRange;
+    };
+
+    SetBindingInfo bindings[D3D12_MAX_BOUND_SETS];
+    uint32_t bindingCount = 0;
+    for (uint32_t i = 0; i < _impl->pendingSetCount; ++i) {
+        auto &pending = _impl->pendingSets[i];
+        if (!pending.valid || !pending.set || pending.setIndex >= D3D12_MAX_BOUND_SETS ||
+            bindingCount >= D3D12_MAX_BOUND_SETS) {
+            continue;
+        }
+        auto *set = static_cast<CCD3D12DescriptorSet *>(pending.set);
+#if CC_D3D12_PERF_COUNTERS
+        const auto descriptorSetUpdateStart = perfTimingEnabled
+                                                  ? std::chrono::steady_clock::now()
+                                                  : std::chrono::steady_clock::time_point{};
+#endif
+        set->update();
+#if CC_D3D12_PERF_COUNTERS
+        if (perfTimingEnabled) {
+            descriptorSetUpdateNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - descriptorSetUpdateStart).count());
+        }
+#endif
+        pending.version = set->getVersion();
+#if CC_D3D12_PERF_COUNTERS
+        const auto descriptorCacheProbeStart = perfTimingEnabled
+                                                   ? std::chrono::steady_clock::now()
+                                                   : std::chrono::steady_clock::time_point{};
+#endif
+        auto &cachedSet = _impl->gpuDescriptorCache[pending.setIndex];
+        const bool ownerChanged = cachedSet.owner != set;
+        if (ownerChanged) {
+            cachedSet.reset(set);
+        }
+#if CC_D3D12_PERF_COUNTERS
+        if (perfTimingEnabled) {
+            descriptorCacheProbeNanoseconds += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - descriptorCacheProbeStart).count());
+        }
+        ++descriptorCacheSlotLookups;
+        descriptorCacheSlotOwnerChanges += ownerChanged ? 1U : 0U;
+#endif
+        bindings[bindingCount++] = {
+            set,
+            &cachedSet,
+            &pending.dynamicOffsets,
+            pending.version,
+            set->getCbvSrvUavDescriptorCount(),
+            set->getSamplerDescriptorCount(),
+            boundLayout->getCbvSrvUavRootParameterIndex(pending.setIndex),
+            boundLayout->getSamplerRootParameterIndex(pending.setIndex),
+        };
+    }
+#if CC_D3D12_PERF_COUNTERS
+    const auto descriptorBindingBuildEnd = perfTimingEnabled
+                                               ? std::chrono::steady_clock::now()
+                                               : std::chrono::steady_clock::time_point{};
+#endif
+
+#if CC_D3D12_PERF_COUNTERS
+    uint32_t copyDescriptorCalls = 0;
+    uint32_t copiedDescriptorCount = 0;
+    uint32_t dynamicOffsetRewriteCount = 0;
+    uint32_t dynamicOffsetDescriptorCount = 0;
+    uint32_t dynamicCbvTableDescriptorCount = 0;
+    uint32_t setDescriptorHeapCalls = 0;
+    uint32_t rootTableBindCount = 0;
+    uint32_t descriptorCacheHits = 0;
+    uint32_t descriptorCacheMisses = 0;
+    uint32_t descriptorRepackPasses = 0;
+    uint32_t descriptorRepackDescriptors = 0;
+    uint32_t cbvCacheHits = 0;
+    uint32_t samplerCacheHits = 0;
+    uint32_t cbvCacheMisses = 0;
+    uint32_t samplerCacheMisses = 0;
+    uint32_t cbvCopiedDescriptors = 0;
+    uint32_t samplerCopiedDescriptors = 0;
+    uint32_t cbvRepackPasses = 0;
+    uint32_t samplerRepackPasses = 0;
+    uint32_t cbvHeapChanges = 0;
+    uint32_t samplerHeapChanges = 0;
+    uint32_t samplerTableLookups = 0;
+    uint32_t samplerUniqueTables = 0;
+    uint32_t samplerUniqueDescriptors = 0;
+    uint32_t samplerDuplicateTableHits = 0;
+    uint32_t samplerSignatureHashCollisions = 0;
+    uint32_t samplerConsecutiveExactHits = 0;
+    const auto descriptorFlushStart = descriptorBindingBuildEnd;
+    uint64_t descriptorCopyNanoseconds = 0;
+    uint64_t dynamicOffsetNanoseconds = 0;
+    uint64_t descriptorAllocateNanoseconds = 0;
+    uint64_t rootTableBindNanoseconds = 0;
+    uint64_t descriptorRangePrepareNs = 0;
+    uint64_t descriptorHeapNormalizeNs = 0;
+    uint64_t descriptorHeapRootNs = 0;
+    uint64_t descriptorCbvPrepareNs = 0;
+    uint64_t descriptorSamplerPrepareNs = 0;
+#endif
+
+    const uint32_t cbvDescriptorSize = cbvPool->getDescriptorSize();
+    const uint32_t samplerDescriptorSize = samplerPool ? samplerPool->getDescriptorSize() : 0;
+    auto copyRange = [&](SetBindingInfo &binding, bool sampler,
+                          const D3D12DescriptorHeapPool::Allocation &allocation,
+                          uint32_t descriptorOffset) {
+        const uint32_t count = sampler ? binding.samplerCount : binding.cbvCount;
+        const uint32_t descriptorSize = sampler ? samplerDescriptorSize : cbvDescriptorSize;
+        const uint64_t sourceHandle = sampler ? binding.set->getSamplerCPUDescriptorHandle()
+                                              : binding.set->getCbvSrvUavCPUDescriptorHandle();
+        if (!allocation.isValid || count == 0 || descriptorSize == 0 || sourceHandle == 0) {
+            return false;
+        }
+        D3D12_CPU_DESCRIPTOR_HANDLE source{static_cast<SIZE_T>(sourceHandle)};
+        D3D12_CPU_DESCRIPTOR_HANDLE destination{
+            reinterpret_cast<SIZE_T>(allocation.cpuHandle) +
+            static_cast<SIZE_T>(descriptorOffset) * descriptorSize};
+#if CC_D3D12_PERF_COUNTERS
+        if (perfTimingEnabled) {
+            _impl->appendPerfDrawSequenceEvent(
+                Impl::PERF_DESCRIPTOR_SOURCE_EVENT, sampler ? 1U : 0U,
+                count,
+                static_cast<uint64_t>(static_cast<int64_t>(
+                    sampler ? binding.samplerRootIndex : binding.cbvRootIndex)));
+            const uint32_t semanticCount = binding.set->getDescriptorSemanticCount();
+            for (uint32_t semanticIndex = 0; semanticIndex < semanticCount; ++semanticIndex) {
+                uint32_t semanticKind = 0;
+                uint64_t semanticValue0 = 0;
+                uint64_t semanticValue1 = 0;
+                if (!binding.set->getDescriptorSemanticSignature(
+                        semanticIndex, semanticKind, semanticValue0, semanticValue1) ||
+                    (sampler ? semanticKind != 3U : semanticKind == 3U)) {
+                    continue;
+                }
+                _impl->appendPerfDrawSequenceEvent(
+                    Impl::PERF_DESCRIPTOR_SEMANTIC_EVENT, semanticIndex,
+                    semanticKind, semanticValue0, semanticValue1);
+            }
+            if (!sampler) {
+                const uint32_t uniformSlotCount = binding.set->getUniformDescriptorSlotCount();
+                for (uint32_t slotIndex = 0; slotIndex < uniformSlotCount; ++slotIndex) {
+                    uint32_t descriptorOffset = 0;
+                    uint64_t gpuAddress = 0;
+                    uint32_t cbvSize = 0;
+                    if (binding.set->getUniformDescriptorSignature(
+                            slotIndex, descriptorOffset, gpuAddress, cbvSize)) {
+                        _impl->appendPerfDrawSequenceEvent(
+                            Impl::PERF_UNIFORM_CBV_EVENT, descriptorOffset,
+                            gpuAddress, cbvSize);
+                    }
+                }
+            }
+        }
+        const auto descriptorCopyStart = perfTimingEnabled
+                                             ? std::chrono::steady_clock::now()
+                                             : std::chrono::steady_clock::time_point{};
+#endif
+        d3dDevice->CopyDescriptorsSimple(
+            count, destination, source,
+            sampler ? D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER
+                    : D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+#if CC_D3D12_PERF_COUNTERS
+        if (perfTimingEnabled) {
+            descriptorCopyNanoseconds += static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - descriptorCopyStart).count());
+        }
+        ++copyDescriptorCalls;
+        copiedDescriptorCount += count;
+        if (sampler) {
+            samplerCopiedDescriptors += count;
+        } else {
+            cbvCopiedDescriptors += count;
+        }
+#endif
+        return true;
+    };
+
+    auto cachedRangeMatches = [&](const SetBindingInfo &binding, bool sampler) {
+        if (!binding.cachedSet) {
+            return false;
+        }
+        const auto &cached = sampler ? binding.cachedSet->sampler : binding.cachedSet->cbvSrvUav;
+        if (!cached.valid || cached.version != binding.version ||
+            cached.descriptorCount != (sampler ? binding.samplerCount : binding.cbvCount) ||
+            !cached.heap) {
+            return false;
+        }
+        if (sampler &&
+            (cached.heap != _impl->samplerTableCacheHeap ||
+             cached.heapIndex != _impl->samplerTableCacheHeapIndex)) {
+            return false;
+        }
+        return sampler || (binding.dynamicOffsets &&
+                           binding.cachedSet->cbvDynamicOffsets == *binding.dynamicOffsets);
+    };
+
+    auto findCachedSamplerTable = [&](const ccstd::vector<uint32_t> &samplerTableKey,
+                                      bool &hashCollision) -> const Impl::CachedSamplerTable * {
+        hashCollision = false;
+        if (!_impl->samplerTableCacheHeap) {
+            return nullptr;
+        }
+#if CC_D3D12_PERF_COUNTERS
+        const bool samplerRecentExact =
+            _impl->perfLastSamplerTableHeap == _impl->samplerTableCacheHeap &&
+            _impl->perfLastSamplerTableHeapIndex == _impl->samplerTableCacheHeapIndex &&
+            _impl->perfLastSamplerTableKey == samplerTableKey;
+#endif
+        const auto bucketIt = _impl->samplerTableCache.find(hashSamplerTableKey(samplerTableKey));
+        if (bucketIt == _impl->samplerTableCache.end()) {
+            return nullptr;
+        }
+        for (const auto &entry : bucketIt->second) {
+            if (entry.heap == _impl->samplerTableCacheHeap &&
+                entry.heapIndex == _impl->samplerTableCacheHeapIndex &&
+                entry.key == samplerTableKey) {
+#if CC_D3D12_PERF_COUNTERS
+                samplerConsecutiveExactHits += samplerRecentExact ? 1U : 0U;
+                _impl->perfLastSamplerTableKey = samplerTableKey;
+                _impl->perfLastSamplerTableHeap = entry.heap;
+                _impl->perfLastSamplerTableHeapIndex = entry.heapIndex;
+#endif
+                return &entry;
+            }
+        }
+        hashCollision = !bucketIt->second.empty();
+        return nullptr;
+    };
+
+    auto cacheSamplerTableRange = [&](const ccstd::vector<uint32_t> &samplerTableKey,
+                                       const PreparedRange &range) {
+        if (!range.valid || !range.heap || samplerTableKey.size() != range.descriptorCount) {
+            return;
+        }
+        if (_impl->samplerTableCacheHeap != range.heap ||
+            _impl->samplerTableCacheHeapIndex != range.heapIndex) {
+            _impl->samplerTableCache.clear();
+            _impl->samplerTableCacheHeap = range.heap;
+            _impl->samplerTableCacheHeapIndex = range.heapIndex;
+        }
+#if CC_D3D12_PERF_COUNTERS
+        _impl->perfLastSamplerTableKey = samplerTableKey;
+        _impl->perfLastSamplerTableHeap = range.heap;
+        _impl->perfLastSamplerTableHeapIndex = range.heapIndex;
+#endif
+        auto &hashBucket = _impl->samplerTableCache[hashSamplerTableKey(samplerTableKey)];
+        for (auto &entry : hashBucket) {
+            if (entry.key == samplerTableKey) {
+                entry.gpuHandle = range.gpuHandle;
+                entry.descriptorCount = range.descriptorCount;
+                entry.heapIndex = range.heapIndex;
+                entry.heap = range.heap;
+                return;
+            }
+        }
+        hashBucket.emplace_back(Impl::CachedSamplerTable{
+            samplerTableKey,
+            range.gpuHandle,
+            range.descriptorCount,
+            range.heapIndex,
+            range.heap,
+        });
+    };
+
+    auto prepareRange = [&](SetBindingInfo &binding, bool sampler) {
+        auto *pool = sampler ? samplerPool : cbvPool;
+        const uint32_t count = sampler ? binding.samplerCount : binding.cbvCount;
+        const int32_t rootIndex = sampler ? binding.samplerRootIndex : binding.cbvRootIndex;
+        auto &prepared = sampler ? binding.samplerRange : binding.cbvRange;
+        if (!pool || count == 0 || rootIndex < 0) {
+            return true;
+        }
+
+        if (cachedRangeMatches(binding, sampler)) {
+            const auto &cached = sampler ? binding.cachedSet->sampler : binding.cachedSet->cbvSrvUav;
+#if CC_D3D12_PERF_COUNTERS
+            ++descriptorCacheHits;
+            if (sampler) {
+                ++samplerCacheHits;
+            } else {
+                ++cbvCacheHits;
+            }
+#endif
+            prepared = {cached.heap, cached.gpuHandle, cached.descriptorCount,
+                        cached.heapIndex, true};
+            return true;
+        }
+
+        const ccstd::vector<uint32_t> *samplerTableKey = nullptr;
+        if (sampler) {
+            samplerTableKey = &binding.set->getSamplerTableKey();
+            bool hashCollision = false;
+#if CC_D3D12_PERF_COUNTERS
+            ++samplerTableLookups;
+#endif
+            if (const auto *shared = findCachedSamplerTable(*samplerTableKey, hashCollision)) {
+                prepared = {shared->heap, shared->gpuHandle, shared->descriptorCount,
+                            shared->heapIndex, true};
+                if (binding.cachedSet) {
+                    auto &cached = binding.cachedSet->sampler;
+                    cached = {binding.version, shared->gpuHandle, shared->descriptorCount,
+                              shared->heapIndex, shared->heap, true};
+                }
+#if CC_D3D12_PERF_COUNTERS
+                ++descriptorCacheHits;
+                ++samplerCacheHits;
+                ++samplerDuplicateTableHits;
+#endif
+                return true;
+            }
+#if CC_D3D12_PERF_COUNTERS
+            ++samplerUniqueTables;
+            samplerUniqueDescriptors += static_cast<uint32_t>(samplerTableKey->size());
+            samplerSignatureHashCollisions += hashCollision ? 1U : 0U;
+#endif
+        }
+
+#if CC_D3D12_PERF_COUNTERS
+        ++descriptorCacheMisses;
+        if (sampler) {
+            ++samplerCacheMisses;
+        } else {
+            ++cbvCacheMisses;
+        }
+#endif
+
+#if CC_D3D12_PERF_COUNTERS
+        const auto descriptorAllocateStart = perfTimingEnabled
+                                                 ? std::chrono::steady_clock::now()
+                                                 : std::chrono::steady_clock::time_point{};
+#endif
+        const auto allocation = pool->allocate(count);
+#if CC_D3D12_PERF_COUNTERS
+        if (perfTimingEnabled) {
+            descriptorAllocateNanoseconds += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - descriptorAllocateStart).count());
+        }
+#endif
+        auto *heap = allocation.isValid
+                         ? static_cast<ID3D12DescriptorHeap *>(pool->getHeap(allocation.heapIndex))
+                         : nullptr;
+        if (!heap || !copyRange(binding, sampler, allocation, 0)) {
+            return false;
+        }
+        prepared = {heap, allocation.gpuHandle, count, allocation.heapIndex, true};
+        if (binding.cachedSet) {
+            auto &cached = sampler ? binding.cachedSet->sampler : binding.cachedSet->cbvSrvUav;
+            cached = {binding.version, allocation.gpuHandle, count,
+                      allocation.heapIndex, heap, true};
+            if (!sampler && binding.dynamicOffsets) {
+                binding.cachedSet->cbvDynamicOffsets = *binding.dynamicOffsets;
+            }
+        }
+        if (samplerTableKey) {
+            cacheSamplerTableRange(*samplerTableKey, prepared);
+        }
+        return true;
+    };
+
+#if CC_D3D12_PERF_COUNTERS
+    const auto descriptorRangePrepareStart = perfTimingEnabled
+                                                 ? std::chrono::steady_clock::now()
+                                                 : std::chrono::steady_clock::time_point{};
+#endif
+    for (uint32_t i = 0; i < bindingCount; ++i) {
+        auto &binding = bindings[i];
+        const bool hasDynamicOffsets = binding.dynamicOffsets && !binding.dynamicOffsets->empty();
+#if CC_D3D12_PERF_COUNTERS
+        if (perfTimingEnabled && hasDynamicOffsets) {
+            for (uint32_t offsetIndex = 0;
+                 offsetIndex < static_cast<uint32_t>(binding.dynamicOffsets->size());
+                 ++offsetIndex) {
+                _impl->appendPerfDrawSequenceEvent(
+                    Impl::PERF_DYNAMIC_OFFSET_EVENT, offsetIndex,
+                    (*binding.dynamicOffsets)[offsetIndex], binding.set->getStaticDescriptorVersion(),
+                    static_cast<uint64_t>(static_cast<int64_t>(binding.cbvRootIndex)));
+            }
+        }
+#endif
+        const bool dynamicCbvCacheHit = hasDynamicOffsets && cachedRangeMatches(binding, false);
+        bool appliedDynamicOffsets = false;
+        if (hasDynamicOffsets && !dynamicCbvCacheHit) {
+#if CC_D3D12_PERF_COUNTERS
+            dynamicCbvTableDescriptorCount += binding.cbvCount;
+#endif
+#if CC_D3D12_PERF_COUNTERS
+            const auto dynamicOffsetStart = perfTimingEnabled
+                                                ? std::chrono::steady_clock::now()
+                                                : std::chrono::steady_clock::time_point{};
+#endif
+            binding.set->applyDynamicOffsets(
+                static_cast<uint32_t>(binding.dynamicOffsets->size()), binding.dynamicOffsets->data());
+            appliedDynamicOffsets = true;
+#if CC_D3D12_PERF_COUNTERS
+            if (perfTimingEnabled) {
+                dynamicOffsetNanoseconds += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - dynamicOffsetStart).count());
+            }
+#endif
+#if CC_D3D12_PERF_COUNTERS
+            ++dynamicOffsetRewriteCount;
+            dynamicOffsetDescriptorCount += static_cast<uint32_t>(binding.dynamicOffsets->size());
+#endif
+        }
+#if CC_D3D12_PERF_COUNTERS
+        const auto descriptorCbvPrepareStart = perfTimingEnabled
+                                                   ? std::chrono::steady_clock::now()
+                                                   : std::chrono::steady_clock::time_point{};
+#endif
+        const bool cbvReady = prepareRange(binding, false);
+#if CC_D3D12_PERF_COUNTERS
+        const auto descriptorSamplerPrepareStart = perfTimingEnabled
+                                                       ? std::chrono::steady_clock::now()
+                                                       : std::chrono::steady_clock::time_point{};
+        if (perfTimingEnabled) {
+            descriptorCbvPrepareNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                descriptorSamplerPrepareStart - descriptorCbvPrepareStart).count());
+        }
+#endif
+        const bool samplerReady = prepareRange(binding, true);
+#if CC_D3D12_PERF_COUNTERS
+        if (perfTimingEnabled) {
+            descriptorSamplerPrepareNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - descriptorSamplerPrepareStart).count());
+        }
+#endif
+        if (appliedDynamicOffsets) {
+#if CC_D3D12_PERF_COUNTERS
+            const auto dynamicOffsetStart = perfTimingEnabled
+                                                ? std::chrono::steady_clock::now()
+                                                : std::chrono::steady_clock::time_point{};
+#endif
+            binding.set->restoreDynamicOffsetDescriptors();
+#if CC_D3D12_PERF_COUNTERS
+            if (perfTimingEnabled) {
+                dynamicOffsetNanoseconds += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - dynamicOffsetStart).count());
+            }
+#endif
+        }
+        if (!cbvReady || !samplerReady) {
+            return false;
+        }
+    }
+#if CC_D3D12_PERF_COUNTERS
+    const auto descriptorRangePrepareEnd = perfTimingEnabled
+                                               ? std::chrono::steady_clock::now()
+                                               : std::chrono::steady_clock::time_point{};
+    if (perfTimingEnabled) {
+        descriptorRangePrepareNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            descriptorRangePrepareEnd - descriptorRangePrepareStart).count());
+    }
+    const auto descriptorHeapNormalizeStart = descriptorRangePrepareEnd;
+#endif
+
+    auto repackRanges = [&](bool sampler) {
+        auto *pool = sampler ? samplerPool : cbvPool;
+        const uint32_t descriptorSize = sampler ? samplerDescriptorSize : cbvDescriptorSize;
+        uint32_t totalCount = 0;
+        for (uint32_t i = 0; i < bindingCount; ++i) {
+            const auto &binding = bindings[i];
+            const uint32_t count = sampler ? binding.samplerCount : binding.cbvCount;
+            const int32_t rootIndex = sampler ? binding.samplerRootIndex : binding.cbvRootIndex;
+            if (count > 0 && rootIndex >= 0) {
+                totalCount += count;
+            }
+        }
+        if (totalCount == 0) {
+            return true;
+        }
+#if CC_D3D12_PERF_COUNTERS
+        ++descriptorRepackPasses;
+        descriptorRepackDescriptors += totalCount;
+        if (sampler) {
+            ++samplerRepackPasses;
+        } else {
+            ++cbvRepackPasses;
+        }
+#endif
+        if (!pool || descriptorSize == 0) {
+            return false;
+        }
+
+#if CC_D3D12_PERF_COUNTERS
+        const auto descriptorAllocateStart = perfTimingEnabled
+                                                 ? std::chrono::steady_clock::now()
+                                                 : std::chrono::steady_clock::time_point{};
+#endif
+        const auto allocation = pool->allocate(totalCount);
+#if CC_D3D12_PERF_COUNTERS
+        if (perfTimingEnabled) {
+            descriptorAllocateNanoseconds += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - descriptorAllocateStart).count());
+        }
+#endif
+        auto *heap = allocation.isValid
+                         ? static_cast<ID3D12DescriptorHeap *>(pool->getHeap(allocation.heapIndex))
+                         : nullptr;
+        if (!heap) {
+            return false;
+        }
+
+        uint32_t offset = 0;
+        for (uint32_t i = 0; i < bindingCount; ++i) {
+            auto &binding = bindings[i];
+            const uint32_t count = sampler ? binding.samplerCount : binding.cbvCount;
+            const int32_t rootIndex = sampler ? binding.samplerRootIndex : binding.cbvRootIndex;
+            if (count == 0 || rootIndex < 0) {
+                continue;
+            }
+            const bool hasDynamicOffsets = !sampler && binding.dynamicOffsets && !binding.dynamicOffsets->empty();
+            if (hasDynamicOffsets) {
+                binding.set->applyDynamicOffsets(
+                    static_cast<uint32_t>(binding.dynamicOffsets->size()), binding.dynamicOffsets->data());
+#if CC_D3D12_PERF_COUNTERS
+                ++dynamicOffsetRewriteCount;
+                dynamicOffsetDescriptorCount += static_cast<uint32_t>(binding.dynamicOffsets->size());
+#endif
+            }
+            const bool copied = copyRange(binding, sampler, allocation, offset);
+            if (hasDynamicOffsets) {
+                binding.set->restoreDynamicOffsetDescriptors();
+            }
+            if (!copied) {
+                return false;
+            }
+
+            auto &prepared = sampler ? binding.samplerRange : binding.cbvRange;
+            prepared = {
+                heap,
+                allocation.gpuHandle + static_cast<uint64_t>(offset) * descriptorSize,
+                count,
+                allocation.heapIndex,
+                true,
+            };
+            if (binding.cachedSet) {
+                auto &cached = sampler ? binding.cachedSet->sampler : binding.cachedSet->cbvSrvUav;
+                cached = {binding.version, prepared.gpuHandle, count,
+                          allocation.heapIndex, heap, true};
+                if (!sampler && binding.dynamicOffsets) {
+                    binding.cachedSet->cbvDynamicOffsets = *binding.dynamicOffsets;
+                }
+            }
+            if (sampler) {
+                cacheSamplerTableRange(binding.set->getSamplerTableKey(), prepared);
+            }
+            offset += count;
+        }
+        return true;
+    };
+
+    auto rangesUseSingleHeap = [&](bool sampler) {
+        ID3D12DescriptorHeap *heap = nullptr;
+        for (uint32_t i = 0; i < bindingCount; ++i) {
+            const auto &range = sampler ? bindings[i].samplerRange : bindings[i].cbvRange;
+            if (!range.valid) {
+                continue;
+            }
+            if (!heap) {
+                heap = range.heap;
+            } else if (heap != range.heap) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    if (!rangesUseSingleHeap(false) && !repackRanges(false)) {
+        return false;
+    }
+    if (!rangesUseSingleHeap(true) && !repackRanges(true)) {
+        return false;
+    }
+
+    ID3D12DescriptorHeap *cbvHeap = nullptr;
+    ID3D12DescriptorHeap *samplerHeap = nullptr;
+    for (uint32_t i = 0; i < bindingCount; ++i) {
+        if (bindings[i].cbvRange.valid) {
+            cbvHeap = bindings[i].cbvRange.heap;
+        }
+        if (bindings[i].samplerRange.valid) {
+            samplerHeap = bindings[i].samplerRange.heap;
+        }
+    }
+#if CC_D3D12_PERF_COUNTERS
+    const auto descriptorHeapNormalizeEnd = perfTimingEnabled
+                                                ? std::chrono::steady_clock::now()
+                                                : std::chrono::steady_clock::time_point{};
+    if (perfTimingEnabled) {
+        descriptorHeapNormalizeNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            descriptorHeapNormalizeEnd - descriptorHeapNormalizeStart).count());
+    }
+    const auto descriptorHeapRootStart = descriptorHeapNormalizeEnd;
+#endif
+
+    ID3D12DescriptorHeap *boundHeaps[2]{};
+    UINT boundHeapCount = 0;
+    if (cbvHeap) {
+        boundHeaps[boundHeapCount++] = cbvHeap;
+    }
+    if (samplerHeap) {
+        boundHeaps[boundHeapCount++] = samplerHeap;
+    }
+    if (boundHeapCount > 0 &&
+        (_impl->boundCbvSrvUavHeap != cbvHeap || _impl->boundSamplerHeap != samplerHeap)) {
+        if (_type == CommandBufferType::SECONDARY &&
+            (_impl->boundCbvSrvUavHeap || _impl->boundSamplerHeap)) {
+            return false;
+        }
+#if CC_D3D12_PERF_COUNTERS
+        const bool cbvHeapChanged = _impl->boundCbvSrvUavHeap != cbvHeap;
+        const bool samplerHeapChanged = _impl->boundSamplerHeap != samplerHeap;
+#endif
+        _impl->commandList->SetDescriptorHeaps(boundHeapCount, boundHeaps);
+        _impl->boundCbvSrvUavHeap = cbvHeap;
+        _impl->boundSamplerHeap = samplerHeap;
+        invalidateDescriptorTables();
+#if CC_D3D12_PERF_COUNTERS
+        ++setDescriptorHeapCalls;
+        if (cbvHeapChanged) {
+            ++cbvHeapChanges;
+        }
+        if (samplerHeapChanged) {
+            ++samplerHeapChanges;
+        }
+#endif
+    }
+
+    auto bindRootTable = [&](int32_t rootIndex, const PreparedRange &range) {
+        if (!range.valid || rootIndex < 0) {
+            return true;
+        }
+        if (rootIndex >= static_cast<int32_t>(D3D12_MAX_ROOT_PARAMETERS)) {
+            CC_LOG_ERROR("D3D12 root parameter index %d exceeds the command buffer cache capacity.", rootIndex);
+            return false;
+        }
+        auto &bound = _impl->boundRootTables[rootIndex];
+        if (!bound.valid || bound.gpuHandle != range.gpuHandle) {
+#if CC_D3D12_PERF_COUNTERS
+            const auto rootTableBindStart = perfTimingEnabled
+                                                ? std::chrono::steady_clock::now()
+                                                : std::chrono::steady_clock::time_point{};
+#endif
+            _impl->commandList->SetGraphicsRootDescriptorTable(
+                static_cast<UINT>(rootIndex), {range.gpuHandle});
+#if CC_D3D12_PERF_COUNTERS
+            if (perfTimingEnabled) {
+                _impl->appendPerfDrawSequenceEvent(Impl::PERF_ROOT_TABLE_EVENT,
+                                                   static_cast<uint32_t>(rootIndex), range.gpuHandle);
+            }
+            if (perfTimingEnabled) {
+                rootTableBindNanoseconds += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - rootTableBindStart).count());
+            }
+#endif
+            bound = {range.gpuHandle, true};
+#if CC_D3D12_PERF_COUNTERS
+            ++rootTableBindCount;
+#endif
+        }
+        return true;
+    };
+
+    for (uint32_t i = 0; i < bindingCount; ++i) {
+        if (!bindRootTable(bindings[i].cbvRootIndex, bindings[i].cbvRange) ||
+            !bindRootTable(bindings[i].samplerRootIndex, bindings[i].samplerRange)) {
+            return false;
+        }
+    }
+#if CC_D3D12_PERF_COUNTERS
+    if (perfTimingEnabled) {
+        descriptorHeapRootNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - descriptorHeapRootStart).count());
+    }
+#endif
+
+    _impl->descriptorSetsDirty = false;
+#if CC_D3D12_PERF_COUNTERS
+    const auto descriptorFlushEnd = perfTimingEnabled
+                                        ? std::chrono::steady_clock::now()
+                                        : std::chrono::steady_clock::time_point{};
+    const uint64_t descriptorFlushNanoseconds = perfTimingEnabled
+                                                     ? static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                           descriptorFlushEnd - descriptorFlushStart).count())
+                                                     : 0;
+    const uint64_t descriptorFullFlushNanoseconds = perfTimingEnabled
+                                                         ? static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                               descriptorFlushEnd - descriptorFullFlushStart).count())
+                                                         : 0;
+    const uint64_t descriptorBindingBuildNanoseconds = perfTimingEnabled
+                                                            ? static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                                  descriptorBindingBuildEnd - descriptorFullFlushStart).count())
+                                                            : 0;
+    device->recordDescriptorFlush(copyDescriptorCalls, copiedDescriptorCount,
+                                  dynamicOffsetRewriteCount, dynamicOffsetDescriptorCount,
+                                  dynamicCbvTableDescriptorCount,
+                                  setDescriptorHeapCalls, rootTableBindCount);
+    device->recordDescriptorCacheAnalysis(descriptorCacheHits, descriptorCacheMisses,
+                                          descriptorRepackPasses, descriptorRepackDescriptors);
+    device->recordDescriptorTypeAnalysis(
+        cbvCacheHits, samplerCacheHits, cbvCacheMisses, samplerCacheMisses,
+        cbvCopiedDescriptors, samplerCopiedDescriptors,
+        cbvRepackPasses, samplerRepackPasses,
+        cbvHeapChanges, samplerHeapChanges);
+    device->recordSamplerTableAnalysis(
+        samplerTableLookups, samplerUniqueTables, samplerUniqueDescriptors,
+        samplerDuplicateTableHits, samplerSignatureHashCollisions,
+        samplerConsecutiveExactHits);
+    device->recordDescriptorBindingAnalysis(
+        descriptorCacheSlotLookups, descriptorCacheSlotOwnerChanges,
+        descriptorFullFlushNanoseconds, descriptorBindingBuildNanoseconds,
+        descriptorCacheProbeNanoseconds, descriptorSetUpdateNs);
+    device->recordDescriptorPostPhaseAnalysis(
+        descriptorRangePrepareNs, descriptorHeapNormalizeNs, descriptorHeapRootNs);
+    device->recordDescriptorRangePhaseAnalysis(
+        descriptorCbvPrepareNs, descriptorSamplerPrepareNs);
+    device->recordHotPathTimings(descriptorFlushNanoseconds, descriptorCopyNanoseconds, 0,
+                                 dynamicOffsetNanoseconds, descriptorAllocateNanoseconds,
+                                 rootTableBindNanoseconds);
+#endif
+    return true;
 }
 
 void CCD3D12CommandBuffer::flushDescriptorSets() {
+    if (flushDescriptorSetsIncremental()) {
+        return;
+    }
+    // The fallback path owns its descriptor allocations independently. Drop
+    // incremental sampler ranges so a later draw cannot reuse another heap epoch.
+    _impl->samplerTableCache.clear();
+    _impl->samplerTableCacheHeap = nullptr;
+    _impl->samplerTableCacheHeapIndex = std::numeric_limits<uint32_t>::max();
+#if CC_D3D12_PERF_COUNTERS
+    _impl->perfLastSamplerTableKey.clear();
+    _impl->perfLastSamplerTableHeap = nullptr;
+    _impl->perfLastSamplerTableHeapIndex = std::numeric_limits<uint32_t>::max();
+#endif
     if (!_impl->descriptorSetsDirty || !_impl->commandList) return;
     _impl->descriptorSetsDirty = false;
 
@@ -1715,6 +3184,7 @@ void CCD3D12CommandBuffer::flushDescriptorSets() {
     uint32_t copiedDescriptorCount = 0;
     uint32_t dynamicOffsetRewriteCount = 0;
     uint32_t dynamicOffsetDescriptorCount = 0;
+    uint32_t dynamicCbvTableDescriptorCount = 0;
     uint32_t setDescriptorHeapCalls = 0;
 #endif
     for (uint32_t i = 0; i < bindingCount; ++i) {
@@ -1722,6 +3192,9 @@ void CCD3D12CommandBuffer::flushDescriptorSets() {
         bool appliedDynamicOffsets = false;
 
         if (!binding.dynamicOffsets.empty()) {
+#if CC_D3D12_PERF_COUNTERS
+            dynamicCbvTableDescriptorCount += binding.cbvCount;
+#endif
             binding.set->forceUpdate();
             binding.set->applyDynamicOffsets(static_cast<uint32_t>(binding.dynamicOffsets.size()), binding.dynamicOffsets.data());
             appliedDynamicOffsets = true;
@@ -1821,13 +3294,28 @@ void CCD3D12CommandBuffer::flushDescriptorSets() {
     // Set all root descriptor tables
     for (uint32_t i = 0; i < cbvEntryCount; ++i) {
         _impl->commandList->SetGraphicsRootDescriptorTable(cbvEntries[i].rootParameterIndex, cbvEntries[i].gpuHandle);
+#if CC_D3D12_PERF_COUNTERS
+        if (device->isPerfLoggingEnabled()) {
+            _impl->appendPerfDrawSequenceEvent(Impl::PERF_ROOT_TABLE_EVENT,
+                                               cbvEntries[i].rootParameterIndex,
+                                               cbvEntries[i].gpuHandle.ptr);
+        }
+#endif
     }
     for (uint32_t i = 0; i < samplerEntryCount; ++i) {
         _impl->commandList->SetGraphicsRootDescriptorTable(samplerEntries[i].rootParameterIndex, samplerEntries[i].gpuHandle);
+#if CC_D3D12_PERF_COUNTERS
+        if (device->isPerfLoggingEnabled()) {
+            _impl->appendPerfDrawSequenceEvent(Impl::PERF_ROOT_TABLE_EVENT,
+                                               samplerEntries[i].rootParameterIndex,
+                                               samplerEntries[i].gpuHandle.ptr);
+        }
+#endif
     }
 #if CC_D3D12_PERF_COUNTERS
     device->recordDescriptorFlush(copyDescriptorCalls, copiedDescriptorCount,
                                   dynamicOffsetRewriteCount, dynamicOffsetDescriptorCount,
+                                  dynamicCbvTableDescriptorCount,
                                   setDescriptorHeapCalls, cbvEntryCount + samplerEntryCount);
 #endif
 }
@@ -1835,23 +3323,74 @@ void CCD3D12CommandBuffer::flushDescriptorSets() {
 void CCD3D12CommandBuffer::bindInputAssembler(InputAssembler *ia) {
     if (!_impl->commandList || !ia) return;
 
+    const bool sameLogicalInputAssembler = _impl->boundIA == ia;
+#if CC_D3D12_PERF_COUNTERS
+    auto *perfDevice = CCD3D12Device::getInstance();
+    const bool perfTimingEnabled = perfDevice && perfDevice->isPerfLoggingEnabled();
+    const auto inputAssemblerBindStart = perfTimingEnabled
+                                             ? std::chrono::steady_clock::now()
+                                             : std::chrono::steady_clock::time_point{};
+#endif
     _impl->boundIA = ia;
     auto *d3d12IA = static_cast<CCD3D12InputAssembler *>(ia);
 
-    // Set vertex buffers — use stack array (max vertex attributes = 16 per caps)
+    // Compare live views rather than only the IA pointer: Buffer::resize() can
+    // replace the underlying resource without recreating the InputAssembler.
     const uint32_t vbCount = d3d12IA->getVertexBufferCount();
+    if (vbCount > D3D12_MAX_VERTEX_BUFFERS) {
+        CC_LOG_ERROR("D3D12 InputAssembler uses %u vertex buffers; maximum supported is %u.",
+                     vbCount, D3D12_MAX_VERTEX_BUFFERS);
+        return;
+    }
+    D3D12_VERTEX_BUFFER_VIEW vbViews[D3D12_MAX_VERTEX_BUFFERS]{};
     if (vbCount > 0) {
-        D3D12_VERTEX_BUFFER_VIEW vbViews[16];
         d3d12IA->fillVertexBufferViews(vbViews);
-        _impl->commandList->IASetVertexBuffers(0, vbCount, vbViews);
+    }
+    const bool vertexBuffersChanged =
+        !_impl->vertexBufferStateValid ||
+        _impl->boundVertexBufferCount != vbCount ||
+        (vbCount > 0 && std::memcmp(_impl->boundVertexBufferViews, vbViews,
+                                    sizeof(D3D12_VERTEX_BUFFER_VIEW) * vbCount) != 0);
+    if (vertexBuffersChanged) {
+        if (vbCount > 0) {
+            _impl->commandList->IASetVertexBuffers(0, vbCount, vbViews);
+        } else if (_impl->vertexBufferStateValid && _impl->boundVertexBufferCount > 0) {
+            D3D12_VERTEX_BUFFER_VIEW emptyViews[D3D12_MAX_VERTEX_BUFFERS]{};
+            _impl->commandList->IASetVertexBuffers(
+                0, _impl->boundVertexBufferCount, emptyViews);
+        }
+        std::memcpy(_impl->boundVertexBufferViews, vbViews,
+                    sizeof(D3D12_VERTEX_BUFFER_VIEW) * vbCount);
+        _impl->boundVertexBufferCount = vbCount;
+        _impl->vertexBufferStateValid = true;
     }
 
-    // Set index buffer
-    if (d3d12IA->hasIndexBuffer()) {
-        D3D12_INDEX_BUFFER_VIEW ibView{};
+    const bool hasIndexBuffer = d3d12IA->hasIndexBuffer();
+    D3D12_INDEX_BUFFER_VIEW ibView{};
+    if (hasIndexBuffer) {
         d3d12IA->fillIndexBufferView(&ibView);
-        _impl->commandList->IASetIndexBuffer(&ibView);
     }
+    const bool indexBufferChanged =
+        !_impl->indexBufferStateValid ||
+        _impl->boundHasIndexBuffer != hasIndexBuffer ||
+        (hasIndexBuffer && std::memcmp(&_impl->boundIndexBufferView, &ibView, sizeof(ibView)) != 0);
+    if (indexBufferChanged) {
+        _impl->commandList->IASetIndexBuffer(hasIndexBuffer ? &ibView : nullptr);
+        _impl->boundIndexBufferView = ibView;
+        _impl->boundHasIndexBuffer = hasIndexBuffer;
+        _impl->indexBufferStateValid = true;
+    }
+
+#if CC_D3D12_PERF_COUNTERS
+    if (perfDevice && perfTimingEnabled) {
+        const auto inputAssemblerBindNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - inputAssemblerBindStart).count());
+        perfDevice->recordGraphicsBindAnalysis(
+            0, 0, 0, 1, sameLogicalInputAssembler ? 1U : 0U,
+            vertexBuffersChanged ? 1U : 0U, indexBufferChanged ? 1U : 0U,
+            0, inputAssemblerBindNs);
+    }
+#endif
 
     // Note: primitive topology is set in bindPipelineState from PSO info
 }
@@ -1870,7 +3409,11 @@ void CCD3D12CommandBuffer::setViewport(const Viewport &vp) {
     d3dViewport.Height = static_cast<float>(vp.height);
     d3dViewport.MinDepth = vp.minDepth;
     d3dViewport.MaxDepth = vp.maxDepth;
-    _impl->commandList->RSSetViewports(1, &d3dViewport);
+    if (!_impl->viewportValid || std::memcmp(&_impl->boundViewport, &d3dViewport, sizeof(d3dViewport)) != 0) {
+        _impl->commandList->RSSetViewports(1, &d3dViewport);
+        _impl->boundViewport = d3dViewport;
+        _impl->viewportValid = true;
+    }
 }
 
 void CCD3D12CommandBuffer::setScissor(const Rect &rect) {
@@ -1885,7 +3428,11 @@ void CCD3D12CommandBuffer::setScissor(const Rect &rect) {
     d3dRect.top = rect.y;
     d3dRect.right = static_cast<LONG>(rect.x + rect.width);
     d3dRect.bottom = static_cast<LONG>(rect.y + rect.height);
-    _impl->commandList->RSSetScissorRects(1, &d3dRect);
+    if (!_impl->scissorValid || std::memcmp(&_impl->boundScissor, &d3dRect, sizeof(d3dRect)) != 0) {
+        _impl->commandList->RSSetScissorRects(1, &d3dRect);
+        _impl->boundScissor = d3dRect;
+        _impl->scissorValid = true;
+    }
 }
 
 void CCD3D12CommandBuffer::setLineWidth(float width) {
@@ -1905,7 +3452,13 @@ void CCD3D12CommandBuffer::setDepthBias(float constant, float clamp, float slope
 
 void CCD3D12CommandBuffer::setBlendConstants(const Color &constants) {
     if (!_impl->commandList) return;
-    _impl->commandList->OMSetBlendFactor(&constants.x);
+    const float *blendFactor = &constants.x;
+    if (!_impl->blendFactorValid ||
+        std::memcmp(_impl->boundBlendFactor, blendFactor, sizeof(_impl->boundBlendFactor)) != 0) {
+        _impl->commandList->OMSetBlendFactor(blendFactor);
+        std::memcpy(_impl->boundBlendFactor, blendFactor, sizeof(_impl->boundBlendFactor));
+        _impl->blendFactorValid = true;
+    }
 }
 
 void CCD3D12CommandBuffer::setDepthBound(float minBounds, float maxBounds) {
@@ -1934,7 +3487,11 @@ void CCD3D12CommandBuffer::setStencilCompareMask(StencilFace face, uint32_t ref,
     }
     _impl->dynamicStencilReadMask = mask;
     _impl->hasDynamicStencilReadMask = true;
-    _impl->commandList->OMSetStencilRef(ref);
+    if (!_impl->stencilRefValid || _impl->boundStencilRef != ref) {
+        _impl->commandList->OMSetStencilRef(ref);
+        _impl->boundStencilRef = ref;
+        _impl->stencilRefValid = true;
+    }
     applyDynamicPipelineState();
 }
 
@@ -2003,12 +3560,104 @@ void CCD3D12CommandBuffer::nextSubpass() {
 
 void CCD3D12CommandBuffer::draw(const DrawInfo &info) {
     if (!_impl->commandList) return;
+#if CC_D3D12_PERF_COUNTERS
+    auto *perfDevice = CCD3D12Device::getInstance();
+    const bool perfTimingEnabled = perfDevice && perfDevice->isPerfLoggingEnabled();
+    const auto drawStart = perfTimingEnabled
+                               ? std::chrono::steady_clock::now()
+                               : std::chrono::steady_clock::time_point{};
+    uint64_t drawPendingBufferNs = 0;
+    uint64_t drawDescriptorFlushNs = 0;
+    uint64_t drawIssueNs = 0;
+    auto drawPhaseStart = std::chrono::steady_clock::time_point{};
+    auto drawIssueStart = std::chrono::steady_clock::time_point{};
+    const auto recordDrawTiming = [&]() {
+        if (perfTimingEnabled) {
+            const auto drawEnd = std::chrono::steady_clock::now();
+            const auto elapsed = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                drawEnd - drawStart).count());
+            drawIssueNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                drawEnd - drawIssueStart).count());
+            perfDevice->recordCommandHotPathAnalysis(0, 0, 1, elapsed);
+            perfDevice->recordDrawPhaseAnalysis(drawPendingBufferNs, drawDescriptorFlushNs, drawIssueNs);
+        }
+    };
+#endif
+
+#if CC_D3D12_PERF_COUNTERS
+    if (perfTimingEnabled) {
+        drawPhaseStart = std::chrono::steady_clock::now();
+    }
+#endif
+    if (_type == CommandBufferType::PRIMARY) {
+        CCD3D12Device::getInstance()->flushPendingBufferUpdates(this);
+    }
+#if CC_D3D12_PERF_COUNTERS
+    if (perfTimingEnabled) {
+        const auto phaseEnd = std::chrono::steady_clock::now();
+        drawPendingBufferNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            phaseEnd - drawPhaseStart).count());
+        drawPhaseStart = phaseEnd;
+    }
+#endif
 
     // Flush any pending descriptor set bindings before drawing
     flushDescriptorSets();
+#if CC_D3D12_PERF_COUNTERS
+    if (perfTimingEnabled) {
+        const auto phaseEnd = std::chrono::steady_clock::now();
+        drawDescriptorFlushNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            phaseEnd - drawPhaseStart).count());
+        drawIssueStart = phaseEnd;
+    }
+#endif
 
     const uint32_t instanceCount = std::max<uint32_t>(info.instanceCount, 1);
     const uint32_t firstInstance = info.firstInstance;
+#if CC_D3D12_PERF_COUNTERS
+    const auto recordPerfDrawSequence = [&](bool indexed, bool indirect,
+                                            ID3D12CommandSignature *signature = nullptr,
+                                            ID3D12Resource *argumentBuffer = nullptr) {
+        if (!perfTimingEnabled) {
+            return;
+        }
+        _impl->appendPerfDrawSequenceEvent(
+            Impl::PERF_DRAW_EVENT_STATE, 0,
+            reinterpret_cast<uintptr_t>(_impl->boundNativePipelineState),
+            reinterpret_cast<uintptr_t>(_impl->boundRootSignature),
+            reinterpret_cast<uintptr_t>(_impl->boundCbvSrvUavHeap),
+            reinterpret_cast<uintptr_t>(_impl->boundSamplerHeap),
+            static_cast<uint64_t>(_impl->boundPrimitiveTopology),
+            _impl->boundVertexBufferCount);
+        for (uint32_t i = 0; i < _impl->boundVertexBufferCount; ++i) {
+            const auto &view = _impl->boundVertexBufferViews[i];
+            _impl->appendPerfDrawSequenceEvent(
+                Impl::PERF_DRAW_EVENT_VERTEX_BUFFER, i,
+                view.BufferLocation, view.SizeInBytes, view.StrideInBytes);
+        }
+        _impl->appendPerfDrawSequenceEvent(
+            Impl::PERF_DRAW_EVENT_INDEX_BUFFER, _impl->boundHasIndexBuffer ? 1U : 0U,
+            _impl->boundIndexBufferView.BufferLocation,
+            _impl->boundIndexBufferView.SizeInBytes,
+            static_cast<uint64_t>(_impl->boundIndexBufferView.Format));
+        const uint32_t flags = (indexed ? 1U : 0U) | (indirect ? 2U : 0U);
+        if (indirect) {
+            _impl->appendPerfDrawSequenceEvent(
+                Impl::PERF_DRAW_EVENT_ARGUMENTS, flags,
+                reinterpret_cast<uintptr_t>(signature),
+                reinterpret_cast<uintptr_t>(argumentBuffer), 1, 0, 0, 0);
+        } else if (indexed) {
+            _impl->appendPerfDrawSequenceEvent(
+                Impl::PERF_DRAW_EVENT_ARGUMENTS, flags,
+                info.indexCount, instanceCount, info.firstIndex,
+                static_cast<uint64_t>(static_cast<int64_t>(info.vertexOffset)), firstInstance);
+        } else {
+            _impl->appendPerfDrawSequenceEvent(
+                Impl::PERF_DRAW_EVENT_ARGUMENTS, flags,
+                info.vertexCount, instanceCount, info.firstVertex, firstInstance);
+        }
+    };
+#endif
     // Check for indirect draw via InputAssembler's indirect buffer
     if (_impl->boundIA) {
         auto *ia = static_cast<CCD3D12InputAssembler *>(_impl->boundIA);
@@ -2017,20 +3666,29 @@ void CCD3D12CommandBuffer::draw(const DrawInfo &info) {
             auto *d3d12Buf = static_cast<CCD3D12Buffer *>(indirectBuf);
             ID3D12Resource *resource = static_cast<ID3D12Resource *>(d3d12Buf->getD3D12ResourceHandle());
             if (resource) {
-                retainCommandListResource(_impl->pendingUploadResources, resource);
+                retainCommandListResource(_impl->pendingUploadResources, _impl->pendingUploadResourceSet, resource);
                 auto *device = CCD3D12Device::getInstance();
                 if (info.indexCount > 0) {
                     auto *sig = static_cast<ID3D12CommandSignature *>(device->getDrawIndexedIndirectSignature());
                     if (sig) {
+#if CC_D3D12_PERF_COUNTERS
+                        recordPerfDrawSequence(true, true, sig, resource);
+#endif
                         _impl->commandList->ExecuteIndirect(sig, 1, resource, 0, nullptr, 0);
                     }
                 } else {
                     auto *sig = static_cast<ID3D12CommandSignature *>(device->getDrawIndirectSignature());
                     if (sig) {
+#if CC_D3D12_PERF_COUNTERS
+                        recordPerfDrawSequence(false, true, sig, resource);
+#endif
                         _impl->commandList->ExecuteIndirect(sig, 1, resource, 0, nullptr, 0);
                     }
                 }
                 ++_numDrawCalls;
+#if CC_D3D12_PERF_COUNTERS
+                recordDrawTiming();
+#endif
                 return;
             }
         }
@@ -2038,6 +3696,9 @@ void CCD3D12CommandBuffer::draw(const DrawInfo &info) {
 
     if (info.indexCount > 0) {
         // Indexed draw
+#if CC_D3D12_PERF_COUNTERS
+        recordPerfDrawSequence(true, false);
+#endif
         _impl->commandList->DrawIndexedInstanced(
             info.indexCount,
             instanceCount,
@@ -2046,6 +3707,9 @@ void CCD3D12CommandBuffer::draw(const DrawInfo &info) {
             firstInstance);
     } else {
         // Non-indexed draw
+#if CC_D3D12_PERF_COUNTERS
+        recordPerfDrawSequence(false, false);
+#endif
         _impl->commandList->DrawInstanced(
             info.vertexCount,
             instanceCount,
@@ -2056,6 +3720,9 @@ void CCD3D12CommandBuffer::draw(const DrawInfo &info) {
     ++_numDrawCalls;
     _numInstances += instanceCount;
     _numTriangles += info.indexCount > 0 ? (info.indexCount / 3) * instanceCount : (info.vertexCount / 3) * instanceCount;
+#if CC_D3D12_PERF_COUNTERS
+    recordDrawTiming();
+#endif
 }
 
 void CCD3D12CommandBuffer::updateBuffer(Buffer *buff, const void *data, uint32_t size) {
@@ -2069,18 +3736,108 @@ void CCD3D12CommandBuffer::updateBuffer(Buffer *buff, const void *data, uint32_t
     // buffers, are updated through a GPU copy so descriptors keep stable backing.
     auto *resource = static_cast<ID3D12Resource *>(d3d12Buffer->getD3D12ResourceHandle());
     if (!resource) return;
-    retainCommandListResource(_impl->pendingUploadResources, resource);
+#if CC_D3D12_PERF_COUNTERS
+    size_t retainedResourceCountBefore = 0;
+    std::chrono::steady_clock::time_point retentionStart{};
+    if (_impl->perfUniqueBatchRetentionEnabled) {
+        retainedResourceCountBefore = _impl->pendingUploadResources.size();
+        retentionStart = std::chrono::steady_clock::now();
+    }
+#endif
+    if (_impl->bufferUpdateBatchActive && _impl->bufferUpdateBatchDestinationsAreUnique) {
+        // The proof is batch-local, so this resource may already be retained by
+        // another path. An extra owning reference is safe and avoids a set lookup.
+        Microsoft::WRL::ComPtr<ID3D12Resource> retained;
+        retained = resource;
+        _impl->pendingUploadResources.push_back(std::move(retained));
+    } else {
+        retainCommandListResource(_impl->pendingUploadResources, _impl->pendingUploadResourceSet, resource);
+    }
+#if CC_D3D12_PERF_COUNTERS
+    if (_impl->perfUniqueBatchRetentionEnabled) {
+        const auto retentionNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - retentionStart).count());
+        ++_impl->perfUniqueBatchRetentionCalls;
+        _impl->perfUniqueBatchRetentionInsertions +=
+            _impl->pendingUploadResources.size() > retainedResourceCountBefore ? 1ULL : 0ULL;
+        _impl->perfUniqueBatchRetentionNs += retentionNs;
+    }
+#endif
 
     if (!d3d12Buffer->isD3D12UploadHeap()) {
         auto *device = CCD3D12Device::getInstance();
+#if CC_D3D12_PERF_COUNTERS
+        const bool perfTimingEnabled = device && device->isPerfLoggingEnabled();
+        const auto defaultBufferUploadStart = perfTimingEnabled
+                                                  ? std::chrono::steady_clock::now()
+                                                  : std::chrono::steady_clock::time_point{};
+        const auto uploadAllocationStart = defaultBufferUploadStart;
+#endif
         auto upload = device ? device->allocateUploadBuffer(copySize, 256) : D3D12UploadAllocation{};
+#if CC_D3D12_PERF_COUNTERS
+        if (device && perfTimingEnabled) {
+            const auto allocationNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - uploadAllocationStart).count());
+            device->recordUploadAllocationTiming(allocationNs);
+        }
+#endif
         if (!upload.isValid || !upload.mappedData || !upload.resource) {
             return;
         }
         std::memcpy(upload.mappedData, data, copySize);
+#if CC_D3D12_PERF_COUNTERS
+        if (device) {
+            device->recordDefaultBufferUpload(
+                resource,
+                d3d12Buffer->getD3D12ResourceOffset(),
+                copySize,
+                hasFlag(buff->getUsage(), BufferUsageBit::UNIFORM),
+                hasFlag(buff->getMemUsage(), MemoryUsageBit::HOST),
+                buff->isBufferView(),
+                d3d12Buffer->isDynamicUniformOnly());
+        }
+#endif
 
         const auto previousState = d3d12Buffer->getCurrentState();
-        if (previousState != D3D12_RESOURCE_STATE_COPY_DEST) {
+        if (_impl->bufferUpdateBatchActive) {
+            uint32_t transitionIndex = 0;
+            if (_impl->bufferUpdateBatchDestinationsAreUnique) {
+                transitionIndex = static_cast<uint32_t>(_impl->pendingDefaultBufferTransitions.size());
+                _impl->pendingDefaultBufferTransitions.push_back({resource, previousState});
+            } else {
+                const auto nextTransitionIndex = static_cast<uint32_t>(_impl->pendingDefaultBufferTransitions.size());
+                const auto [transitionIt, inserted] =
+                    _impl->pendingDefaultBufferTransitionIndices.try_emplace(resource, nextTransitionIndex);
+                transitionIndex = transitionIt->second;
+                if (inserted) {
+                    _impl->pendingDefaultBufferTransitions.push_back({resource, previousState});
+                } else {
+                    ++_impl->pendingDefaultBufferTransitions[transitionIndex].copyCount;
+                }
+            }
+            _impl->pendingDefaultBufferCopies.push_back({
+                d3d12Buffer,
+                resource,
+                d3d12Buffer->getD3D12ResourceOffset(),
+                static_cast<ID3D12Resource *>(upload.resource),
+                upload.offset,
+                copySize,
+                transitionIndex,
+            });
+#if CC_D3D12_PERF_COUNTERS
+            if (device && perfTimingEnabled) {
+                const auto uploadNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - defaultBufferUploadStart).count());
+                device->recordHotPathTimings(0, 0, uploadNs, 0, 0, 0);
+            }
+#endif
+            return;
+        }
+
+        // Completed D3D12 buffer submissions decay to COMMON. The first COPY_DEST
+        // access can then use free implicit promotion instead of an explicit barrier.
+        if (previousState != D3D12_RESOURCE_STATE_COPY_DEST &&
+            previousState != D3D12_RESOURCE_STATE_COMMON) {
             D3D12_RESOURCE_BARRIER toCopyDest{};
             toCopyDest.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
             toCopyDest.Transition.pResource = resource;
@@ -2109,6 +3866,13 @@ void CCD3D12CommandBuffer::updateBuffer(Buffer *buff, const void *data, uint32_t
         recordD3D12ResourceBarriers(1);
 #endif
         d3d12Buffer->setCurrentState(D3D12_RESOURCE_STATE_GENERIC_READ);
+#if CC_D3D12_PERF_COUNTERS
+        if (device && perfTimingEnabled) {
+            const auto uploadNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - defaultBufferUploadStart).count());
+            device->recordHotPathTimings(0, 0, uploadNs, 0, 0, 0);
+        }
+#endif
         return;
     }
 
@@ -2133,7 +3897,7 @@ void CCD3D12CommandBuffer::copyBuffersToTexture(const uint8_t *const *buffers, T
     auto *d3d12Texture = static_cast<CCD3D12Texture *>(texture);
     auto *textureResource = static_cast<ID3D12Resource *>(d3d12Texture->getD3D12ResourceHandle());
     if (!textureResource) return;
-    retainCommandListResource(_impl->pendingUploadResources, textureResource);
+    retainCommandListResource(_impl->pendingUploadResources, _impl->pendingUploadResourceSet, textureResource);
 
     auto *device = CCD3D12Device::getInstance();
     if (!device) return;
@@ -2244,9 +4008,9 @@ void CCD3D12CommandBuffer::copyBuffersToTexture(const uint8_t *const *buffers, T
                 recordD3D12ResourceBarriers(1);
 #endif
             }
-            if (_impl->pendingSetCount > 0) {
-                _impl->descriptorSetsDirty = true;
-            }
+            // Mipmap generation uses its own PSO, root signature, heaps,
+            // viewport and scissor on this command list.
+            invalidateGraphicsState();
             d3d12Texture->setCurrentState(postCopyState);
             return;
         }
@@ -2283,14 +4047,15 @@ void CCD3D12CommandBuffer::blitTexture(Texture *srcTexture, Texture *dstTexture,
     auto *srcResource = static_cast<ID3D12Resource *>(srcD3D12->getD3D12ResourceHandle());
     auto *dstResource = static_cast<ID3D12Resource *>(dstD3D12->getD3D12ResourceHandle());
     if (!srcResource || !dstResource) return;
-    retainCommandListResource(_impl->pendingUploadResources, srcResource);
-    retainCommandListResource(_impl->pendingUploadResources, dstResource);
+    retainCommandListResource(_impl->pendingUploadResources, _impl->pendingUploadResourceSet, srcResource);
+    retainCommandListResource(_impl->pendingUploadResources, _impl->pendingUploadResourceSet, dstResource);
 
     const auto &srcInfo = srcTexture->getInfo();
     const auto &dstInfo = dstTexture->getInfo();
 
     D3D12_RESOURCE_STATES srcState = srcD3D12->getCurrentState();
     D3D12_RESOURCE_STATES dstState = dstD3D12->getCurrentState();
+    bool graphicsStateClobbered = false;
     auto transitionIfNeeded = [&](ID3D12Resource *resource, D3D12_RESOURCE_STATES &currentState, D3D12_RESOURCE_STATES nextState) {
         if (currentState == nextState) return;
         D3D12_RESOURCE_BARRIER barrier{};
@@ -2327,6 +4092,7 @@ void CCD3D12CommandBuffer::blitTexture(Texture *srcTexture, Texture *dstTexture,
             transitionIfNeeded(srcResource, srcState,
                                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             transitionIfNeeded(dstResource, dstState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            graphicsStateClobbered = true;
             for (uint32_t layer = 0; layer < layerCount; ++layer) {
                 const uint32_t srcLayer = region.srcSubres.baseArrayLayer + layer;
                 const uint32_t dstLayer = region.dstSubres.baseArrayLayer + layer;
@@ -2380,7 +4146,11 @@ void CCD3D12CommandBuffer::blitTexture(Texture *srcTexture, Texture *dstTexture,
     srcD3D12->setCurrentState(srcPostState);
     dstD3D12->setCurrentState(dstPostState);
 
-    if (_impl->pendingSetCount > 0) {
+    if (graphicsStateClobbered) {
+        // Shader blits bind their own heaps, root signature, viewport,
+        // scissor, PSO, and topology on this command list.
+        invalidateGraphicsState();
+    } else if (_impl->pendingSetCount > 0) {
         _impl->descriptorSetsDirty = true;
     }
 }
@@ -2400,8 +4170,8 @@ void CCD3D12CommandBuffer::copyTexture(Texture *srcTexture, Texture *dstTexture,
         CC_LOG_WARNING("[D3D12] copyTexture: null resource (src=%p dst=%p)", srcResource, dstResource);
         return;
     }
-    retainCommandListResource(_impl->pendingUploadResources, srcResource);
-    retainCommandListResource(_impl->pendingUploadResources, dstResource);
+    retainCommandListResource(_impl->pendingUploadResources, _impl->pendingUploadResourceSet, srcResource);
+    retainCommandListResource(_impl->pendingUploadResources, _impl->pendingUploadResourceSet, dstResource);
 
     const auto &srcInfo = srcTexture->getInfo();
     const auto &dstInfo = dstTexture->getInfo();
@@ -2532,8 +4302,8 @@ void CCD3D12CommandBuffer::resolveTexture(Texture *srcTexture, Texture *dstTextu
     auto *srcResource = static_cast<ID3D12Resource *>(srcD3D12->getD3D12ResourceHandle());
     auto *dstResource = static_cast<ID3D12Resource *>(dstD3D12->getD3D12ResourceHandle());
     if (!srcResource || !dstResource) return;
-    retainCommandListResource(_impl->pendingUploadResources, srcResource);
-    retainCommandListResource(_impl->pendingUploadResources, dstResource);
+    retainCommandListResource(_impl->pendingUploadResources, _impl->pendingUploadResourceSet, srcResource);
+    retainCommandListResource(_impl->pendingUploadResources, _impl->pendingUploadResourceSet, dstResource);
 
     const auto &srcInfo = srcTexture->getInfo();
     const auto &dstInfo = dstTexture->getInfo();
@@ -2650,6 +4420,7 @@ void CCD3D12CommandBuffer::dispatch(const DispatchInfo &info) {
         CC_LOG_ERROR("D3D12 bundle cannot dispatch compute work.");
         return;
     }
+    CCD3D12Device::getInstance()->flushPendingBufferUpdates(this);
     // Flush any pending descriptor set bindings before dispatching
     flushDescriptorSets();
 
@@ -2747,6 +4518,10 @@ void CCD3D12CommandBuffer::pipelineBarrier(const GeneralBarrier *barrier, const 
     };
 
     ccstd::vector<D3D12_RESOURCE_BARRIER> barriers;
+    uint32_t textureTransitions = 0;
+    uint32_t bufferTransitions = 0;
+    uint32_t uavBarriers = 0;
+    uint32_t trackedAlreadyNext = 0;
 
     // Process texture barriers
     for (uint32_t i = 0; i < textureBarrierCount; ++i) {
@@ -2800,6 +4575,7 @@ void CCD3D12CommandBuffer::pipelineBarrier(const GeneralBarrier *barrier, const 
             b.Transition.StateBefore = prevState;
             b.Transition.StateAfter = nextState;
             barriers.push_back(b);
+            ++textureTransitions;
         } else {
             for (uint32_t plane = 0; plane < planeCount; ++plane) {
                 for (uint32_t slice = 0; slice < sliceCount; ++slice) {
@@ -2814,6 +4590,7 @@ void CCD3D12CommandBuffer::pipelineBarrier(const GeneralBarrier *barrier, const 
                         b.Transition.StateBefore = prevState;
                         b.Transition.StateAfter = nextState;
                         barriers.push_back(b);
+                        ++textureTransitions;
                     }
                 }
             }
@@ -2844,12 +4621,18 @@ void CCD3D12CommandBuffer::pipelineBarrier(const GeneralBarrier *barrier, const 
 
         D3D12_RESOURCE_STATES prevState = accessFlagsToD3D12State(bufBarrierInfo.prevAccesses);
         D3D12_RESOURCE_STATES nextState = accessFlagsToD3D12State(bufBarrierInfo.nextAccesses);
+        const D3D12_RESOURCE_STATES trackedState = d3d12Buffer->getCurrentState();
 
         if (bufBarrierInfo.prevAccesses == AccessFlagBit::NONE) {
-            prevState = d3d12Buffer->getCurrentState();
+            prevState = trackedState;
         }
 
         const bool needsTransition = prevState != nextState;
+        const bool trackedAlreadyInNextState = bufBarrierInfo.prevAccesses != AccessFlagBit::NONE &&
+                                               needsTransition && trackedState == nextState;
+        if (trackedAlreadyInNextState) {
+            ++trackedAlreadyNext;
+        }
         if (needsTransition) {
             D3D12_RESOURCE_BARRIER b{};
             b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -2859,6 +4642,7 @@ void CCD3D12CommandBuffer::pipelineBarrier(const GeneralBarrier *barrier, const 
             b.Transition.StateBefore = prevState;
             b.Transition.StateAfter = nextState;
             barriers.push_back(b);
+            ++bufferTransitions;
             d3d12Buffer->setCurrentState(nextState);
         }
 
@@ -2873,6 +4657,7 @@ void CCD3D12CommandBuffer::pipelineBarrier(const GeneralBarrier *barrier, const 
             b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
             b.UAV.pResource = resource;
             barriers.push_back(b);
+            ++uavBarriers;
         }
     }
 
@@ -2885,8 +4670,13 @@ void CCD3D12CommandBuffer::pipelineBarrier(const GeneralBarrier *barrier, const 
             b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
             b.UAV.pResource = nullptr;
             barriers.push_back(b);
+            ++uavBarriers;
         }
     }
+
+#if CC_D3D12_PERF_COUNTERS
+    recordBarrierAnalysis(textureTransitions, bufferTransitions, uavBarriers, trackedAlreadyNext);
+#endif
 
     if (!barriers.empty()) {
         _impl->commandList->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());

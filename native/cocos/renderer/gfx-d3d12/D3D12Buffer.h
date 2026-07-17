@@ -32,6 +32,8 @@
 namespace cc {
 namespace gfx {
 
+class CCD3D12CommandBuffer;
+
 class CC_DLL CCD3D12Buffer final : public Buffer {
 public:
     CCD3D12Buffer();
@@ -41,10 +43,20 @@ public:
 
     void *getD3D12ResourceHandle() const;
     uint64_t getD3D12GPUVirtualAddress() const;
+    uint64_t getD3D12UniformGPUVirtualAddress() const;
+    uint64_t getUniformDescriptorVersion() const;
+    uint32_t getD3D12ConstantBufferSize() const;
+    uint32_t getPendingTransientUniformUploadSize() const;
+    bool flushTransientUniformUpload(void *resource, void *mappedData,
+                                     uint64_t gpuAddress, uint64_t epoch);
+    bool ensureTransientUniformUpload();
     uint32_t getD3D12ResourceOffset() const;
     bool isD3D12UploadHeap() const;
+    void markUniformDescriptorBinding(bool dynamic);
+    bool isDynamicUniformOnly() const;
     D3D12_RESOURCE_STATES getCurrentState() const;
     void setCurrentState(D3D12_RESOURCE_STATES state);
+    void flushPendingUpdate(CCD3D12CommandBuffer *commandBuffer);
 
 protected:
     void doInit(const BufferInfo &info) override;
@@ -54,6 +66,8 @@ protected:
 
 private:
     bool createResource(uint32_t size);
+    bool isTransientUniformEligible() const;
+    bool canUseTransientUniformUpload() const;
 
     struct Impl;
     std::unique_ptr<Impl> _impl;

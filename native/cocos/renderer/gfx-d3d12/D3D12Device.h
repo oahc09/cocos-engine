@@ -29,8 +29,10 @@
 #include <memory>
 #include <vector>
 
+// Detailed hot-path counters add measurable overhead in Debug builds. Define
+// CC_D3D12_PERF_COUNTERS=1 explicitly for a diagnostic build when needed.
 #ifndef CC_D3D12_PERF_COUNTERS
-    #define CC_D3D12_PERF_COUNTERS 1
+#define CC_D3D12_PERF_COUNTERS 0
 #endif
 
 namespace cc {
@@ -41,6 +43,8 @@ class D3D12DescriptorHeapPool;
 class CCD3D12Queue;
 class CCD3D12Swapchain;
 class CCD3D12Texture;
+class CCD3D12Buffer;
+class CCD3D12CommandBuffer;
 
 struct D3D12UploadAllocation {
     void *resource{nullptr};
@@ -101,17 +105,73 @@ public:
     void *getDrawIndirectSignature() const;
     void *getDrawIndexedIndirectSignature() const;
     void *getDispatchIndirectSignature() const;
+    uint64_t getBufferStateEpoch() const;
+    uint64_t getTransientUniformUploadGeneration() const;
+    void notifyTransientUniformUpload();
+    bool isPerfLoggingEnabled() const;
     D3D12UploadAllocation allocateUploadBuffer(uint64_t size, uint64_t alignment);
+    void enqueueBufferUpdate(CCD3D12Buffer *buffer);
+    void discardPendingBufferUpdate(CCD3D12Buffer *buffer);
+    void flushPendingBufferUpdates(CCD3D12CommandBuffer *commandBuffer);
     void notifySubmittedFence(void *fence, uint64_t value);
+    void waitForSubmittedFence();
     void retireFrameResources();
     bool isSwapchainBackBuffer(void *resource) const;
     bool loadShaderCacheValue(const void *key, uint32_t keySize, std::vector<uint8_t> &outValue) const;
     bool storeShaderCacheValue(const void *key, uint32_t keySize, const std::vector<uint8_t> &value) const;
     void recordDescriptorFlush(uint32_t copyCalls, uint32_t copiedDescriptors,
                                uint32_t dynamicOffsetRewrites, uint32_t dynamicOffsetDescriptors,
+                               uint32_t dynamicCbvTableDescriptors,
                                uint32_t setDescriptorHeapCalls, uint32_t rootDescriptorTableBinds);
     void recordDescriptorStateBinds(uint32_t setDescriptorHeapCalls, uint32_t rootDescriptorTableBinds);
+    void recordDescriptorCacheAnalysis(uint32_t cacheHits, uint32_t cacheMisses,
+                                       uint32_t repackPasses, uint32_t repackDescriptors);
+    void recordDescriptorBindingAnalysis(uint32_t slotLookups, uint32_t slotOwnerChanges,
+                                         uint64_t fullFlushNs, uint64_t bindingBuildNs,
+                                         uint64_t probeNs, uint64_t setUpdateNs);
+    void recordDescriptorPostPhaseAnalysis(uint64_t descriptorRangePrepareNs,
+                                           uint64_t descriptorHeapNormalizeNs,
+                                           uint64_t descriptorHeapRootNs);
+    void recordDescriptorRangePhaseAnalysis(uint64_t descriptorCbvPrepareNs,
+                                            uint64_t descriptorSamplerPrepareNs);
+    void recordDescriptorTypeAnalysis(uint32_t cbvCacheHits, uint32_t samplerCacheHits,
+                                      uint32_t cbvCacheMisses, uint32_t samplerCacheMisses,
+                                      uint32_t cbvCopiedDescriptors, uint32_t samplerCopiedDescriptors,
+                                      uint32_t cbvRepackPasses, uint32_t samplerRepackPasses,
+                                      uint32_t cbvHeapChanges, uint32_t samplerHeapChanges);
+    void recordSamplerTableAnalysis(uint32_t lookups, uint32_t uniqueTables,
+                                    uint32_t uniqueDescriptors, uint32_t duplicateTableHits,
+                                    uint32_t signatureHashCollisions,
+                                    uint32_t consecutiveExactHits);
     void recordResourceBarriers(uint32_t barrierCount);
+    void recordBarrierAnalysis(uint32_t textureTransitions, uint32_t bufferTransitions,
+                               uint32_t uavBarriers, uint32_t trackedAlreadyNext);
+    void recordDefaultBufferUpload(void *resource, uint32_t offset, uint32_t size,
+                                   bool uniform, bool hostVisible, bool bufferView, bool dynamicOnly);
+    void recordHotPathTimings(uint64_t descriptorFlushNs, uint64_t descriptorCopyNs,
+                              uint64_t defaultBufferUploadNs, uint64_t dynamicOffsetNs,
+                              uint64_t descriptorAllocateNs, uint64_t rootTableBindNs);
+    void recordPendingBufferDrainTiming(uint64_t drainNs);
+    void recordUniqueBatchRetentionTiming(uint64_t calls, uint64_t insertions, uint64_t retentionNs);
+    void recordUploadAllocationTiming(uint64_t allocationNs);
+    void recordBufferBatchPhaseTimings(uint64_t totalNs, uint64_t buildNs, uint64_t barrierNs,
+                                       uint64_t copyNs, uint64_t stateNs,
+                                       uint64_t fallbackNs);
+    void recordGraphicsBindAnalysis(uint32_t pipelineBindCalls, uint32_t pipelineSameLogical,
+                                    uint32_t pipelineNativeChanges, uint32_t inputAssemblerBindCalls,
+                                    uint32_t inputAssemblerSameLogical, uint32_t vertexBufferViewChanges,
+                                    uint32_t indexBufferViewChanges, uint64_t pipelineBindNs,
+                                    uint64_t inputAssemblerBindNs);
+    void recordCommandHotPathAnalysis(uint32_t bindDescriptorSetCalls, uint64_t bindDescriptorSetNs,
+                                      uint32_t drawCalls, uint64_t drawNs);
+    void recordDrawPhaseAnalysis(uint64_t drawPendingBufferNs, uint64_t drawDescriptorFlushNs,
+                                 uint64_t drawIssueNs);
+    void recordCommandReuseAnalysis(uint32_t eventCount, bool hadPrevious,
+                                    bool exactMatch, uint32_t firstMismatchIndex);
+    void recordFramePhaseAnalysis(uint64_t commandBeginNs, uint64_t commandRecordingNs,
+                                  uint64_t commandEndNs, uint64_t queueSubmitNs,
+                                  uint64_t queueExecuteNs, uint64_t queueSignalNs,
+                                  uint64_t acquireNs, uint64_t presentNs);
     void recordFenceWait(uint64_t waitMicroseconds);
 
 protected:
@@ -155,6 +215,7 @@ protected:
     void initFormatFeatures();
     void initCapabilities();
     void waitForGpu();
+    void advanceBufferStateEpoch();
     void reportAndResetFramePerfCounters();
 
     struct Impl;

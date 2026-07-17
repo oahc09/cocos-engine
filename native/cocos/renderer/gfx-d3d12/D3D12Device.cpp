@@ -47,6 +47,7 @@
 #include <algorithm>
 #include <cstring>
 #include <mutex>
+#include <unordered_set>
 #include <windows.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
@@ -59,6 +60,28 @@ CCD3D12Device *CCD3D12Device::instance = nullptr;
 
 namespace {
 constexpr float D3D12_POC_CLEAR_COLOR[4] = {0.1F, 0.2F, 0.8F, 1.0F};
+
+bool isEnvironmentFlagEnabled(const char *name) {
+    char value[16]{};
+    const DWORD length = GetEnvironmentVariableA(
+        name, value, static_cast<DWORD>(sizeof(value)));
+    if (length == 0 || length >= sizeof(value)) {
+        return false;
+    }
+    return std::strcmp(value, "1") == 0 ||
+           _stricmp(value, "true") == 0 ||
+           _stricmp(value, "on") == 0;
+}
+
+bool isD3D12DebugLayerRequested() {
+    return isEnvironmentFlagEnabled("CC_D3D12_DEBUG_LAYER");
+}
+
+bool isD3D12PerfLoggingRequested() {
+    // This is queried from several hot paths, so resolve it once per process.
+    static const bool requested = isEnvironmentFlagEnabled("CC_D3D12_PERF_LOG");
+    return requested;
+}
 
 #if defined(__ID3D12Device9_INTERFACE_DEFINED__) && defined(__ID3D12ShaderCacheSession_INTERFACE_DEFINED__)
 constexpr GUID D3D12_COCOS_DXBC_SHADER_CACHE_GUID = {
@@ -104,6 +127,7 @@ void copyReadbackToBuffer(const uint8_t *mappedData, const D3D12_PLACED_SUBRESOU
 } // namespace
 
 struct CCD3D12Device::Impl {
+    static constexpr uint32_t MAX_FRAMES_IN_BATCH{2};
     Microsoft::WRL::ComPtr<IDXGIFactory6> dxgiFactory;
     Microsoft::WRL::ComPtr<ID3D12Device> d3dDevice;
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> graphicsQueue;
@@ -117,6 +141,9 @@ struct CCD3D12Device::Impl {
     Microsoft::WRL::ComPtr<ID3D12Fence> lastSubmittedFence;
     uint64_t lastSubmittedFenceValue{0};
     uint64_t lastRetiredFenceValue{0};
+    uint64_t bufferStateEpoch{1};
+    uint64_t transientUniformUploadGeneration{1};
+    uint32_t framesInCurrentBatch{0};
 
     // GPU-visible descriptor heap pools for shader access
     std::unique_ptr<D3D12DescriptorHeapPool> gpuDescriptorHeapPool;    // CBV_SRV_UAV, shaderVisible
@@ -132,6 +159,10 @@ struct CCD3D12Device::Impl {
         uint64_t offset{0};
     };
     ccstd::vector<UploadPage> uploadPages;
+    // Non-owning actors: Validator owns backend resources with raw pointers,
+    // so intrusive ownership here would delete an actor when the queue drains.
+    // CCD3D12Buffer::doDestroy unregisters itself before releasing resources.
+    ccstd::vector<CCD3D12Buffer *> pendingBufferUpdates;
 
     struct PendingUploadCommandContext {
         Microsoft::WRL::ComPtr<ID3D12CommandAllocator> commandAllocator;
@@ -172,14 +203,109 @@ struct CCD3D12Device::Impl {
         uint64_t copiedDescriptors{0};
         uint64_t dynamicOffsetRewrites{0};
         uint64_t dynamicOffsetDescriptors{0};
+        uint64_t dynamicCbvTableDescriptors{0};
         uint64_t setDescriptorHeapCalls{0};
         uint64_t rootDescriptorTableBinds{0};
+        uint64_t descriptorCacheHits{0};
+        uint64_t descriptorCacheMisses{0};
+        uint64_t descriptorRepackPasses{0};
+        uint64_t descriptorRepackDescriptors{0};
+        uint64_t descriptorCacheSlotLookups{0};
+        uint64_t descriptorCacheSlotOwnerChanges{0};
+        uint64_t descriptorFullFlushNs{0};
+        uint64_t descriptorBindingBuildNs{0};
+        uint64_t descriptorCacheProbeNs{0};
+        uint64_t descriptorSetUpdateNs{0};
+        uint64_t cbvCacheHits{0};
+        uint64_t samplerCacheHits{0};
+        uint64_t cbvCacheMisses{0};
+        uint64_t samplerCacheMisses{0};
+        uint64_t cbvCopiedDescriptors{0};
+        uint64_t samplerCopiedDescriptors{0};
+        uint64_t cbvRepackPasses{0};
+        uint64_t samplerRepackPasses{0};
+        uint64_t cbvHeapChanges{0};
+        uint64_t samplerHeapChanges{0};
+        uint64_t samplerTableLookups{0};
+        uint64_t samplerUniqueTables{0};
+        uint64_t samplerUniqueDescriptors{0};
+        uint64_t samplerDuplicateTableHits{0};
+        uint64_t samplerSignatureHashCollisions{0};
+        uint64_t samplerConsecutiveExactHits{0};
         uint64_t resourceBarrierCalls{0};
         uint64_t resourceBarriers{0};
+        uint64_t barrierTextureTransitions{0};
+        uint64_t barrierBufferTransitions{0};
+        uint64_t barrierUAV{0};
+        uint64_t barrierTrackedAlreadyNext{0};
+        uint64_t defaultBufferCopies{0};
+        uint64_t defaultBufferBytes{0};
+        uint64_t defaultUniformCopies{0};
+        uint64_t defaultHostCopies{0};
+        uint64_t defaultBufferViewCopies{0};
+        uint64_t defaultDynamicOnlyCopies{0};
+        uint64_t defaultRepeatedDestinations{0};
+        uint64_t pendingBufferDrains{0};
+        uint64_t pendingBuffersDrained{0};
+        uint64_t maxPendingBufferBatch{0};
+        uint64_t pendingBufferDrainNs{0};
+        uint64_t pendingBufferEnqueues{0};
+        uint64_t pendingBufferQueueGrowths{0};
+        uint64_t pendingBufferQueueGrowthNs{0};
+        uint64_t uniqueBatchRetainCalls{0};
+        uint64_t uniqueBatchRetainInsertions{0};
+        uint64_t uniqueBatchRetainNs{0};
+        uint64_t uploadAllocateNs{0};
+        uint64_t bufferBatchTotalNs{0};
+        uint64_t bufferBatchBuildNs{0};
+        uint64_t bufferBatchBarrierNs{0};
+        uint64_t bufferBatchCopyNs{0};
+        uint64_t bufferBatchStateNs{0};
+        uint64_t bufferBatchFallbackNs{0};
+        uint64_t descriptorFlushNs{0};
+        uint64_t descriptorCopyNs{0};
+        uint64_t defaultBufferUploadNs{0};
+        uint64_t dynamicOffsetNs{0};
+        uint64_t descriptorAllocateNs{0};
+        uint64_t rootTableBindNs{0};
+        uint64_t descriptorRangePrepareNs{0};
+        uint64_t descriptorHeapNormalizeNs{0};
+        uint64_t descriptorHeapRootNs{0};
+        uint64_t descriptorCbvPrepareNs{0};
+        uint64_t descriptorSamplerPrepareNs{0};
+        uint64_t pipelineBindCalls{0};
+        uint64_t pipelineSameLogical{0};
+        uint64_t pipelineNativeChanges{0};
+        uint64_t inputAssemblerBindCalls{0};
+        uint64_t inputAssemblerSameLogical{0};
+        uint64_t vertexBufferViewChanges{0};
+        uint64_t indexBufferViewChanges{0};
+        uint64_t pipelineBindNs{0};
+        uint64_t inputAssemblerBindNs{0};
+        uint64_t bindDescriptorSetCalls{0};
+        uint64_t bindDescriptorSetNs{0};
+        uint64_t drawCalls{0};
+        uint64_t drawNs{0};
+        uint64_t drawPendingBufferNs{0};
+        uint64_t drawDescriptorFlushNs{0};
+        uint64_t drawIssueNs{0};
+        uint64_t commandReuseEvents{0};
+        uint64_t commandReuseComparisons{0};
+        uint64_t commandReuseExactMatches{0};
+        uint32_t commandReuseFirstMismatch{std::numeric_limits<uint32_t>::max()};
+        uint64_t commandBeginNs{0};
+        uint64_t commandRecordingNs{0};
+        uint64_t commandEndNs{0};
+        uint64_t queueSubmitNs{0};
+        uint64_t queueExecuteNs{0};
+        uint64_t queueSignalNs{0};
+        uint64_t acquireNs{0};
+        uint64_t presentNs{0};
         uint64_t fenceWaits{0};
         uint64_t fenceWaitMicroseconds{0};
     };
     FramePerfCounters framePerfCounters;
+    std::unordered_set<uint64_t> perfUpdatedBufferDestinations;
     uint64_t perfFrameIndex{0};
 };
 
@@ -214,7 +340,10 @@ bool CCD3D12Device::doInit(const DeviceInfo &info) {
     // Initialize GPU-visible descriptor heap pools
     _impl->gpuDescriptorHeapPool = std::make_unique<D3D12DescriptorHeapPool>();
     _impl->gpuDescriptorHeapPool->initialize(
-        D3D12DescriptorHeapPool::HeapType::CBV_SRV_UAV, 4096, true);
+        // Keep one frame's descriptor tables in a single heap in normal scenes.
+        // Switching shader-visible heaps invalidates every descriptor table and
+        // defeats the command-buffer's per-set GPU descriptor cache.
+        D3D12DescriptorHeapPool::HeapType::CBV_SRV_UAV, 65536, true);
 
     _impl->samplerDescriptorHeapPool = std::make_unique<D3D12DescriptorHeapPool>();
     _impl->samplerDescriptorHeapPool->initialize(
@@ -329,6 +458,7 @@ void CCD3D12Device::doDestroy() {
         _impl->deferredCubeUploads.clear();
     }
     waitForGpu();
+    _impl->pendingBufferUpdates.clear();
     _impl->pendingUploadCommandContexts.clear();
     _impl->deferredCubeUploads.clear();
 
@@ -475,9 +605,18 @@ bool CCD3D12Device::storeShaderCacheValue(const void *key, uint32_t keySize, con
 }
 
 void CCD3D12Device::acquire(Swapchain *const *swapchains, uint32_t count) {
-    // Reclaim transient descriptor and upload pages only after the last queue
-    // submission fence has completed. This avoids a blocking wait in present().
-    retireFrameResources();
+#if CC_D3D12_PERF_COUNTERS
+    const auto acquireStart = std::chrono::steady_clock::now();
+#endif
+    // The descriptor/upload pools are append-only within a bounded two-frame
+    // batch. Reclaim the whole batch only after its latest fence completes, so
+    // no descriptor or upload allocation referenced by the GPU is overwritten.
+    if (_impl->framesInCurrentBatch >= Impl::MAX_FRAMES_IN_BATCH) {
+        waitForSubmittedFence();
+        retireFrameResources();
+        _impl->framesInCurrentBatch = 0;
+    }
+    ++_impl->framesInCurrentBatch;
 
     // The DeviceAgent and DeviceValidator layers unwrap their wrappers before
     // passing swapchains down to us, so the pointers here are raw CCD3D12Swapchain*.
@@ -491,6 +630,13 @@ void CCD3D12Device::acquire(Swapchain *const *swapchains, uint32_t count) {
     if (_onAcquire) {
         _onAcquire->execute();
     }
+#if CC_D3D12_PERF_COUNTERS
+    recordFramePhaseAnalysis(
+        0, 0, 0, 0, 0, 0,
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - acquireStart).count()),
+        0);
+#endif
 }
 
 CCD3D12Texture *CCD3D12Device::getDummyTexture() const {
@@ -499,6 +645,30 @@ CCD3D12Texture *CCD3D12Device::getDummyTexture() const {
 
 CCD3D12Buffer *CCD3D12Device::getDummyBuffer() const {
     return _impl ? _impl->dummyBuffer.get() : nullptr;
+}
+
+uint64_t CCD3D12Device::getBufferStateEpoch() const {
+    return _impl ? _impl->bufferStateEpoch : 0;
+}
+
+uint64_t CCD3D12Device::getTransientUniformUploadGeneration() const {
+    return _impl ? _impl->transientUniformUploadGeneration : 0;
+}
+
+void CCD3D12Device::notifyTransientUniformUpload() {
+    if (_impl) {
+        ++_impl->transientUniformUploadGeneration;
+    }
+}
+
+bool CCD3D12Device::isPerfLoggingEnabled() const {
+    return isD3D12PerfLoggingRequested();
+}
+
+void CCD3D12Device::advanceBufferStateEpoch() {
+    if (_impl) {
+        ++_impl->bufferStateEpoch;
+    }
 }
 
 D3D12UploadAllocation CCD3D12Device::allocateUploadBuffer(uint64_t size, uint64_t alignment) {
@@ -579,12 +749,150 @@ D3D12UploadAllocation CCD3D12Device::allocateUploadBuffer(uint64_t size, uint64_
     return allocation;
 }
 
+void CCD3D12Device::enqueueBufferUpdate(CCD3D12Buffer *buffer) {
+    if (!_impl || !buffer) {
+        return;
+    }
+#if CC_D3D12_PERF_COUNTERS
+    const bool perfTimingEnabled = isD3D12PerfLoggingRequested();
+    const bool queueWillGrow = _impl->pendingBufferUpdates.size() == _impl->pendingBufferUpdates.capacity();
+    const auto growthStart = perfTimingEnabled && queueWillGrow
+                                 ? std::chrono::steady_clock::now()
+                                 : std::chrono::steady_clock::time_point{};
+#endif
+    _impl->pendingBufferUpdates.emplace_back(buffer);
+#if CC_D3D12_PERF_COUNTERS
+    if (perfTimingEnabled) {
+        ++_impl->framePerfCounters.pendingBufferEnqueues;
+        if (queueWillGrow) {
+            ++_impl->framePerfCounters.pendingBufferQueueGrowths;
+            _impl->framePerfCounters.pendingBufferQueueGrowthNs += static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - growthStart).count());
+        }
+    }
+#endif
+}
+
+void CCD3D12Device::discardPendingBufferUpdate(CCD3D12Buffer *buffer) {
+    if (!_impl || !buffer) {
+        return;
+    }
+    if (!_impl->pendingBufferUpdates.empty()) {
+        _impl->pendingBufferUpdates.erase(
+            std::remove(_impl->pendingBufferUpdates.begin(), _impl->pendingBufferUpdates.end(), buffer),
+            _impl->pendingBufferUpdates.end());
+    }
+}
+
+void CCD3D12Device::flushPendingBufferUpdates(CCD3D12CommandBuffer *commandBuffer) {
+    if (!_impl || !commandBuffer || _impl->pendingBufferUpdates.empty()) {
+        return;
+    }
+
+#if CC_D3D12_PERF_COUNTERS
+    const bool perfTimingEnabled = isD3D12PerfLoggingRequested();
+    const auto drainStart = perfTimingEnabled
+                                ? std::chrono::steady_clock::now()
+                                : std::chrono::steady_clock::time_point{};
+#endif
+    // Move the queue out first so an update produced while draining is kept
+    // for the next safe point instead of being invalidated by vector growth.
+    ccstd::vector<CCD3D12Buffer *> pendingUpdates;
+    pendingUpdates.swap(_impl->pendingBufferUpdates);
+
+    uint64_t transientUniformBytes = 0;
+    for (size_t i = 0; i < pendingUpdates.size(); ++i) {
+        auto *buffer = pendingUpdates[i];
+        transientUniformBytes += buffer ? buffer->getPendingTransientUniformUploadSize() : 0;
+    }
+    const auto transientUniformAllocation = transientUniformBytes > 0
+                                                ? allocateUploadBuffer(
+                                                      transientUniformBytes,
+                                                      D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT)
+                                                : D3D12UploadAllocation{};
+    uint64_t transientUniformOffset = 0;
+#if CC_D3D12_PERF_COUNTERS
+    if (isD3D12PerfLoggingRequested()) {
+        auto &counters = _impl->framePerfCounters;
+        const auto batchSize = static_cast<uint64_t>(pendingUpdates.size());
+        ++counters.pendingBufferDrains;
+        counters.pendingBuffersDrained += batchSize;
+        counters.maxPendingBufferBatch = std::max(counters.maxPendingBufferBatch, batchSize);
+    }
+#endif
+    // updateQueued admits each Buffer actor only once. Non-view buffers own
+    // distinct D3D12 resources, so this batch cannot contain aliased targets.
+    const bool destinationsAreUnique =
+        commandBuffer->getType() == CommandBufferType::PRIMARY &&
+        std::all_of(
+            pendingUpdates.begin(), pendingUpdates.end(),
+            [](const CCD3D12Buffer *buffer) {
+                return buffer && !buffer->isBufferView();
+            });
+    commandBuffer->startBufferUpdateBatch(destinationsAreUnique);
+    for (size_t i = 0; i < pendingUpdates.size(); ++i) {
+        auto *buffer = pendingUpdates[i];
+        if (buffer) {
+            const uint32_t transientSize = buffer->getPendingTransientUniformUploadSize();
+            if (transientSize > 0 && transientUniformAllocation.isValid &&
+                buffer->flushTransientUniformUpload(
+                    transientUniformAllocation.resource,
+                    static_cast<uint8_t *>(transientUniformAllocation.mappedData) + transientUniformOffset,
+                    transientUniformAllocation.gpuAddress + transientUniformOffset,
+                    _impl->bufferStateEpoch)) {
+                transientUniformOffset += transientSize;
+                continue;
+            }
+            buffer->flushPendingUpdate(commandBuffer);
+        }
+    }
+    if (transientUniformOffset > 0) {
+        notifyTransientUniformUpload();
+    }
+    commandBuffer->finishBufferUpdateBatch();
+#if CC_D3D12_PERF_COUNTERS
+    if (perfTimingEnabled) {
+        const auto drainNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - drainStart).count());
+        recordPendingBufferDrainTiming(drainNs);
+    }
+#endif
+}
+
 void CCD3D12Device::notifySubmittedFence(void *fence, uint64_t value) {
     if (!_impl) {
         return;
     }
     _impl->lastSubmittedFence = static_cast<ID3D12Fence *>(fence);
     _impl->lastSubmittedFenceValue = value;
+}
+
+void CCD3D12Device::waitForSubmittedFence() {
+    if (!_impl || !_impl->lastSubmittedFence || _impl->lastSubmittedFenceValue == 0 || !_impl->fenceEvent) {
+        return;
+    }
+
+    if (_impl->lastSubmittedFence->GetCompletedValue() >= _impl->lastSubmittedFenceValue) {
+        return;
+    }
+
+    const HRESULT hr = _impl->lastSubmittedFence->SetEventOnCompletion(
+        _impl->lastSubmittedFenceValue, _impl->fenceEvent);
+    if (FAILED(hr)) {
+        CC_LOG_ERROR("D3D12 device failed to wait for submitted frame. HRESULT=0x%08x", static_cast<unsigned>(hr));
+        return;
+    }
+
+#if CC_D3D12_PERF_COUNTERS
+    const auto waitStart = std::chrono::steady_clock::now();
+#endif
+    WaitForSingleObject(_impl->fenceEvent, INFINITE);
+#if CC_D3D12_PERF_COUNTERS
+    const auto waitEnd = std::chrono::steady_clock::now();
+    const auto waitUs = std::chrono::duration_cast<std::chrono::microseconds>(waitEnd - waitStart).count();
+    recordFenceWait(static_cast<uint64_t>(std::max<int64_t>(waitUs, 0)));
+#endif
 }
 
 void CCD3D12Device::retireFrameResources() {
@@ -621,6 +929,9 @@ void CCD3D12Device::retireFrameResources() {
         _impl->samplerDescriptorHeapPool->reset();
     }
     if (!hasPendingAsyncUploads) {
+        if (!_impl->uploadPages.empty()) {
+            notifyTransientUniformUpload();
+        }
         for (auto &page : _impl->uploadPages) {
             page.offset = 0;
         }
@@ -652,9 +963,10 @@ bool CCD3D12Device::isSwapchainBackBuffer(void *resource) const {
 
 void CCD3D12Device::recordDescriptorFlush(uint32_t copyCalls, uint32_t copiedDescriptors,
                                           uint32_t dynamicOffsetRewrites, uint32_t dynamicOffsetDescriptors,
+                                          uint32_t dynamicCbvTableDescriptors,
                                           uint32_t setDescriptorHeapCalls, uint32_t rootDescriptorTableBinds) {
 #if CC_D3D12_PERF_COUNTERS
-    if (!_impl) {
+    if (!_impl || !isD3D12PerfLoggingRequested()) {
         return;
     }
     auto &counters = _impl->framePerfCounters;
@@ -663,6 +975,7 @@ void CCD3D12Device::recordDescriptorFlush(uint32_t copyCalls, uint32_t copiedDes
     counters.copiedDescriptors += copiedDescriptors;
     counters.dynamicOffsetRewrites += dynamicOffsetRewrites;
     counters.dynamicOffsetDescriptors += dynamicOffsetDescriptors;
+    counters.dynamicCbvTableDescriptors += dynamicCbvTableDescriptors;
     counters.setDescriptorHeapCalls += setDescriptorHeapCalls;
     counters.rootDescriptorTableBinds += rootDescriptorTableBinds;
 #else
@@ -670,6 +983,7 @@ void CCD3D12Device::recordDescriptorFlush(uint32_t copyCalls, uint32_t copiedDes
     (void)copiedDescriptors;
     (void)dynamicOffsetRewrites;
     (void)dynamicOffsetDescriptors;
+    (void)dynamicCbvTableDescriptors;
     (void)setDescriptorHeapCalls;
     (void)rootDescriptorTableBinds;
 #endif
@@ -677,7 +991,7 @@ void CCD3D12Device::recordDescriptorFlush(uint32_t copyCalls, uint32_t copiedDes
 
 void CCD3D12Device::recordDescriptorStateBinds(uint32_t setDescriptorHeapCalls, uint32_t rootDescriptorTableBinds) {
 #if CC_D3D12_PERF_COUNTERS
-    if (!_impl) {
+    if (!_impl || !isD3D12PerfLoggingRequested()) {
         return;
     }
     _impl->framePerfCounters.setDescriptorHeapCalls += setDescriptorHeapCalls;
@@ -688,9 +1002,85 @@ void CCD3D12Device::recordDescriptorStateBinds(uint32_t setDescriptorHeapCalls, 
 #endif
 }
 
+void CCD3D12Device::recordDescriptorCacheAnalysis(uint32_t cacheHits, uint32_t cacheMisses,
+                                                   uint32_t repackPasses, uint32_t repackDescriptors) {
+#if CC_D3D12_PERF_COUNTERS
+    if (!_impl || !isD3D12PerfLoggingRequested()) {
+        return;
+    }
+    auto &counters = _impl->framePerfCounters;
+    counters.descriptorCacheHits += cacheHits;
+    counters.descriptorCacheMisses += cacheMisses;
+    counters.descriptorRepackPasses += repackPasses;
+    counters.descriptorRepackDescriptors += repackDescriptors;
+#else
+    (void)cacheHits;
+    (void)cacheMisses;
+    (void)repackPasses;
+    (void)repackDescriptors;
+#endif
+}
+
+void CCD3D12Device::recordDescriptorBindingAnalysis(uint32_t slotLookups, uint32_t slotOwnerChanges,
+                                                     uint64_t fullFlushNs, uint64_t bindingBuildNs,
+                                                     uint64_t probeNs, uint64_t setUpdateNs) {
+#if CC_D3D12_PERF_COUNTERS
+    if (!_impl || !isD3D12PerfLoggingRequested()) {
+        return;
+    }
+    auto &counters = _impl->framePerfCounters;
+    counters.descriptorCacheSlotLookups += slotLookups;
+    counters.descriptorCacheSlotOwnerChanges += slotOwnerChanges;
+    counters.descriptorFullFlushNs += fullFlushNs;
+    counters.descriptorBindingBuildNs += bindingBuildNs;
+    counters.descriptorCacheProbeNs += probeNs;
+    counters.descriptorSetUpdateNs += setUpdateNs;
+#else
+    (void)slotLookups;
+    (void)slotOwnerChanges;
+    (void)fullFlushNs;
+    (void)bindingBuildNs;
+    (void)probeNs;
+    (void)setUpdateNs;
+#endif
+}
+
+void CCD3D12Device::recordDescriptorPostPhaseAnalysis(uint64_t descriptorRangePrepareNs,
+                                                       uint64_t descriptorHeapNormalizeNs,
+                                                       uint64_t descriptorHeapRootNs) {
+#if CC_D3D12_PERF_COUNTERS
+    if (!_impl || !isD3D12PerfLoggingRequested()) {
+        return;
+    }
+    auto &counters = _impl->framePerfCounters;
+    counters.descriptorRangePrepareNs += descriptorRangePrepareNs;
+    counters.descriptorHeapNormalizeNs += descriptorHeapNormalizeNs;
+    counters.descriptorHeapRootNs += descriptorHeapRootNs;
+#else
+    (void)descriptorRangePrepareNs;
+    (void)descriptorHeapNormalizeNs;
+    (void)descriptorHeapRootNs;
+#endif
+}
+
+void CCD3D12Device::recordDescriptorRangePhaseAnalysis(uint64_t descriptorCbvPrepareNs,
+                                                        uint64_t descriptorSamplerPrepareNs) {
+#if CC_D3D12_PERF_COUNTERS
+    if (!_impl || !isD3D12PerfLoggingRequested()) {
+        return;
+    }
+    auto &counters = _impl->framePerfCounters;
+    counters.descriptorCbvPrepareNs += descriptorCbvPrepareNs;
+    counters.descriptorSamplerPrepareNs += descriptorSamplerPrepareNs;
+#else
+    (void)descriptorCbvPrepareNs;
+    (void)descriptorSamplerPrepareNs;
+#endif
+}
+
 void CCD3D12Device::recordResourceBarriers(uint32_t barrierCount) {
 #if CC_D3D12_PERF_COUNTERS
-    if (!_impl || barrierCount == 0) {
+    if (!_impl || barrierCount == 0 || !isD3D12PerfLoggingRequested()) {
         return;
     }
     ++_impl->framePerfCounters.resourceBarrierCalls;
@@ -700,9 +1090,317 @@ void CCD3D12Device::recordResourceBarriers(uint32_t barrierCount) {
 #endif
 }
 
+void CCD3D12Device::recordBarrierAnalysis(uint32_t textureTransitions, uint32_t bufferTransitions,
+                                          uint32_t uavBarriers, uint32_t trackedAlreadyNext) {
+#if CC_D3D12_PERF_COUNTERS
+    if (!_impl || !isD3D12PerfLoggingRequested()) {
+        return;
+    }
+    _impl->framePerfCounters.barrierTextureTransitions += textureTransitions;
+    _impl->framePerfCounters.barrierBufferTransitions += bufferTransitions;
+    _impl->framePerfCounters.barrierUAV += uavBarriers;
+    _impl->framePerfCounters.barrierTrackedAlreadyNext += trackedAlreadyNext;
+#else
+    (void)textureTransitions;
+    (void)bufferTransitions;
+    (void)uavBarriers;
+    (void)trackedAlreadyNext;
+#endif
+}
+
+void CCD3D12Device::recordDefaultBufferUpload(void *resource, uint32_t offset, uint32_t size,
+                                               bool uniform, bool hostVisible, bool bufferView, bool dynamicOnly) {
+#if CC_D3D12_PERF_COUNTERS
+    if (!_impl || !resource || !isD3D12PerfLoggingRequested()) {
+        return;
+    }
+    auto &counters = _impl->framePerfCounters;
+    ++counters.defaultBufferCopies;
+    counters.defaultBufferBytes += size;
+    counters.defaultUniformCopies += uniform ? 1U : 0U;
+    counters.defaultHostCopies += hostVisible ? 1U : 0U;
+    counters.defaultBufferViewCopies += bufferView ? 1U : 0U;
+    counters.defaultDynamicOnlyCopies += dynamicOnly ? 1U : 0U;
+    const uint64_t key = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(resource)) ^
+                         (static_cast<uint64_t>(offset) * 0x9E3779B185EBCA87ULL);
+    if (!_impl->perfUpdatedBufferDestinations.emplace(key).second) {
+        ++counters.defaultRepeatedDestinations;
+    }
+#else
+    (void)resource;
+    (void)offset;
+    (void)size;
+    (void)uniform;
+    (void)hostVisible;
+    (void)bufferView;
+    (void)dynamicOnly;
+#endif
+}
+
+void CCD3D12Device::recordHotPathTimings(uint64_t descriptorFlushNs, uint64_t descriptorCopyNs,
+                                         uint64_t defaultBufferUploadNs, uint64_t dynamicOffsetNs,
+                                         uint64_t descriptorAllocateNs, uint64_t rootTableBindNs) {
+#if CC_D3D12_PERF_COUNTERS
+    if (!_impl || !isD3D12PerfLoggingRequested()) {
+        return;
+    }
+    _impl->framePerfCounters.descriptorFlushNs += descriptorFlushNs;
+    _impl->framePerfCounters.descriptorCopyNs += descriptorCopyNs;
+    _impl->framePerfCounters.defaultBufferUploadNs += defaultBufferUploadNs;
+    _impl->framePerfCounters.dynamicOffsetNs += dynamicOffsetNs;
+    _impl->framePerfCounters.descriptorAllocateNs += descriptorAllocateNs;
+    _impl->framePerfCounters.rootTableBindNs += rootTableBindNs;
+#else
+    (void)descriptorFlushNs;
+    (void)descriptorCopyNs;
+    (void)defaultBufferUploadNs;
+    (void)dynamicOffsetNs;
+    (void)descriptorAllocateNs;
+    (void)rootTableBindNs;
+#endif
+}
+
+void CCD3D12Device::recordPendingBufferDrainTiming(uint64_t drainNs) {
+#if CC_D3D12_PERF_COUNTERS
+    if (!_impl || !isD3D12PerfLoggingRequested()) {
+        return;
+    }
+    _impl->framePerfCounters.pendingBufferDrainNs += drainNs;
+#else
+    (void)drainNs;
+#endif
+}
+
+void CCD3D12Device::recordUniqueBatchRetentionTiming(uint64_t calls, uint64_t insertions, uint64_t retentionNs) {
+#if CC_D3D12_PERF_COUNTERS
+    if (!_impl || !isD3D12PerfLoggingRequested()) {
+        return;
+    }
+    _impl->framePerfCounters.uniqueBatchRetainCalls += calls;
+    _impl->framePerfCounters.uniqueBatchRetainInsertions += insertions;
+    _impl->framePerfCounters.uniqueBatchRetainNs += retentionNs;
+#else
+    (void)calls;
+    (void)insertions;
+    (void)retentionNs;
+#endif
+}
+
+void CCD3D12Device::recordUploadAllocationTiming(uint64_t allocationNs) {
+#if CC_D3D12_PERF_COUNTERS
+    if (!_impl || !isD3D12PerfLoggingRequested()) {
+        return;
+    }
+    _impl->framePerfCounters.uploadAllocateNs += allocationNs;
+#else
+    (void)allocationNs;
+#endif
+}
+
+void CCD3D12Device::recordBufferBatchPhaseTimings(uint64_t totalNs, uint64_t buildNs, uint64_t barrierNs,
+                                                   uint64_t copyNs, uint64_t stateNs,
+                                                   uint64_t fallbackNs) {
+#if CC_D3D12_PERF_COUNTERS
+    if (!_impl || !isD3D12PerfLoggingRequested()) {
+        return;
+    }
+    auto &counters = _impl->framePerfCounters;
+    counters.bufferBatchTotalNs += totalNs;
+    counters.bufferBatchBuildNs += buildNs;
+    counters.bufferBatchBarrierNs += barrierNs;
+    counters.bufferBatchCopyNs += copyNs;
+    counters.bufferBatchStateNs += stateNs;
+    counters.bufferBatchFallbackNs += fallbackNs;
+#else
+    (void)totalNs;
+    (void)buildNs;
+    (void)barrierNs;
+    (void)copyNs;
+    (void)stateNs;
+    (void)fallbackNs;
+#endif
+}
+
+void CCD3D12Device::recordDescriptorTypeAnalysis(uint32_t cbvCacheHits, uint32_t samplerCacheHits,
+                                                  uint32_t cbvCacheMisses, uint32_t samplerCacheMisses,
+                                                  uint32_t cbvCopiedDescriptors, uint32_t samplerCopiedDescriptors,
+                                                  uint32_t cbvRepackPasses, uint32_t samplerRepackPasses,
+                                                  uint32_t cbvHeapChanges, uint32_t samplerHeapChanges) {
+#if CC_D3D12_PERF_COUNTERS
+    if (!_impl || !isD3D12PerfLoggingRequested()) {
+        return;
+    }
+    auto &counters = _impl->framePerfCounters;
+    counters.cbvCacheHits += cbvCacheHits;
+    counters.samplerCacheHits += samplerCacheHits;
+    counters.cbvCacheMisses += cbvCacheMisses;
+    counters.samplerCacheMisses += samplerCacheMisses;
+    counters.cbvCopiedDescriptors += cbvCopiedDescriptors;
+    counters.samplerCopiedDescriptors += samplerCopiedDescriptors;
+    counters.cbvRepackPasses += cbvRepackPasses;
+    counters.samplerRepackPasses += samplerRepackPasses;
+    counters.cbvHeapChanges += cbvHeapChanges;
+    counters.samplerHeapChanges += samplerHeapChanges;
+#else
+    (void)cbvCacheHits;
+    (void)samplerCacheHits;
+    (void)cbvCacheMisses;
+    (void)samplerCacheMisses;
+    (void)cbvCopiedDescriptors;
+    (void)samplerCopiedDescriptors;
+    (void)cbvRepackPasses;
+    (void)samplerRepackPasses;
+    (void)cbvHeapChanges;
+    (void)samplerHeapChanges;
+#endif
+}
+
+void CCD3D12Device::recordSamplerTableAnalysis(uint32_t lookups, uint32_t uniqueTables,
+                                                uint32_t uniqueDescriptors, uint32_t duplicateTableHits,
+                                                uint32_t signatureHashCollisions,
+                                                uint32_t consecutiveExactHits) {
+#if CC_D3D12_PERF_COUNTERS
+    if (!_impl || !isD3D12PerfLoggingRequested()) {
+        return;
+    }
+    auto &counters = _impl->framePerfCounters;
+    counters.samplerTableLookups += lookups;
+    counters.samplerUniqueTables += uniqueTables;
+    counters.samplerUniqueDescriptors += uniqueDescriptors;
+    counters.samplerDuplicateTableHits += duplicateTableHits;
+    counters.samplerSignatureHashCollisions += signatureHashCollisions;
+    counters.samplerConsecutiveExactHits += consecutiveExactHits;
+#else
+    (void)lookups;
+    (void)uniqueTables;
+    (void)uniqueDescriptors;
+    (void)duplicateTableHits;
+    (void)signatureHashCollisions;
+    (void)consecutiveExactHits;
+#endif
+}
+
+void CCD3D12Device::recordGraphicsBindAnalysis(uint32_t pipelineBindCalls, uint32_t pipelineSameLogical,
+                                                uint32_t pipelineNativeChanges, uint32_t inputAssemblerBindCalls,
+                                                uint32_t inputAssemblerSameLogical, uint32_t vertexBufferViewChanges,
+                                                uint32_t indexBufferViewChanges, uint64_t pipelineBindNs,
+                                                uint64_t inputAssemblerBindNs) {
+#if CC_D3D12_PERF_COUNTERS
+    if (!_impl || !isD3D12PerfLoggingRequested()) {
+        return;
+    }
+    auto &counters = _impl->framePerfCounters;
+    counters.pipelineBindCalls += pipelineBindCalls;
+    counters.pipelineSameLogical += pipelineSameLogical;
+    counters.pipelineNativeChanges += pipelineNativeChanges;
+    counters.inputAssemblerBindCalls += inputAssemblerBindCalls;
+    counters.inputAssemblerSameLogical += inputAssemblerSameLogical;
+    counters.vertexBufferViewChanges += vertexBufferViewChanges;
+    counters.indexBufferViewChanges += indexBufferViewChanges;
+    counters.pipelineBindNs += pipelineBindNs;
+    counters.inputAssemblerBindNs += inputAssemblerBindNs;
+#else
+    (void)pipelineBindCalls;
+    (void)pipelineSameLogical;
+    (void)pipelineNativeChanges;
+    (void)inputAssemblerBindCalls;
+    (void)inputAssemblerSameLogical;
+    (void)vertexBufferViewChanges;
+    (void)indexBufferViewChanges;
+    (void)pipelineBindNs;
+    (void)inputAssemblerBindNs;
+#endif
+}
+
+void CCD3D12Device::recordCommandHotPathAnalysis(uint32_t bindDescriptorSetCalls, uint64_t bindDescriptorSetNs,
+                                                  uint32_t drawCalls, uint64_t drawNs) {
+#if CC_D3D12_PERF_COUNTERS
+    if (!_impl || !isD3D12PerfLoggingRequested()) {
+        return;
+    }
+    auto &counters = _impl->framePerfCounters;
+    counters.bindDescriptorSetCalls += bindDescriptorSetCalls;
+    counters.bindDescriptorSetNs += bindDescriptorSetNs;
+    counters.drawCalls += drawCalls;
+    counters.drawNs += drawNs;
+#else
+    (void)bindDescriptorSetCalls;
+    (void)bindDescriptorSetNs;
+    (void)drawCalls;
+    (void)drawNs;
+#endif
+}
+
+void CCD3D12Device::recordDrawPhaseAnalysis(uint64_t drawPendingBufferNs, uint64_t drawDescriptorFlushNs,
+                                             uint64_t drawIssueNs) {
+#if CC_D3D12_PERF_COUNTERS
+    if (!_impl || !isD3D12PerfLoggingRequested()) {
+        return;
+    }
+    auto &counters = _impl->framePerfCounters;
+    counters.drawPendingBufferNs += drawPendingBufferNs;
+    counters.drawDescriptorFlushNs += drawDescriptorFlushNs;
+    counters.drawIssueNs += drawIssueNs;
+#else
+    (void)drawPendingBufferNs;
+    (void)drawDescriptorFlushNs;
+    (void)drawIssueNs;
+#endif
+}
+
+void CCD3D12Device::recordCommandReuseAnalysis(uint32_t eventCount, bool hadPrevious,
+                                                bool exactMatch, uint32_t firstMismatchIndex) {
+#if CC_D3D12_PERF_COUNTERS
+    if (!_impl || !isD3D12PerfLoggingRequested()) {
+        return;
+    }
+    auto &counters = _impl->framePerfCounters;
+    counters.commandReuseEvents += eventCount;
+    counters.commandReuseComparisons += hadPrevious ? 1U : 0U;
+    counters.commandReuseExactMatches += exactMatch ? 1U : 0U;
+    if (hadPrevious && !exactMatch) {
+        counters.commandReuseFirstMismatch = std::min(counters.commandReuseFirstMismatch, firstMismatchIndex);
+    }
+#else
+    (void)eventCount;
+    (void)hadPrevious;
+    (void)exactMatch;
+    (void)firstMismatchIndex;
+#endif
+}
+
+void CCD3D12Device::recordFramePhaseAnalysis(uint64_t commandBeginNs, uint64_t commandRecordingNs,
+                                             uint64_t commandEndNs, uint64_t queueSubmitNs,
+                                             uint64_t queueExecuteNs, uint64_t queueSignalNs,
+                                             uint64_t acquireNs, uint64_t presentNs) {
+#if CC_D3D12_PERF_COUNTERS
+    if (!_impl || !isD3D12PerfLoggingRequested()) {
+        return;
+    }
+    auto &counters = _impl->framePerfCounters;
+    counters.commandBeginNs += commandBeginNs;
+    counters.commandRecordingNs += commandRecordingNs;
+    counters.commandEndNs += commandEndNs;
+    counters.queueSubmitNs += queueSubmitNs;
+    counters.queueExecuteNs += queueExecuteNs;
+    counters.queueSignalNs += queueSignalNs;
+    counters.acquireNs += acquireNs;
+    counters.presentNs += presentNs;
+#else
+    (void)commandBeginNs;
+    (void)commandRecordingNs;
+    (void)commandEndNs;
+    (void)queueSubmitNs;
+    (void)queueExecuteNs;
+    (void)queueSignalNs;
+    (void)acquireNs;
+    (void)presentNs;
+#endif
+}
+
 void CCD3D12Device::recordFenceWait(uint64_t waitMicroseconds) {
 #if CC_D3D12_PERF_COUNTERS
-    if (!_impl) {
+    if (!_impl || !isD3D12PerfLoggingRequested()) {
         return;
     }
     ++_impl->framePerfCounters.fenceWaits;
@@ -714,26 +1412,198 @@ void CCD3D12Device::recordFenceWait(uint64_t waitMicroseconds) {
 
 void CCD3D12Device::reportAndResetFramePerfCounters() {
 #if CC_D3D12_PERF_COUNTERS
-    if (!_impl) {
+    if (!_impl || !isD3D12PerfLoggingRequested()) {
         return;
     }
     const auto &counters = _impl->framePerfCounters;
     CC_LOG_INFO("[D3D12-PERF] frame=%llu flushDescriptorSets=%llu CopyDescriptorsSimple=%llu copiedDescriptors=%llu "
-                "dynamicOffsetRewrites=%llu dynamicOffsetDescriptors=%llu SetDescriptorHeaps=%llu rootTableBinds=%llu "
-                "ResourceBarrierCalls=%llu ResourceBarriers=%llu fenceWaits=%llu fenceWaitUs=%llu",
+                "dynamicOffsetRewrites=%llu dynamicOffsetDescriptors=%llu dynamicCbvTableDescriptors=%llu "
+                "SetDescriptorHeaps=%llu rootTableBinds=%llu descriptorCacheHits=%llu "
+                "descriptorCacheMisses=%llu descriptorRepackPasses=%llu descriptorRepackDescriptors=%llu "
+                "ResourceBarrierCalls=%llu ResourceBarriers=%llu barrierTextureTransitions=%llu "
+                "barrierBufferTransitions=%llu barrierUAV=%llu barrierTrackedAlreadyNext=%llu "
+                "defaultBufferCopies=%llu defaultBufferBytes=%llu defaultUniformCopies=%llu "
+                "defaultHostCopies=%llu defaultBufferViewCopies=%llu defaultDynamicOnlyCopies=%llu "
+                "defaultRepeatedDestinations=%llu pendingBufferDrains=%llu "
+                "pendingBuffersDrained=%llu maxPendingBufferBatch=%llu pendingBufferDrainUs=%llu "
+                "pendingBufferEnqueues=%llu pendingBufferQueueGrowths=%llu pendingBufferQueueGrowthUs=%llu "
+                "uniqueBatchRetainCalls=%llu uniqueBatchRetainInsertions=%llu "
+                "uniqueBatchRetainDuplicates=%llu uniqueBatchRetainUs=%llu "
+                "uploadAllocateUs=%llu bufferBatchTotalUs=%llu bufferBatchBuildUs=%llu bufferBatchBarrierUs=%llu "
+                "bufferBatchCopyUs=%llu bufferBatchStateUs=%llu bufferBatchFallbackUs=%llu "
+                "descriptorFlushUs=%llu descriptorCopyUs=%llu defaultBufferUploadUs=%llu dynamicOffsetUs=%llu "
+                "descriptorAllocateUs=%llu rootTableBindUs=%llu "
+                "fenceWaits=%llu fenceWaitUs=%llu",
                 static_cast<unsigned long long>(++_impl->perfFrameIndex),
                 static_cast<unsigned long long>(counters.descriptorFlushes),
                 static_cast<unsigned long long>(counters.copyDescriptorCalls),
                 static_cast<unsigned long long>(counters.copiedDescriptors),
                 static_cast<unsigned long long>(counters.dynamicOffsetRewrites),
                 static_cast<unsigned long long>(counters.dynamicOffsetDescriptors),
+                static_cast<unsigned long long>(counters.dynamicCbvTableDescriptors),
                 static_cast<unsigned long long>(counters.setDescriptorHeapCalls),
                 static_cast<unsigned long long>(counters.rootDescriptorTableBinds),
+                static_cast<unsigned long long>(counters.descriptorCacheHits),
+                static_cast<unsigned long long>(counters.descriptorCacheMisses),
+                static_cast<unsigned long long>(counters.descriptorRepackPasses),
+                static_cast<unsigned long long>(counters.descriptorRepackDescriptors),
                 static_cast<unsigned long long>(counters.resourceBarrierCalls),
                 static_cast<unsigned long long>(counters.resourceBarriers),
+                static_cast<unsigned long long>(counters.barrierTextureTransitions),
+                static_cast<unsigned long long>(counters.barrierBufferTransitions),
+                static_cast<unsigned long long>(counters.barrierUAV),
+                static_cast<unsigned long long>(counters.barrierTrackedAlreadyNext),
+                static_cast<unsigned long long>(counters.defaultBufferCopies),
+                static_cast<unsigned long long>(counters.defaultBufferBytes),
+                static_cast<unsigned long long>(counters.defaultUniformCopies),
+                static_cast<unsigned long long>(counters.defaultHostCopies),
+                static_cast<unsigned long long>(counters.defaultBufferViewCopies),
+                static_cast<unsigned long long>(counters.defaultDynamicOnlyCopies),
+                static_cast<unsigned long long>(counters.defaultRepeatedDestinations),
+                static_cast<unsigned long long>(counters.pendingBufferDrains),
+                static_cast<unsigned long long>(counters.pendingBuffersDrained),
+                static_cast<unsigned long long>(counters.maxPendingBufferBatch),
+                static_cast<unsigned long long>(counters.pendingBufferDrainNs / 1000ULL),
+                static_cast<unsigned long long>(counters.pendingBufferEnqueues),
+                static_cast<unsigned long long>(counters.pendingBufferQueueGrowths),
+                static_cast<unsigned long long>(counters.pendingBufferQueueGrowthNs / 1000ULL),
+                static_cast<unsigned long long>(counters.uniqueBatchRetainCalls),
+                static_cast<unsigned long long>(counters.uniqueBatchRetainInsertions),
+                static_cast<unsigned long long>(counters.uniqueBatchRetainCalls - counters.uniqueBatchRetainInsertions),
+                static_cast<unsigned long long>(counters.uniqueBatchRetainNs / 1000ULL),
+                static_cast<unsigned long long>(counters.uploadAllocateNs / 1000ULL),
+                static_cast<unsigned long long>(counters.bufferBatchTotalNs / 1000ULL),
+                static_cast<unsigned long long>(counters.bufferBatchBuildNs / 1000ULL),
+                static_cast<unsigned long long>(counters.bufferBatchBarrierNs / 1000ULL),
+                static_cast<unsigned long long>(counters.bufferBatchCopyNs / 1000ULL),
+                static_cast<unsigned long long>(counters.bufferBatchStateNs / 1000ULL),
+                static_cast<unsigned long long>(counters.bufferBatchFallbackNs / 1000ULL),
+                static_cast<unsigned long long>(counters.descriptorFlushNs / 1000ULL),
+                static_cast<unsigned long long>(counters.descriptorCopyNs / 1000ULL),
+                static_cast<unsigned long long>(counters.defaultBufferUploadNs / 1000ULL),
+                static_cast<unsigned long long>(counters.dynamicOffsetNs / 1000ULL),
+                static_cast<unsigned long long>(counters.descriptorAllocateNs / 1000ULL),
+                static_cast<unsigned long long>(counters.rootTableBindNs / 1000ULL),
                 static_cast<unsigned long long>(counters.fenceWaits),
                 static_cast<unsigned long long>(counters.fenceWaitMicroseconds));
+    const uint64_t measuredDescriptorBindingNs = counters.descriptorSetUpdateNs +
+                                                 counters.descriptorCacheProbeNs;
+    CC_LOG_INFO("[D3D12-PERF-DESCRIPTOR-BINDING] frame=%llu descriptorFullFlushUs=%llu "
+                "descriptorBindingBuildUs=%llu descriptorCacheProbeUs=%llu descriptorSetUpdateUs=%llu "
+                "descriptorBindingResidualUs=%llu "
+                "descriptorCacheSlotLookups=%llu descriptorCacheSlotOwnerChanges=%llu "
+                "descriptorCacheSlotOwnerHits=%llu",
+                static_cast<unsigned long long>(_impl->perfFrameIndex),
+                static_cast<unsigned long long>(counters.descriptorFullFlushNs / 1000ULL),
+                static_cast<unsigned long long>(counters.descriptorBindingBuildNs / 1000ULL),
+                static_cast<unsigned long long>(counters.descriptorCacheProbeNs / 1000ULL),
+                static_cast<unsigned long long>(counters.descriptorSetUpdateNs / 1000ULL),
+                static_cast<unsigned long long>((counters.descriptorBindingBuildNs -
+                                                 std::min(counters.descriptorBindingBuildNs,
+                                                          measuredDescriptorBindingNs)) /
+                                                1000ULL),
+                static_cast<unsigned long long>(counters.descriptorCacheSlotLookups),
+                static_cast<unsigned long long>(counters.descriptorCacheSlotOwnerChanges),
+                static_cast<unsigned long long>(counters.descriptorCacheSlotLookups - counters.descriptorCacheSlotOwnerChanges));
+    const uint64_t measuredDescriptorPostNs = counters.descriptorRangePrepareNs +
+                                              counters.descriptorHeapNormalizeNs +
+                                              counters.descriptorHeapRootNs;
+    CC_LOG_INFO("[D3D12-PERF-DESCRIPTOR-POST-PHASES] frame=%llu descriptorRangePrepareUs=%llu "
+                "descriptorHeapNormalizeUs=%llu descriptorHeapRootUs=%llu descriptorPostResidualUs=%llu",
+                static_cast<unsigned long long>(_impl->perfFrameIndex),
+                static_cast<unsigned long long>(counters.descriptorRangePrepareNs / 1000ULL),
+                static_cast<unsigned long long>(counters.descriptorHeapNormalizeNs / 1000ULL),
+                static_cast<unsigned long long>(counters.descriptorHeapRootNs / 1000ULL),
+                static_cast<unsigned long long>((counters.descriptorFlushNs -
+                                                 std::min(counters.descriptorFlushNs, measuredDescriptorPostNs)) /
+                                                1000ULL));
+    const uint64_t measuredDescriptorRangeNs = counters.descriptorCbvPrepareNs +
+                                               counters.descriptorSamplerPrepareNs;
+    CC_LOG_INFO("[D3D12-PERF-DESCRIPTOR-RANGE-PHASES] frame=%llu descriptorCbvPrepareUs=%llu "
+                "descriptorSamplerPrepareUs=%llu descriptorRangeResidualUs=%llu",
+                static_cast<unsigned long long>(_impl->perfFrameIndex),
+                static_cast<unsigned long long>(counters.descriptorCbvPrepareNs / 1000ULL),
+                static_cast<unsigned long long>(counters.descriptorSamplerPrepareNs / 1000ULL),
+                static_cast<unsigned long long>((counters.descriptorRangePrepareNs -
+                                                 std::min(counters.descriptorRangePrepareNs, measuredDescriptorRangeNs)) /
+                                                1000ULL));
+    CC_LOG_INFO("[D3D12-PERF-TYPES] frame=%llu cbvCacheHits=%llu samplerCacheHits=%llu "
+                "cbvCacheMisses=%llu samplerCacheMisses=%llu cbvCopiedDescriptors=%llu "
+                "samplerCopiedDescriptors=%llu cbvRepackPasses=%llu samplerRepackPasses=%llu "
+                "cbvHeapChanges=%llu samplerHeapChanges=%llu",
+                static_cast<unsigned long long>(_impl->perfFrameIndex),
+                static_cast<unsigned long long>(counters.cbvCacheHits),
+                static_cast<unsigned long long>(counters.samplerCacheHits),
+                static_cast<unsigned long long>(counters.cbvCacheMisses),
+                static_cast<unsigned long long>(counters.samplerCacheMisses),
+                static_cast<unsigned long long>(counters.cbvCopiedDescriptors),
+                static_cast<unsigned long long>(counters.samplerCopiedDescriptors),
+                static_cast<unsigned long long>(counters.cbvRepackPasses),
+                static_cast<unsigned long long>(counters.samplerRepackPasses),
+                static_cast<unsigned long long>(counters.cbvHeapChanges),
+                static_cast<unsigned long long>(counters.samplerHeapChanges));
+    CC_LOG_INFO("[D3D12-PERF-SAMPLERS] frame=%llu samplerTableLookups=%llu "
+                "samplerUniqueTables=%llu samplerUniqueDescriptors=%llu "
+                "samplerDuplicateTableHits=%llu samplerSignatureHashCollisions=%llu "
+                "samplerConsecutiveExactHits=%llu",
+                static_cast<unsigned long long>(_impl->perfFrameIndex),
+                static_cast<unsigned long long>(counters.samplerTableLookups),
+                static_cast<unsigned long long>(counters.samplerUniqueTables),
+                static_cast<unsigned long long>(counters.samplerUniqueDescriptors),
+                static_cast<unsigned long long>(counters.samplerDuplicateTableHits),
+                static_cast<unsigned long long>(counters.samplerSignatureHashCollisions),
+                static_cast<unsigned long long>(counters.samplerConsecutiveExactHits));
+    CC_LOG_INFO("[D3D12-PERF-BINDS] frame=%llu pipelineBindCalls=%llu pipelineSameLogical=%llu "
+                "pipelineNativeChanges=%llu pipelineBindUs=%llu inputAssemblerBindCalls=%llu "
+                "inputAssemblerSameLogical=%llu vertexBufferViewChanges=%llu "
+                "indexBufferViewChanges=%llu inputAssemblerBindUs=%llu",
+                static_cast<unsigned long long>(_impl->perfFrameIndex),
+                static_cast<unsigned long long>(counters.pipelineBindCalls),
+                static_cast<unsigned long long>(counters.pipelineSameLogical),
+                static_cast<unsigned long long>(counters.pipelineNativeChanges),
+                static_cast<unsigned long long>(counters.pipelineBindNs / 1000ULL),
+                static_cast<unsigned long long>(counters.inputAssemblerBindCalls),
+                static_cast<unsigned long long>(counters.inputAssemblerSameLogical),
+                static_cast<unsigned long long>(counters.vertexBufferViewChanges),
+                static_cast<unsigned long long>(counters.indexBufferViewChanges),
+                static_cast<unsigned long long>(counters.inputAssemblerBindNs / 1000ULL));
+    CC_LOG_INFO("[D3D12-PERF-HOT-CALLS] frame=%llu bindDescriptorSetCalls=%llu "
+                "bindDescriptorSetUs=%llu drawCalls=%llu drawUs=%llu",
+                static_cast<unsigned long long>(_impl->perfFrameIndex),
+                static_cast<unsigned long long>(counters.bindDescriptorSetCalls),
+                static_cast<unsigned long long>(counters.bindDescriptorSetNs / 1000ULL),
+                static_cast<unsigned long long>(counters.drawCalls),
+                static_cast<unsigned long long>(counters.drawNs / 1000ULL));
+    CC_LOG_INFO("[D3D12-PERF-REUSE-GATE] frame=%llu events=%llu comparisons=%llu "
+                "exactMatches=%llu firstMismatchIndex=%u",
+                static_cast<unsigned long long>(_impl->perfFrameIndex),
+                static_cast<unsigned long long>(counters.commandReuseEvents),
+                static_cast<unsigned long long>(counters.commandReuseComparisons),
+                static_cast<unsigned long long>(counters.commandReuseExactMatches),
+                counters.commandReuseFirstMismatch);
+    const uint64_t measuredDrawNs = counters.drawPendingBufferNs + counters.drawDescriptorFlushNs + counters.drawIssueNs;
+    CC_LOG_INFO("[D3D12-PERF-DRAW-PHASES] frame=%llu drawCalls=%llu drawPendingBufferUs=%llu "
+                "drawDescriptorFlushUs=%llu drawIssueUs=%llu drawResidualUs=%llu",
+                static_cast<unsigned long long>(_impl->perfFrameIndex),
+                static_cast<unsigned long long>(counters.drawCalls),
+                static_cast<unsigned long long>(counters.drawPendingBufferNs / 1000ULL),
+                static_cast<unsigned long long>(counters.drawDescriptorFlushNs / 1000ULL),
+                static_cast<unsigned long long>(counters.drawIssueNs / 1000ULL),
+                static_cast<unsigned long long>((counters.drawNs - std::min(counters.drawNs, measuredDrawNs)) / 1000ULL));
+    CC_LOG_INFO("[D3D12-PERF-FRAME-PHASES] frame=%llu commandBeginUs=%llu "
+                "commandRecordingUs=%llu commandEndUs=%llu queueSubmitUs=%llu "
+                "queueExecuteUs=%llu queueSignalUs=%llu acquireUs=%llu presentUs=%llu",
+                static_cast<unsigned long long>(_impl->perfFrameIndex),
+                static_cast<unsigned long long>(counters.commandBeginNs / 1000ULL),
+                static_cast<unsigned long long>(counters.commandRecordingNs / 1000ULL),
+                static_cast<unsigned long long>(counters.commandEndNs / 1000ULL),
+                static_cast<unsigned long long>(counters.queueSubmitNs / 1000ULL),
+                static_cast<unsigned long long>(counters.queueExecuteNs / 1000ULL),
+                static_cast<unsigned long long>(counters.queueSignalNs / 1000ULL),
+                static_cast<unsigned long long>(counters.acquireNs / 1000ULL),
+                static_cast<unsigned long long>(counters.presentNs / 1000ULL));
     _impl->framePerfCounters = {};
+    _impl->perfUpdatedBufferDestinations.clear();
 #endif
 }
 
@@ -1506,19 +2376,21 @@ void CCD3D12Device::initCapabilities() {
 bool CCD3D12Device::initializeD3D12Context() {
     UINT dxgiFactoryFlags = 0;
 
-    // Enable debug layer only in Debug builds; too heavy for Release and
-    // can cause stability issues on some AMD drivers.
-#if !defined(NDEBUG)
-    {
+    // SDK Layers validate every D3D12 call and are prohibitively expensive in
+    // draw-call-heavy scenes. Keep them explicitly opt-in for focused API
+    // validation instead of coupling them to the application's Debug config.
+    if (isD3D12DebugLayerRequested()) {
         Microsoft::WRL::ComPtr<ID3D12Debug> debugController;
         if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController)))) {
             debugController->EnableDebugLayer();
             dxgiFactoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
+            CC_LOG_INFO("D3D12 debug layer enabled by CC_D3D12_DEBUG_LAYER.");
         } else {
             CC_LOG_WARNING("Could not enable D3D12 debug layer.");
         }
+    } else {
+        CC_LOG_INFO("D3D12 debug layer disabled; set CC_D3D12_DEBUG_LAYER=1 for API validation.");
     }
-#endif
 
     HRESULT hr = CreateDXGIFactory2(dxgiFactoryFlags, IID_PPV_ARGS(&_impl->dxgiFactory));
     if (FAILED(hr)) {

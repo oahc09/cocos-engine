@@ -30,6 +30,7 @@
     #ifndef NOMINMAX
         #define NOMINMAX
     #endif
+    #include <chrono>
     #include <d3d12.h>
     #include <wrl/client.h>
 
@@ -151,6 +152,9 @@ void CCD3D12Queue::submit(CommandBuffer *const *cmdBuffs, uint32_t count) {
     }
 
     if (count == 0 || !cmdBuffs) return;
+#if CC_D3D12_PERF_COUNTERS
+    const auto queueSubmitStart = std::chrono::steady_clock::now();
+#endif
 
     device->flushDeferredCubeUploads();
 
@@ -173,7 +177,17 @@ void CCD3D12Queue::submit(CommandBuffer *const *cmdBuffs, uint32_t count) {
     if (commandLists.empty()) return;
 
     // Execute command lists
+#if CC_D3D12_PERF_COUNTERS
+    const auto queueExecuteStart = std::chrono::steady_clock::now();
+#endif
     graphicsQueue->ExecuteCommandLists(static_cast<UINT>(commandLists.size()), commandLists.data());
+#if CC_D3D12_PERF_COUNTERS
+    const auto queueExecuteEnd = std::chrono::steady_clock::now();
+    const auto queueSignalStart = queueExecuteEnd;
+#endif
+    // Every buffer decays to COMMON when this ExecuteCommandLists operation
+    // completes. All lists in this call share one operation and one epoch.
+    device->advanceBufferStateEpoch();
     dumpQueueDebugMessages(d3dDevice, "after-execute");
 
     // Signal completion for allocator/resource reuse. Reuse waits happen lazily
@@ -194,6 +208,18 @@ void CCD3D12Queue::submit(CommandBuffer *const *cmdBuffs, uint32_t count) {
         }
         device->notifySubmittedFence(_impl->fence.Get(), _impl->fenceValue);
     }
+#if CC_D3D12_PERF_COUNTERS
+    const auto queueSubmitEnd = std::chrono::steady_clock::now();
+    device->recordFramePhaseAnalysis(
+        0, 0, 0,
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            queueSubmitEnd - queueSubmitStart).count()),
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            queueExecuteEnd - queueExecuteStart).count()),
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            queueSubmitEnd - queueSignalStart).count()),
+        0, 0);
+#endif
 }
 
 } // namespace gfx

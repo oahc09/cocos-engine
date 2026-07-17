@@ -30,6 +30,7 @@
 #include "D3D12Texture.h"
 #include "base/Log.h"
 #include "gfx-base/GFXDef.h"
+#include "gfx-base/GFXSamplerUtils.h"
 
     #ifndef NOMINMAX
         #define NOMINMAX
@@ -250,7 +251,7 @@ D3D12_SAMPLER_DESC makeSamplerDesc(const SamplerInfo &info) {
     return desc;
 }
 
-D3D12_SAMPLER_DESC makeDefaultSamplerDesc() {
+SamplerInfo makeDefaultSamplerInfo() {
     SamplerInfo info{};
     info.minFilter = Filter::POINT;
     info.magFilter = Filter::POINT;
@@ -260,7 +261,7 @@ D3D12_SAMPLER_DESC makeDefaultSamplerDesc() {
     info.addressW = Address::CLAMP;
     info.maxAnisotropy = 1;
     info.cmpFunc = ComparisonFunc::ALWAYS;
-    return makeSamplerDesc(info);
+    return info;
 }
 
 } // namespace
@@ -286,7 +287,23 @@ struct DescriptorData {
 };
 
 struct CCD3D12DescriptorSet::Impl {
+    struct UniformBufferDescriptorSlot {
+        uint32_t descriptorIndex{0};
+        uint32_t cbvSrvUavOffset{0};
+        CCD3D12Buffer *buffer{nullptr};
+        uint64_t version{0};
+    };
+
+    struct DynamicDescriptorSlot {
+        DescriptorType type{DescriptorType::UNKNOWN};
+        uint32_t binding{0};
+        uint32_t descriptorIndex{0};
+        uint32_t cbvSrvUavOffset{0};
+    };
+
     ccstd::vector<DescriptorData> descriptors;
+    ccstd::vector<UniformBufferDescriptorSlot> uniformBufferDescriptorSlots;
+    ccstd::vector<DynamicDescriptorSlot> dynamicDescriptorSlots;
 
     // Persistent suballocations from device-level CPU-visible staging pools.
     D3D12DescriptorHeapPool::Allocation cbvSrvUavAllocation;
@@ -302,6 +319,12 @@ struct CCD3D12DescriptorSet::Impl {
 
     bool needsCbvSrvUav{false};
     bool needsSampler{false};
+    uint64_t version{0};
+    uint64_t staticDescriptorVersion{0};
+    uint32_t appliedDynamicOffsetCount{0};
+    ccstd::vector<uint32_t> zeroDynamicOffsets;
+    ccstd::vector<uint32_t> samplerTableKey;
+    uint64_t observedTransientUniformUploadGeneration{0};
 
     bool ensureStagingAllocations(CCD3D12Device *device) {
         if (!device) {
@@ -385,6 +408,34 @@ void CCD3D12DescriptorSet::doInit(const DescriptorSetInfo &info) {
     _impl->needsCbvSrvUav = (_impl->cbvSrvUavDescriptorCount > 0);
     _impl->needsSampler = (_impl->samplerDescriptorCount > 0);
 
+    // Descriptor layout metadata is immutable. Cache the exact CPU staging
+    // slots used by dynamic buffers so per-draw offset updates do not rescan
+    // every texture, sampler, and static buffer binding twice.
+    const auto &bindings = layout->getBindings();
+    const auto &descriptorIndices = layout->getDescriptorIndices();
+    uint32_t cbvSrvUavOffset = 0;
+    for (const auto &binding : bindings) {
+        const uint32_t baseDescIdx = descriptorIndices[binding.binding];
+        for (uint32_t i = 0; i < binding.count; ++i) {
+            if (binding.descriptorType == DescriptorType::SAMPLER ||
+                binding.descriptorType == DescriptorType::UNKNOWN) {
+                continue;
+            }
+            if (binding.descriptorType == DescriptorType::DYNAMIC_UNIFORM_BUFFER ||
+                binding.descriptorType == DescriptorType::DYNAMIC_STORAGE_BUFFER) {
+                _impl->dynamicDescriptorSlots.push_back({
+                    binding.descriptorType,
+                    binding.binding,
+                    baseDescIdx + i,
+                    cbvSrvUavOffset,
+                });
+            } else if (binding.descriptorType == DescriptorType::UNIFORM_BUFFER) {
+                _impl->uniformBufferDescriptorSlots.push_back({baseDescIdx + i, cbvSrvUavOffset});
+            }
+            ++cbvSrvUavOffset;
+        }
+    }
+
     auto *device = CCD3D12Device::getInstance();
     auto *d3dDevice = static_cast<ID3D12Device *>(device ? device->getD3D12DeviceHandle() : nullptr);
     if (!d3dDevice) {
@@ -409,6 +460,8 @@ void CCD3D12DescriptorSet::doInit(const DescriptorSetInfo &info) {
 void CCD3D12DescriptorSet::doDestroy() {
     if (_impl) {
         _impl->descriptors.clear();
+        _impl->uniformBufferDescriptorSlots.clear();
+        _impl->dynamicDescriptorSlots.clear();
         auto *device = CCD3D12Device::getInstance();
         auto *cbvPool = device ? device->getCPUDescriptorHeapPool() : nullptr;
         auto *samplerPool = device ? device->getCPUSamplerDescriptorHeapPool() : nullptr;
@@ -432,8 +485,78 @@ void CCD3D12DescriptorSet::doDestroy() {
 }
 
 void CCD3D12DescriptorSet::update() {
-    if (!_isDirty) return;
-    forceUpdate();
+    if (!_impl) return;
+
+    auto *device = CCD3D12Device::getInstance();
+    const uint64_t transientGeneration = device
+                                             ? device->getTransientUniformUploadGeneration()
+                                             : 0;
+    if (!_isDirty &&
+        _impl->observedTransientUniformUploadGeneration == transientGeneration) {
+        return;
+    }
+
+    if (_isDirty) {
+        forceUpdate();
+        return;
+    }
+
+    auto *d3dDevice = static_cast<ID3D12Device *>(device ? device->getD3D12DeviceHandle() : nullptr);
+    if (!d3dDevice || !_impl->ensureStagingAllocations(device)) {
+        _isDirty = true;
+        return;
+    }
+    _impl->cbvSrvUavCpuStart.ptr = _impl->needsCbvSrvUav
+                                           ? reinterpret_cast<SIZE_T>(_impl->cbvSrvUavAllocation.cpuHandle)
+                                           : 0;
+
+    // Ordinary uniform buffers may point at a new fence-safe upload slice in
+    // each command-buffer epoch. Rewrite only the changed CBV staging slots;
+    // textures, samplers, storage descriptors, and unchanged CBVs remain intact.
+    bool descriptorChanged = false;
+    for (auto &slot : _impl->uniformBufferDescriptorSlots) {
+        auto *buffer = static_cast<CCD3D12Buffer *>(_buffers[slot.descriptorIndex].ptr);
+        if (buffer != slot.buffer) {
+            _isDirty = true;
+            break;
+        }
+        // Pending ordinary-uniform updates are batched immediately before the
+        // draw/dispatch descriptor flush. Do not allocate an individual upload
+        // slice here: that would upload the same contents once now and again in
+        // CCD3D12Device::flushPendingBufferUpdates().
+        const uint64_t version = buffer ? buffer->getUniformDescriptorVersion() : 0;
+        if (version == slot.version) {
+            continue;
+        }
+
+        const uint64_t gpuAddress = buffer ? buffer->getD3D12UniformGPUVirtualAddress() : 0;
+        const uint32_t cbvSize = buffer ? buffer->getD3D12ConstantBufferSize() : 0;
+        if (!buffer || gpuAddress == 0 || cbvSize < 256U ||
+            slot.cbvSrvUavOffset >= _impl->cbvSrvUavDescriptorCount) {
+            _isDirty = true;
+            break;
+        }
+
+        D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc{};
+        cbvDesc.BufferLocation = gpuAddress;
+        cbvDesc.SizeInBytes = cbvSize;
+        D3D12_CPU_DESCRIPTOR_HANDLE handle{};
+        handle.ptr = _impl->cbvSrvUavCpuStart.ptr +
+                     slot.cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
+        d3dDevice->CreateConstantBufferView(&cbvDesc, handle);
+        slot.version = version;
+        descriptorChanged = true;
+    }
+
+    if (_isDirty) {
+        forceUpdate();
+        return;
+    }
+    _impl->observedTransientUniformUploadGeneration =
+        device->getTransientUniformUploadGeneration();
+    if (descriptorChanged) {
+        ++_impl->version;
+    }
 }
 
 void CCD3D12DescriptorSet::forceUpdate() {
@@ -526,6 +649,7 @@ void CCD3D12DescriptorSet::forceUpdate() {
 
     uint32_t cbvSrvUavOffset = 0;
     uint32_t samplerOffset = 0;
+    _impl->samplerTableKey.assign(_impl->samplerDescriptorCount, 0U);
 
     for (const auto &binding : bindings) {
         const uint32_t baseDescIdx = descriptorIndices[binding.binding];
@@ -539,29 +663,37 @@ void CCD3D12DescriptorSet::forceUpdate() {
                     auto *gfxBuffer = _buffers[descIdx].ptr;
                     if (gfxBuffer && cbvSrvUavOffset < _impl->cbvSrvUavDescriptorCount) {
                         auto *d3d12Buffer = static_cast<CCD3D12Buffer *>(gfxBuffer);
+                        const bool dynamicUniform = binding.descriptorType == DescriptorType::DYNAMIC_UNIFORM_BUFFER;
+                        d3d12Buffer->markUniformDescriptorBinding(dynamicUniform);
+                        const bool transientUniform = !dynamicUniform && d3d12Buffer->ensureTransientUniformUpload();
                         auto *rawResource = static_cast<ID3D12Resource *>(d3d12Buffer->getD3D12ResourceHandle());
                         if (rawResource) {
-                            const UINT64 resourceWidth = rawResource->GetDesc().Width;
-                            const UINT64 resourceOffset = static_cast<UINT64>(d3d12Buffer->getD3D12ResourceOffset());
-                            const UINT64 availableSize = (resourceWidth > resourceOffset) ? (resourceWidth - resourceOffset) : 0ULL;
-                            const UINT64 logicalAligned = static_cast<UINT64>(gfxBuffer->getSize()) & ~255ULL;
-                            // For CBV, prefer full available range in the underlying allocation
-                            // (bounded by D3D12's 64KB CBV limit) instead of gfxBuffer->getSize(),
-                            // which can be smaller than actual shader block usage in some paths.
-                            const UINT64 availableAligned = availableSize & ~255ULL;
-                            const UINT64 cbvSize = std::min<UINT64>(availableAligned, 64ULL * 1024ULL);
-                            if (logicalAligned >= 256ULL && availableAligned < logicalAligned) {
-                                CC_LOG_WARNING("[D3D12-CBV] available range smaller than logical buffer size: binding=%u descIdx=%u logical=%llu available=%llu rawWidth=%llu rawOffset=%llu",
-                                               binding.binding,
-                                               descIdx,
-                                               static_cast<unsigned long long>(logicalAligned),
-                                               static_cast<unsigned long long>(availableAligned),
-                                               static_cast<unsigned long long>(resourceWidth),
-                                               static_cast<unsigned long long>(resourceOffset));
+                            UINT64 cbvSize = d3d12Buffer->getD3D12ConstantBufferSize();
+                            UINT64 bufferLocation = d3d12Buffer->getD3D12UniformGPUVirtualAddress();
+                            if (!transientUniform) {
+                                const UINT64 resourceWidth = rawResource->GetDesc().Width;
+                                const UINT64 resourceOffset = static_cast<UINT64>(d3d12Buffer->getD3D12ResourceOffset());
+                                const UINT64 availableSize = (resourceWidth > resourceOffset) ? (resourceWidth - resourceOffset) : 0ULL;
+                                const UINT64 logicalAligned = static_cast<UINT64>(gfxBuffer->getSize()) & ~255ULL;
+                                // Preserve the existing DEFAULT-resource workaround: some paths expose
+                                // a logical size smaller than the shader block but have a larger backing
+                                // allocation. A transient slice, however, is exactly the logical size.
+                                const UINT64 availableAligned = availableSize & ~255ULL;
+                                cbvSize = std::min<UINT64>(availableAligned, 64ULL * 1024ULL);
+                                if (logicalAligned >= 256ULL && availableAligned < logicalAligned) {
+                                    CC_LOG_WARNING("[D3D12-CBV] available range smaller than logical buffer size: binding=%u descIdx=%u logical=%llu available=%llu rawWidth=%llu rawOffset=%llu",
+                                                   binding.binding,
+                                                   descIdx,
+                                                   static_cast<unsigned long long>(logicalAligned),
+                                                   static_cast<unsigned long long>(availableAligned),
+                                                   static_cast<unsigned long long>(resourceWidth),
+                                                   static_cast<unsigned long long>(resourceOffset));
+                                }
+                                bufferLocation = d3d12Buffer->getD3D12GPUVirtualAddress();
                             }
                             if (cbvSize >= 256U) {
                                 D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc{};
-                                cbvDesc.BufferLocation = d3d12Buffer->getD3D12GPUVirtualAddress();
+                                cbvDesc.BufferLocation = bufferLocation;
                                 cbvDesc.SizeInBytes = static_cast<UINT>(cbvSize);
 
                                 D3D12_CPU_DESCRIPTOR_HANDLE handle;
@@ -650,13 +782,16 @@ void CCD3D12DescriptorSet::forceUpdate() {
                     if (gfxSampler && samplerOffset < _impl->samplerDescriptorCount) {
                         const auto &samplerInfo = gfxSampler->getInfo();
                         D3D12_SAMPLER_DESC samplerDesc = makeSamplerDesc(samplerInfo);
+                        _impl->samplerTableKey[samplerOffset] = packSamplerInfo(samplerInfo);
 
                         D3D12_CPU_DESCRIPTOR_HANDLE handle;
                         handle.ptr = samplerCpuStart.ptr + samplerOffset * _impl->samplerDescriptorSize;
                         d3dDevice->CreateSampler(&samplerDesc, handle);
                     } else if (samplerOffset < _impl->samplerDescriptorCount) {
                         // Null sampler binding: write default sampler to keep heap slot valid.
-                        D3D12_SAMPLER_DESC defaultSampler = makeDefaultSamplerDesc();
+                        const SamplerInfo defaultSamplerInfo = makeDefaultSamplerInfo();
+                        D3D12_SAMPLER_DESC defaultSampler = makeSamplerDesc(defaultSamplerInfo);
+                        _impl->samplerTableKey[samplerOffset] = packSamplerInfo(defaultSamplerInfo);
                         D3D12_CPU_DESCRIPTOR_HANDLE handle;
                         handle.ptr = samplerCpuStart.ptr + samplerOffset * _impl->samplerDescriptorSize;
                         d3dDevice->CreateSampler(&defaultSampler, handle);
@@ -694,13 +829,16 @@ void CCD3D12DescriptorSet::forceUpdate() {
                     if (gfxSampler && samplerOffset < _impl->samplerDescriptorCount) {
                         const auto &samplerInfo = gfxSampler->getInfo();
                         D3D12_SAMPLER_DESC samplerDesc = makeSamplerDesc(samplerInfo);
+                        _impl->samplerTableKey[samplerOffset] = packSamplerInfo(samplerInfo);
 
                         D3D12_CPU_DESCRIPTOR_HANDLE handle;
                         handle.ptr = samplerCpuStart.ptr + samplerOffset * _impl->samplerDescriptorSize;
                         d3dDevice->CreateSampler(&samplerDesc, handle);
                     } else if (samplerOffset < _impl->samplerDescriptorCount) {
                         // Null sampler binding: write default sampler to keep heap slot valid.
-                        D3D12_SAMPLER_DESC defaultSampler = makeDefaultSamplerDesc();
+                        const SamplerInfo defaultSamplerInfo = makeDefaultSamplerInfo();
+                        D3D12_SAMPLER_DESC defaultSampler = makeSamplerDesc(defaultSamplerInfo);
+                        _impl->samplerTableKey[samplerOffset] = packSamplerInfo(defaultSamplerInfo);
                         D3D12_CPU_DESCRIPTOR_HANDLE handle;
                         handle.ptr = samplerCpuStart.ptr + samplerOffset * _impl->samplerDescriptorSize;
                         d3dDevice->CreateSampler(&defaultSampler, handle);
@@ -771,7 +909,16 @@ void CCD3D12DescriptorSet::forceUpdate() {
         }
     }
 
+    for (auto &slot : _impl->uniformBufferDescriptorSlots) {
+        slot.buffer = static_cast<CCD3D12Buffer *>(_buffers[slot.descriptorIndex].ptr);
+        slot.version = slot.buffer ? slot.buffer->getUniformDescriptorVersion() : 0;
+    }
+
+    _impl->observedTransientUniformUploadGeneration =
+        device->getTransientUniformUploadGeneration();
     _isDirty = false;
+    ++_impl->staticDescriptorVersion;
+    ++_impl->version;
 }
 
 void *CCD3D12DescriptorSet::getCbvSrvUavDescriptorHeap() const {
@@ -810,6 +957,77 @@ uint32_t CCD3D12DescriptorSet::getSamplerDescriptorCount() const {
     return _impl ? _impl->samplerDescriptorCount : 0;
 }
 
+uint64_t CCD3D12DescriptorSet::getVersion() const {
+    return _impl ? _impl->version : 0;
+}
+
+uint64_t CCD3D12DescriptorSet::getStaticDescriptorVersion() const {
+    return _impl ? _impl->staticDescriptorVersion : 0;
+}
+
+uint32_t CCD3D12DescriptorSet::getUniformDescriptorSlotCount() const {
+    return _impl ? static_cast<uint32_t>(_impl->uniformBufferDescriptorSlots.size()) : 0;
+}
+
+bool CCD3D12DescriptorSet::getUniformDescriptorSignature(uint32_t index, uint32_t &descriptorOffset,
+                                                          uint64_t &gpuAddress, uint32_t &size) const {
+    if (!_impl || index >= _impl->uniformBufferDescriptorSlots.size()) {
+        return false;
+    }
+    const auto &slot = _impl->uniformBufferDescriptorSlots[index];
+    descriptorOffset = slot.cbvSrvUavOffset;
+    gpuAddress = slot.buffer ? slot.buffer->getD3D12UniformGPUVirtualAddress() : 0;
+    size = slot.buffer ? slot.buffer->getD3D12ConstantBufferSize() : 0;
+    return true;
+}
+
+uint32_t CCD3D12DescriptorSet::getDescriptorSemanticCount() const {
+    return _impl ? static_cast<uint32_t>(_impl->descriptors.size()) : 0;
+}
+
+bool CCD3D12DescriptorSet::getDescriptorSemanticSignature(uint32_t index, uint32_t &kind,
+                                                           uint64_t &value0, uint64_t &value1) const {
+    if (!_impl || index >= _impl->descriptors.size()) {
+        return false;
+    }
+    const auto &descriptor = _impl->descriptors[index];
+    if (descriptor.isBuffer) {
+        kind = 1;
+        value0 = descriptor.gpuVA;
+        value1 = descriptor.bufferSize;
+    } else if (descriptor.isTexture) {
+        kind = 2;
+        value0 = reinterpret_cast<uintptr_t>(descriptor.resourceHandle);
+        value1 = 0;
+    } else if (descriptor.isSampler) {
+        kind = 3;
+        value0 = static_cast<uint64_t>(descriptor.samplerHash);
+        value1 = 0;
+    } else {
+        kind = 0;
+        value0 = 0;
+        value1 = 0;
+    }
+    return true;
+}
+
+const ccstd::vector<uint32_t> &CCD3D12DescriptorSet::getSamplerTableKey() const {
+    static const ccstd::vector<uint32_t> EMPTY_KEY;
+    return _impl ? _impl->samplerTableKey : EMPTY_KEY;
+}
+
+void CCD3D12DescriptorSet::restoreDynamicOffsetDescriptors() {
+    if (!_impl || _impl->appliedDynamicOffsetCount == 0) {
+        return;
+    }
+
+    const uint32_t dynamicOffsetCount = _impl->appliedDynamicOffsetCount;
+    auto &zeroOffsets = _impl->zeroDynamicOffsets;
+    zeroOffsets.assign(dynamicOffsetCount, 0U);
+    applyDynamicOffsets(dynamicOffsetCount, zeroOffsets.data());
+    _impl->appliedDynamicOffsetCount = 0;
+}
+
 void CCD3D12DescriptorSet::applyDynamicOffsets(uint32_t dynamicOffsetCount, const uint32_t *dynamicOffsets) {
     if (!_impl || !_layout || dynamicOffsetCount == 0 || !dynamicOffsets) {
         return;
@@ -824,6 +1042,7 @@ void CCD3D12DescriptorSet::applyDynamicOffsets(uint32_t dynamicOffsetCount, cons
         _isDirty = true;
         return;
     }
+    _impl->appliedDynamicOffsetCount = dynamicOffsetCount;
     _impl->cbvSrvUavCpuStart.ptr = _impl->needsCbvSrvUav
                                            ? reinterpret_cast<SIZE_T>(_impl->cbvSrvUavAllocation.cpuHandle)
                                            : 0;
@@ -843,38 +1062,20 @@ void CCD3D12DescriptorSet::applyDynamicOffsets(uint32_t dynamicOffsetCount, cons
         d3dDevice->CreateConstantBufferView(nullptr, handle);
     };
 
-    const auto &bindings = _layout->getBindings();
-    const auto &descriptorIndices = _layout->getDescriptorIndices();
-
-    uint32_t cbvSrvUavOffset = 0;
     uint32_t dynamicOffsetIndex = 0;
+    for (const auto &slot : _impl->dynamicDescriptorSlots) {
+        const uint32_t descIdx = slot.descriptorIndex;
+        const uint32_t cbvSrvUavOffset = slot.cbvSrvUavOffset;
+        const uint32_t dynamicOffset = dynamicOffsetIndex < dynamicOffsetCount
+                                           ? dynamicOffsets[dynamicOffsetIndex]
+                                           : 0;
 
-    for (const auto &binding : bindings) {
-        const uint32_t baseDescIdx = descriptorIndices[binding.binding];
-
-        for (uint32_t i = 0; i < binding.count; ++i) {
-            const uint32_t descIdx = baseDescIdx + i;
-
-            switch (binding.descriptorType) {
-                case DescriptorType::UNIFORM_BUFFER:
-                case DescriptorType::SAMPLER_TEXTURE:
-                case DescriptorType::TEXTURE:
-                case DescriptorType::SAMPLER:
-                case DescriptorType::STORAGE_IMAGE:
-                case DescriptorType::INPUT_ATTACHMENT:
-                    // Keep offset traversal consistent with forceUpdate():
-                    // SAMPLER has no CBV/SRV/UAV slot; others here consume one.
-                    if (binding.descriptorType != DescriptorType::SAMPLER) {
-                        ++cbvSrvUavOffset;
-                    }
-                    break;
-                case DescriptorType::DYNAMIC_UNIFORM_BUFFER: {
-                    auto *gfxBuffer = _buffers[descIdx].ptr;
-                    if (gfxBuffer && cbvSrvUavOffset < _impl->cbvSrvUavDescriptorCount) {
-                        auto *d3d12Buffer = static_cast<CCD3D12Buffer *>(gfxBuffer);
-                        auto *rawResource = static_cast<ID3D12Resource *>(d3d12Buffer->getD3D12ResourceHandle());
-                        if (rawResource) {
-                            const uint32_t dynamicOffset = dynamicOffsetIndex < dynamicOffsetCount ? dynamicOffsets[dynamicOffsetIndex] : 0;
+        if (slot.type == DescriptorType::DYNAMIC_UNIFORM_BUFFER) {
+            auto *gfxBuffer = _buffers[descIdx].ptr;
+            if (gfxBuffer && cbvSrvUavOffset < _impl->cbvSrvUavDescriptorCount) {
+                auto *d3d12Buffer = static_cast<CCD3D12Buffer *>(gfxBuffer);
+                auto *rawResource = static_cast<ID3D12Resource *>(d3d12Buffer->getD3D12ResourceHandle());
+                if (rawResource) {
                             const uint64_t totalOffset = static_cast<uint64_t>(d3d12Buffer->getD3D12ResourceOffset()) + dynamicOffset;
                             const uint64_t resourceWidth = rawResource->GetDesc().Width;
                             const uint64_t availableSize = (resourceWidth > totalOffset) ? (resourceWidth - totalOffset) : 0ULL;
@@ -885,7 +1086,7 @@ void CCD3D12DescriptorSet::applyDynamicOffsets(uint32_t dynamicOffsetCount, cons
                             const uint64_t cbvSize = std::min<uint64_t>(requiredAligned, 64ULL * 1024ULL);
                             if (availableAligned < cbvSize) {
                                 CC_LOG_ERROR("[D3D12-CBV-DYN] dynamic CBV range is too small: binding=%u descIdx=%u dynOffset=%u required=%llu available=%llu rawWidth=%llu totalOffset=%llu",
-                                               binding.binding,
+                                               slot.binding,
                                                descIdx,
                                                dynamicOffset,
                                                static_cast<unsigned long long>(cbvSize),
@@ -905,27 +1106,22 @@ void CCD3D12DescriptorSet::applyDynamicOffsets(uint32_t dynamicOffsetCount, cons
                             } else {
                                 writeDummyCBV(handle);
                             }
-                        } else {
-                            D3D12_CPU_DESCRIPTOR_HANDLE handle;
-                            handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
-                            writeDummyCBV(handle);
-                        }
-                    } else if (cbvSrvUavOffset < _impl->cbvSrvUavDescriptorCount) {
-                        D3D12_CPU_DESCRIPTOR_HANDLE handle;
-                        handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
-                        writeDummyCBV(handle);
-                    }
-                    ++dynamicOffsetIndex;
-                    ++cbvSrvUavOffset;
-                    break;
+                } else {
+                    D3D12_CPU_DESCRIPTOR_HANDLE handle;
+                    handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
+                    writeDummyCBV(handle);
                 }
-                case DescriptorType::DYNAMIC_STORAGE_BUFFER: {
-                    auto *gfxBuffer = _buffers[descIdx].ptr;
-                    if (gfxBuffer && cbvSrvUavOffset < _impl->cbvSrvUavDescriptorCount) {
-                        auto *d3d12Buffer = static_cast<CCD3D12Buffer *>(gfxBuffer);
-                        auto *rawResource = static_cast<ID3D12Resource *>(d3d12Buffer->getD3D12ResourceHandle());
-                        if (rawResource) {
-                            const uint32_t dynamicOffset = dynamicOffsetIndex < dynamicOffsetCount ? dynamicOffsets[dynamicOffsetIndex] : 0;
+            } else if (cbvSrvUavOffset < _impl->cbvSrvUavDescriptorCount) {
+                D3D12_CPU_DESCRIPTOR_HANDLE handle;
+                handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
+                writeDummyCBV(handle);
+            }
+        } else if (slot.type == DescriptorType::DYNAMIC_STORAGE_BUFFER) {
+            auto *gfxBuffer = _buffers[descIdx].ptr;
+            if (gfxBuffer && cbvSrvUavOffset < _impl->cbvSrvUavDescriptorCount) {
+                auto *d3d12Buffer = static_cast<CCD3D12Buffer *>(gfxBuffer);
+                auto *rawResource = static_cast<ID3D12Resource *>(d3d12Buffer->getD3D12ResourceHandle());
+                if (rawResource) {
                             const uint64_t firstElement = (static_cast<uint64_t>(d3d12Buffer->getD3D12ResourceOffset()) + dynamicOffset) / 4U;
                             const uint32_t availableSize = gfxBuffer->getSize() > dynamicOffset ? (gfxBuffer->getSize() - dynamicOffset) : 0U;
 
@@ -934,19 +1130,10 @@ void CCD3D12DescriptorSet::applyDynamicOffsets(uint32_t dynamicOffsetCount, cons
                             D3D12_CPU_DESCRIPTOR_HANDLE handle;
                             handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
                             d3dDevice->CreateShaderResourceView(rawResource, &srvDesc, handle);
-                        }
-                    }
-                    ++dynamicOffsetIndex;
-                    ++cbvSrvUavOffset;
-                    break;
                 }
-                case DescriptorType::STORAGE_BUFFER:
-                    ++cbvSrvUavOffset;
-                    break;
-                default:
-                    break;
             }
         }
+        ++dynamicOffsetIndex;
     }
 }
 

@@ -222,7 +222,7 @@ void CCD3D12InputAssembler::doInit(const InputAssemblerInfo &info) {
             // Determine index format from buffer stride
             const uint32_t stride = d3d12Buffer->getStride();
             if (stride == 4) {
-                _impl->ibView.Format = DXGI_FORMAT_R32_UINT;
+            _impl->ibView.Format = DXGI_FORMAT_R32_UINT;
                 _impl->indexFormat = static_cast<uint32_t>(DXGI_FORMAT_R32_UINT);
             } else {
                 _impl->ibView.Format = DXGI_FORMAT_R16_UINT;

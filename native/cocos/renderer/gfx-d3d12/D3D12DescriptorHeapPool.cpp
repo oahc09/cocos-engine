@@ -39,6 +39,8 @@ namespace gfx {
 
 struct HeapEntry {
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> heap;
+    D3D12_CPU_DESCRIPTOR_HANDLE cpuStart{};
+    D3D12_GPU_DESCRIPTOR_HANDLE gpuStart{};
     uint32_t usedCount{0};
     uint32_t capacity{0};
 };
@@ -123,12 +125,12 @@ D3D12DescriptorHeapPool::Allocation D3D12DescriptorHeapPool::allocate(uint32_t c
             alloc.heapIndex = it->heapIndex;
             alloc.numDescriptors = count;
 
-            D3D12_CPU_DESCRIPTOR_HANDLE cpuStart = heap.heap->GetCPUDescriptorHandleForHeapStart();
+            D3D12_CPU_DESCRIPTOR_HANDLE cpuStart = heap.cpuStart;
             cpuStart.ptr += static_cast<UINT64>(it->offset) * _impl->descriptorSize;
             alloc.cpuHandle = reinterpret_cast<void *>(cpuStart.ptr);
 
             if (_impl->shaderVisible) {
-                D3D12_GPU_DESCRIPTOR_HANDLE gpuStart = heap.heap->GetGPUDescriptorHandleForHeapStart();
+                D3D12_GPU_DESCRIPTOR_HANDLE gpuStart = heap.gpuStart;
                 gpuStart.ptr += static_cast<UINT64>(it->offset) * _impl->descriptorSize;
                 alloc.gpuHandle = gpuStart.ptr;
             }
@@ -154,12 +156,12 @@ D3D12DescriptorHeapPool::Allocation D3D12DescriptorHeapPool::allocate(uint32_t c
             alloc.heapIndex = i;
             alloc.numDescriptors = count;
 
-            D3D12_CPU_DESCRIPTOR_HANDLE cpuStart = heap.heap->GetCPUDescriptorHandleForHeapStart();
+            D3D12_CPU_DESCRIPTOR_HANDLE cpuStart = heap.cpuStart;
             cpuStart.ptr += static_cast<UINT64>(heap.usedCount) * _impl->descriptorSize;
             alloc.cpuHandle = reinterpret_cast<void *>(cpuStart.ptr);
 
             if (_impl->shaderVisible) {
-                D3D12_GPU_DESCRIPTOR_HANDLE gpuStart = heap.heap->GetGPUDescriptorHandleForHeapStart();
+                D3D12_GPU_DESCRIPTOR_HANDLE gpuStart = heap.gpuStart;
                 gpuStart.ptr += static_cast<UINT64>(heap.usedCount) * _impl->descriptorSize;
                 alloc.gpuHandle = gpuStart.ptr;
             }
@@ -194,6 +196,10 @@ D3D12DescriptorHeapPool::Allocation D3D12DescriptorHeapPool::allocate(uint32_t c
         return alloc;
     }
 
+    newEntry.cpuStart = newEntry.heap->GetCPUDescriptorHandleForHeapStart();
+    if (_impl->shaderVisible) {
+        newEntry.gpuStart = newEntry.heap->GetGPUDescriptorHandleForHeapStart();
+    }
     newEntry.capacity = heapCapacity;
     newEntry.usedCount = count;
 
@@ -203,11 +209,11 @@ D3D12DescriptorHeapPool::Allocation D3D12DescriptorHeapPool::allocate(uint32_t c
     alloc.heapIndex = newHeapIndex;
     alloc.numDescriptors = count;
 
-    D3D12_CPU_DESCRIPTOR_HANDLE cpuStart = _impl->heaps[newHeapIndex].heap->GetCPUDescriptorHandleForHeapStart();
+    D3D12_CPU_DESCRIPTOR_HANDLE cpuStart = _impl->heaps[newHeapIndex].cpuStart;
     alloc.cpuHandle = reinterpret_cast<void *>(cpuStart.ptr);
 
     if (_impl->shaderVisible) {
-        D3D12_GPU_DESCRIPTOR_HANDLE gpuStart = _impl->heaps[newHeapIndex].heap->GetGPUDescriptorHandleForHeapStart();
+        D3D12_GPU_DESCRIPTOR_HANDLE gpuStart = _impl->heaps[newHeapIndex].gpuStart;
         alloc.gpuHandle = gpuStart.ptr;
     }
 
@@ -226,7 +232,7 @@ void D3D12DescriptorHeapPool::deallocate(const Allocation &alloc) {
     // Recover offset from CPU handle
     if (alloc.heapIndex < static_cast<uint32_t>(_impl->heaps.size())) {
         auto &heap = _impl->heaps[alloc.heapIndex];
-        D3D12_CPU_DESCRIPTOR_HANDLE heapStart = heap.heap->GetCPUDescriptorHandleForHeapStart();
+        D3D12_CPU_DESCRIPTOR_HANDLE heapStart = heap.cpuStart;
         uint64_t offsetBytes = reinterpret_cast<uint64_t>(alloc.cpuHandle) - heapStart.ptr;
         uint32_t offset = static_cast<uint32_t>(offsetBytes / _impl->descriptorSize);
 

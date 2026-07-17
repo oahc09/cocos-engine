@@ -43,7 +43,17 @@ public:
     uint64_t getSamplerCPUDescriptorHandle() const;
     uint32_t getCbvSrvUavDescriptorCount() const;
     uint32_t getSamplerDescriptorCount() const;
+    uint64_t getVersion() const;
+    uint64_t getStaticDescriptorVersion() const;
+    uint32_t getUniformDescriptorSlotCount() const;
+    bool getUniformDescriptorSignature(uint32_t index, uint32_t &descriptorOffset,
+                                       uint64_t &gpuAddress, uint32_t &size) const;
+    uint32_t getDescriptorSemanticCount() const;
+    bool getDescriptorSemanticSignature(uint32_t index, uint32_t &kind,
+                                        uint64_t &value0, uint64_t &value1) const;
+    const ccstd::vector<uint32_t> &getSamplerTableKey() const;
     void applyDynamicOffsets(uint32_t dynamicOffsetCount, const uint32_t *dynamicOffsets);
+    void restoreDynamicOffsetDescriptors();
 
 protected:
     void doInit(const DescriptorSetInfo &info) override;

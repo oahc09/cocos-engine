@@ -46,6 +46,18 @@ uint64_t elapsedMs(D3D12PerfClock::time_point start) {
         std::chrono::duration_cast<std::chrono::milliseconds>(D3D12PerfClock::now() - start).count());
 }
 
+uint64_t hashRootSignatureBlob(const void *data, size_t size) {
+    constexpr uint64_t FNV1A64_OFFSET = 14695981039346656037ULL;
+    constexpr uint64_t FNV1A64_PRIME = 1099511628211ULL;
+    uint64_t hash = FNV1A64_OFFSET;
+    const auto *bytes = static_cast<const uint8_t *>(data);
+    for (size_t index = 0; index < size; ++index) {
+        hash ^= bytes[index];
+        hash *= FNV1A64_PRIME;
+    }
+    return hash;
+}
+
 D3D12_SHADER_VISIBILITY toD3D12ShaderVisibility(ShaderStageFlags stageFlags) {
     if (hasAnyFlags(stageFlags, ShaderStageFlagBit::ALL)) {
         return D3D12_SHADER_VISIBILITY_ALL;
@@ -94,6 +106,7 @@ D3D12_DESCRIPTOR_RANGE_TYPE toD3D12DescriptorRangeType(DescriptorType type) {
 
 struct CCD3D12PipelineLayout::Impl {
     Microsoft::WRL::ComPtr<ID3D12RootSignature> rootSignature;
+    uint64_t rootSignatureHash{0};
     ccstd::vector<int32_t> cbvSrvUavRootParameterIndices;
     ccstd::vector<int32_t> samplerRootParameterIndices;
 };
@@ -199,28 +212,6 @@ void CCD3D12PipelineLayout::doInit(const PipelineLayoutInfo &info) {
             for (auto &r : cbvSrvUavRanges) {
                 allRanges.push_back(r);
             }
-        } else {
-            // Empty set layout: still create a CBV/SRV/UAV root parameter with a
-            // dummy range so that flushDescriptorSets can bind this set index.
-            // Without this, sets with no bindings (e.g. PER_PASS global set when
-            // the pass has no UBO declarations) would have rootParameterIndex = -1,
-            // and bindDescriptorSet for that set would be silently skipped.
-            // The dummy range maps 1 CBV at register 0 in this set's space.
-            _impl->cbvSrvUavRootParameterIndices[setIndex] = static_cast<int32_t>(rootParameters.size());
-            D3D12_ROOT_PARAMETER param{};
-            param.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-            param.ShaderVisibility = visibility;
-            param.DescriptorTable.NumDescriptorRanges = 1;
-            param.DescriptorTable.pDescriptorRanges = nullptr;
-            rootParameters.push_back(param);
-
-            D3D12_DESCRIPTOR_RANGE dummyRange{};
-            dummyRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
-            dummyRange.NumDescriptors = 1;
-            dummyRange.BaseShaderRegister = 0;
-            dummyRange.RegisterSpace = setIndex;
-            dummyRange.OffsetInDescriptorsFromTableStart = 0;
-            allRanges.push_back(dummyRange);
         }
 
         if (!samplerRanges.empty()) {
@@ -285,6 +276,8 @@ void CCD3D12PipelineLayout::doInit(const PipelineLayoutInfo &info) {
                      static_cast<unsigned>(hr));
         return;
     }
+    _impl->rootSignatureHash = hashRootSignatureBlob(signatureBlob->GetBufferPointer(),
+                                                      signatureBlob->GetBufferSize());
 
     CC_LOG_INFO("D3D12 PipelineLayout initialized: %u set layouts, %u root parameters",
                 static_cast<uint32_t>(_setLayouts.size()),
@@ -302,6 +295,7 @@ void CCD3D12PipelineLayout::doDestroy() {
     if (_impl && _impl->rootSignature) {
         _impl->rootSignature.Reset();
     }
+    _impl->rootSignatureHash = 0;
     _impl->cbvSrvUavRootParameterIndices.clear();
     _impl->samplerRootParameterIndices.clear();
 }
@@ -323,6 +317,11 @@ int32_t CCD3D12PipelineLayout::getSamplerRootParameterIndex(uint32_t set) const 
     }
     return _impl->samplerRootParameterIndices[set];
 }
+
+uint64_t CCD3D12PipelineLayout::getRootSignatureHash() const {
+    return _impl ? _impl->rootSignatureHash : 0;
+}
+
 
 } // namespace gfx
 } // namespace cc

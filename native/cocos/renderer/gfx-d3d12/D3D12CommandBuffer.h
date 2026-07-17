@@ -90,7 +90,17 @@ protected:
     void doDestroy() override;
 
 private:
+    friend class CCD3D12Device;
+
+    // Coalesce transition barriers for unique DEFAULT-buffer updates drained
+    // at one synchronization point. Repeated resources retain legacy ordering.
+    void startBufferUpdateBatch(bool destinationsAreUnique);
+    void finishBufferUpdateBatch();
+
     void waitForFenceValue();
+    void invalidateGraphicsState();
+    void invalidateDescriptorTables();
+    bool flushDescriptorSetsIncremental();
     void applyDynamicPipelineState();
     void transitionColorAttachment(uint32_t attachment, D3D12_RESOURCE_STATES state);
     void bindSubpassRenderTargets(uint32_t subpass);
