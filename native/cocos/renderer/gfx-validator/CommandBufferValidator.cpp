@@ -103,6 +103,8 @@ void CommandBufferValidator::begin(RenderPass *renderPass, uint32_t subpass, Fra
 
     _recorder.clear();
     _curStates.descriptorSets.assign(_curStates.descriptorSets.size(), nullptr);
+    _drawLayoutsDirty = true;
+    _currentPipelineLayout = nullptr;
 
     /////////// execute ///////////
 
@@ -245,6 +247,11 @@ void CommandBufferValidator::bindPipelineState(PipelineState *pso) {
     CC_ASSERT(isInited());
     CC_ASSERT(pso && static_cast<PipelineStateValidator *>(pso)->isInited());
 
+    auto *pipelineLayout = pso->getPipelineLayout();
+    if (_currentPipelineLayout != pipelineLayout) {
+        _drawLayoutsDirty = true;
+        _currentPipelineLayout = pipelineLayout;
+    }
     _curStates.pipelineState = pso;
 
     /////////// execute ///////////
@@ -256,11 +263,22 @@ void CommandBufferValidator::bindDescriptorSet(uint32_t set, DescriptorSet *desc
     CC_ASSERT(isInited());
     CC_ASSERT(descriptorSet && static_cast<DescriptorSetValidator *>(descriptorSet)->isInited());
 
-    CC_ASSERT(set < DeviceValidator::getInstance()->bindingMappingInfo().setIndices.size());
+    CC_ASSERT(set < _curStates.descriptorSets.size());
     // CC_ASSERT(descriptorSet->getLayout()->getDynamicBindings().size() == dynamicOffsetCount); // be more lenient on this
 
+    const auto *previousLayout = _curStates.descriptorSets[set]
+                                     ? _curStates.descriptorSets[set]->getLayout()
+                                     : nullptr;
+    if (previousLayout != descriptorSet->getLayout()) {
+        _drawLayoutsDirty = true;
+    }
     _curStates.descriptorSets[set] = descriptorSet;
-    _curStates.dynamicOffsets[set].assign(dynamicOffsets, dynamicOffsets + dynamicOffsetCount);
+    auto &cachedDynamicOffsets = _curStates.dynamicOffsets[set];
+    if (dynamicOffsetCount > 0) {
+        cachedDynamicOffsets.assign(dynamicOffsets, dynamicOffsets + dynamicOffsetCount);
+    } else if (!cachedDynamicOffsets.empty()) {
+        cachedDynamicOffsets.clear();
+    }
 
     /////////// execute ///////////
 
@@ -373,7 +391,9 @@ void CommandBufferValidator::setStencilCompareMask(StencilFace face, uint32_t re
     _actor->setStencilCompareMask(face, ref, mask);
 }
 
-void CommandBufferValidator::draw(const DrawInfo &info) {
+void CommandBufferValidator::drawInternal(const DrawInfo &info, bool withDrawState,
+                                          InputAssembler *inputAssembler, uint32_t localSet,
+                                          DescriptorSet *localDescriptorSet) {
     CC_ASSERT(isInited());
 
     // Command 'draw' must be recorded inside render passes.
@@ -383,17 +403,69 @@ void CommandBufferValidator::draw(const DrawInfo &info) {
         _recorder.recordDrawcall(_curStates);
     }
 
-    const auto &psoLayouts = _curStates.pipelineState->getPipelineLayout()->getSetLayouts();
-    for (size_t i = 0; i < psoLayouts.size(); ++i) {
-        if (!_curStates.descriptorSets[i]) continue; // there may be inactive sets
-        const auto &dsBindings = _curStates.descriptorSets[i]->getLayout()->getBindings();
-        const auto &psoBindings = psoLayouts[i]->getBindings();
-        CC_ASSERT(psoBindings.size() == dsBindings.size());
+    if (_drawLayoutsDirty) {
+        const auto &psoLayouts = _curStates.pipelineState->getPipelineLayout()->getSetLayouts();
+        for (size_t i = 0; i < psoLayouts.size(); ++i) {
+            if (!_curStates.descriptorSets[i]) continue; // there may be inactive sets
+            const auto &dsBindings = _curStates.descriptorSets[i]->getLayout()->getBindings();
+            const auto &psoBindings = psoLayouts[i]->getBindings();
+            CC_ASSERT(psoBindings.size() == dsBindings.size());
+        }
+        _drawLayoutsDirty = false;
     }
 
     /////////// execute ///////////
 
-    _actor->draw(info);
+    if (withDrawState && inputAssembler && localDescriptorSet) {
+        _actor->drawWithInputAssemblerAndDescriptorSet(
+            static_cast<InputAssemblerValidator *>(inputAssembler)->getActor(), localSet,
+            static_cast<DescriptorSetValidator *>(localDescriptorSet)->getActor(), info);
+    } else {
+        _actor->draw(info);
+    }
+}
+
+void CommandBufferValidator::draw(const DrawInfo &info) {
+    drawInternal(info, false);
+}
+
+bool CommandBufferValidator::supportsDrawBatch() const {
+    return _actor->supportsDrawBatch();
+}
+
+void CommandBufferValidator::beginDrawBatch() {
+    CC_ASSERT(isInited());
+    _actor->beginDrawBatch();
+}
+
+void CommandBufferValidator::endDrawBatch() {
+    CC_ASSERT(isInited());
+    _actor->endDrawBatch();
+}
+
+void CommandBufferValidator::drawWithInputAssemblerAndDescriptorSet(InputAssembler *inputAssembler,
+                                                                     uint32_t set,
+                                                                     DescriptorSet *descriptorSet,
+                                                                     const DrawInfo &info) {
+    CC_ASSERT(isInited());
+    CC_ASSERT(inputAssembler && static_cast<InputAssemblerValidator *>(inputAssembler)->isInited());
+    CC_ASSERT(descriptorSet && static_cast<DescriptorSetValidator *>(descriptorSet)->isInited());
+    CC_ASSERT(set < _curStates.descriptorSets.size());
+
+    _curStates.inputAssembler = inputAssembler;
+    const auto *previousLayout = _curStates.descriptorSets[set]
+                                     ? _curStates.descriptorSets[set]->getLayout()
+                                     : nullptr;
+    if (previousLayout != descriptorSet->getLayout()) {
+        _drawLayoutsDirty = true;
+    }
+    _curStates.descriptorSets[set] = descriptorSet;
+    auto &cachedDynamicOffsets = _curStates.dynamicOffsets[set];
+    if (!cachedDynamicOffsets.empty()) {
+        cachedDynamicOffsets.clear();
+    }
+
+    drawInternal(info, true, inputAssembler, set, descriptorSet);
 }
 
 void CommandBufferValidator::updateBuffer(Buffer *buff, const void *data, uint32_t size) {

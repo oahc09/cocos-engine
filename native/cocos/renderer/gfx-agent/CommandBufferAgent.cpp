@@ -390,6 +390,44 @@ void CommandBufferAgent::draw(const DrawInfo &info) {
         });
 }
 
+bool CommandBufferAgent::supportsDrawBatch() const {
+    return _actor->supportsDrawBatch();
+}
+
+void CommandBufferAgent::beginDrawBatch() {
+    ENQUEUE_MESSAGE_1(
+        _messageQueue, CommandBufferBeginDrawBatch,
+        actor, getActor(),
+        {
+            actor->beginDrawBatch();
+        });
+}
+
+void CommandBufferAgent::endDrawBatch() {
+    ENQUEUE_MESSAGE_1(
+        _messageQueue, CommandBufferEndDrawBatch,
+        actor, getActor(),
+        {
+            actor->endDrawBatch();
+        });
+}
+
+void CommandBufferAgent::drawWithInputAssemblerAndDescriptorSet(InputAssembler *inputAssembler,
+                                                                 uint32_t set,
+                                                                 DescriptorSet *descriptorSet,
+                                                                 const DrawInfo &info) {
+    ENQUEUE_MESSAGE_5(
+        _messageQueue, CommandBufferDrawWithInputAssemblerAndDescriptorSet,
+        actor, getActor(),
+        inputAssembler, static_cast<InputAssemblerAgent *>(inputAssembler)->getActor(),
+        set, set,
+        descriptorSet, static_cast<DescriptorSetAgent *>(descriptorSet)->getActor(),
+        info, info,
+        {
+            actor->drawWithInputAssemblerAndDescriptorSet(inputAssembler, set, descriptorSet, info);
+        });
+}
+
 void CommandBufferAgent::updateBuffer(Buffer *buff, const void *data, uint32_t size) {
     auto *bufferAgent = static_cast<BufferAgent *>(buff);
 

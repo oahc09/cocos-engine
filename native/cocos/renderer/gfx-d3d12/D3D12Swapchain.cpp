@@ -44,19 +44,15 @@ namespace {
 constexpr UINT D3D12_PRESENT_SYNC_INTERVAL = 0;
 constexpr UINT D3D12_PRESENT_FLAGS = 0;
 constexpr uint64_t D3D12_PRESENT_DIAG_THRESHOLD_MS = 2;
-constexpr auto D3D12_FPS_REPORT_INTERVAL = std::chrono::seconds(1);
 } // namespace
 
 struct CCD3D12Swapchain::Impl {
-    static constexpr uint32_t BACK_BUFFER_COUNT = 2;
+    static constexpr uint32_t BACK_BUFFER_COUNT = D3D12_MAX_FRAMES_IN_FLIGHT;
     Microsoft::WRL::ComPtr<IDXGISwapChain3> swapChain;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> rtvHeap;
     Microsoft::WRL::ComPtr<ID3D12Resource> backBuffers[BACK_BUFFER_COUNT];
     uint32_t currentBackBufferIndex{0};
     uint32_t rtvDescriptorSize{0};
-    std::chrono::steady_clock::time_point fpsReportStart{};
-    uint64_t fpsReportFrameCount{0};
-    double presentMicroseconds{0.0};
     bool ready{false};
 };
 
@@ -191,14 +187,6 @@ bool CCD3D12Swapchain::present() {
     const auto presentStart = std::chrono::steady_clock::now();
     HRESULT hr = _impl->swapChain->Present(D3D12_PRESENT_SYNC_INTERVAL, D3D12_PRESENT_FLAGS);
     const auto presentEnd = std::chrono::steady_clock::now();
-#if CC_D3D12_PERF_COUNTERS
-    if (auto *device = CCD3D12Device::getInstance()) {
-        device->recordFramePhaseAnalysis(
-            0, 0, 0, 0, 0, 0, 0,
-            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                presentEnd - presentStart).count()));
-    }
-#endif
     const auto presentMs = std::chrono::duration_cast<std::chrono::milliseconds>(presentEnd - presentStart).count();
     if (presentMs >= D3D12_PRESENT_DIAG_THRESHOLD_MS) {
         CC_LOG_INFO("[D3D12-PERF] SwapchainPresent syncInterval=%u flags=%u totalMs=%llu",
@@ -209,31 +197,6 @@ bool CCD3D12Swapchain::present() {
     if (FAILED(hr)) {
         CC_LOG_ERROR("IDXGISwapChain::Present failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
         return false;
-    }
-
-    if (_impl->fpsReportStart.time_since_epoch().count() == 0) {
-        _impl->fpsReportStart = presentEnd;
-    } else {
-        ++_impl->fpsReportFrameCount;
-        _impl->presentMicroseconds +=
-            static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(presentEnd - presentStart).count());
-        const auto reportDuration = presentEnd - _impl->fpsReportStart;
-        if (reportDuration >= D3D12_FPS_REPORT_INTERVAL) {
-            const double reportSeconds = std::chrono::duration<double>(reportDuration).count();
-            const double fps = static_cast<double>(_impl->fpsReportFrameCount) / reportSeconds;
-            const double averageFrameMs = reportSeconds * 1000.0 / static_cast<double>(_impl->fpsReportFrameCount);
-            const double averagePresentMs =
-                _impl->presentMicroseconds / static_cast<double>(_impl->fpsReportFrameCount) / 1000.0;
-            CC_LOG_INFO("[D3D12-FPS] fps=%.2f avgFrameMs=%.2f avgPresentMs=%.3f frames=%llu intervalMs=%.1f",
-                        fps,
-                        averageFrameMs,
-                        averagePresentMs,
-                        static_cast<unsigned long long>(_impl->fpsReportFrameCount),
-                        reportSeconds * 1000.0);
-            _impl->fpsReportStart = presentEnd;
-            _impl->fpsReportFrameCount = 0;
-            _impl->presentMicroseconds = 0.0;
-        }
     }
 
     _impl->currentBackBufferIndex = _impl->swapChain->GetCurrentBackBufferIndex();

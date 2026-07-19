@@ -42,24 +42,42 @@ public:
     uint64_t getCbvSrvUavCPUDescriptorHandle() const;
     uint64_t getSamplerCPUDescriptorHandle() const;
     uint32_t getCbvSrvUavDescriptorCount() const;
+    // The local b0 root CBV may occur anywhere in the CPU staging table. The
+    // returned static-table count excludes that one descriptor and is packed
+    // in original descriptor order by CommandBuffer.
+    bool getCbvSrvUavPartition(uint32_t &rootCbvDescriptorOffset,
+                               uint32_t &staticTableDescriptorCount) const;
+    bool canReuseStaticCbvSrvUavResources() const;
+    bool hasMatchingStaticCbvSrvUavResources(const CCD3D12DescriptorSet &other) const;
     uint32_t getSamplerDescriptorCount() const;
     uint64_t getVersion() const;
     uint64_t getStaticDescriptorVersion() const;
     uint32_t getUniformDescriptorSlotCount() const;
+    uint32_t getDynamicDescriptorSlotCount() const;
+    bool getDynamicDescriptorOffset(uint32_t index, uint32_t &descriptorOffset) const;
+    bool getDynamicDescriptorSource(uint32_t index, uint64_t &gpuAddress, uint64_t &size) const;
+    bool hasOnlyNullDynamicDescriptorSources() const;
     bool getUniformDescriptorSignature(uint32_t index, uint32_t &descriptorOffset,
                                        uint64_t &gpuAddress, uint32_t &size) const;
+    void getStaticDescriptorAnalysis(uint32_t &dynamicCbvDescriptors,
+                                     uint32_t &staticTextureDescriptors,
+                                     uint32_t &staticCbvSrvUavDescriptors,
+                                     uint64_t &staticSignature) const;
     uint32_t getDescriptorSemanticCount() const;
     bool getDescriptorSemanticSignature(uint32_t index, uint32_t &kind,
                                         uint64_t &value0, uint64_t &value1) const;
     const ccstd::vector<uint32_t> &getSamplerTableKey() const;
     void applyDynamicOffsets(uint32_t dynamicOffsetCount, const uint32_t *dynamicOffsets);
     void restoreDynamicOffsetDescriptors();
+    void updateForLocalRootCbv(bool skipStaticCbvStaging = false);
 
 protected:
     void doInit(const DescriptorSetInfo &info) override;
     void doDestroy() override;
 
 private:
+    void refreshStaticDescriptorMetadata();
+
     struct Impl;
     std::unique_ptr<Impl> _impl;
 };

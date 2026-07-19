@@ -41,6 +41,7 @@ namespace gfx {
 
 struct CCD3D12Buffer::Impl {
     Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+    uint64_t resourceVersion{1};
     CCD3D12Buffer *parent{nullptr};
     uint32_t resourceOffset{0};
     bool uploadHeap{true};
@@ -134,6 +135,7 @@ void CCD3D12Buffer::doDestroy() {
         _impl->pendingData.clear();
         _impl->updateQueued = false;
         _impl->resource.Reset();
+        ++_impl->resourceVersion;
         _impl->parent = nullptr;
         _impl->transientUniformResource = nullptr;
         _impl->transientUniformGPUAddress = 0;
@@ -320,6 +322,16 @@ uint64_t CCD3D12Buffer::getD3D12GPUVirtualAddress() const {
     return static_cast<uint64_t>(resource->GetGPUVirtualAddress() + _impl->resourceOffset);
 }
 
+uint64_t CCD3D12Buffer::getD3D12ResourceVersion() const {
+    if (!_impl) {
+        return 0;
+    }
+    if (_impl->parent) {
+        return _impl->parent->getD3D12ResourceVersion();
+    }
+    return _impl->resource ? _impl->resourceVersion : 0;
+}
+
 uint64_t CCD3D12Buffer::getD3D12UniformGPUVirtualAddress() const {
     if (!_impl) {
         return 0;
@@ -468,6 +480,7 @@ bool CCD3D12Buffer::createResource(uint32_t size) {
     }
 
     _impl->resource = resource;
+    ++_impl->resourceVersion;
     if (_impl->updateQueued) {
         device->discardPendingBufferUpdate(this);
     }

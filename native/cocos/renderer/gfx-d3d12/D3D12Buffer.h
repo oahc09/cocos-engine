@@ -43,6 +43,7 @@ public:
 
     void *getD3D12ResourceHandle() const;
     uint64_t getD3D12GPUVirtualAddress() const;
+    uint64_t getD3D12ResourceVersion() const;
     uint64_t getD3D12UniformGPUVirtualAddress() const;
     uint64_t getUniformDescriptorVersion() const;
     uint32_t getD3D12ConstantBufferSize() const;

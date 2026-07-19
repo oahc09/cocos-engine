@@ -38,6 +38,11 @@
 namespace cc {
 namespace gfx {
 
+static constexpr uint32_t D3D12_LOCAL_DESCRIPTOR_SET_INDEX = 2;
+// Local set is split only when CommandBuffer can reuse the static suffix by an
+// exact resource comparison in the current descriptor-heap epoch.
+static constexpr bool D3D12_ENABLE_LOCAL_ROOT_TABLE_SPLIT = true;
+
 namespace {
 using D3D12PerfClock = std::chrono::steady_clock;
 
@@ -108,6 +113,9 @@ struct CCD3D12PipelineLayout::Impl {
     Microsoft::WRL::ComPtr<ID3D12RootSignature> rootSignature;
     uint64_t rootSignatureHash{0};
     ccstd::vector<int32_t> cbvSrvUavRootParameterIndices;
+    ccstd::vector<int32_t> dynamicCbvSrvUavRootParameterIndices;
+    ccstd::vector<int32_t> localRootCbvParameterIndices;
+    ccstd::vector<int32_t> staticCbvSrvUavRootParameterIndices;
     ccstd::vector<int32_t> samplerRootParameterIndices;
 };
 
@@ -123,6 +131,9 @@ void CCD3D12PipelineLayout::doInit(const PipelineLayoutInfo &info) {
     (void)info;
     const auto initStart = D3D12PerfClock::now();
     _impl->cbvSrvUavRootParameterIndices.assign(_setLayouts.size(), -1);
+    _impl->dynamicCbvSrvUavRootParameterIndices.assign(_setLayouts.size(), -1);
+    _impl->localRootCbvParameterIndices.assign(_setLayouts.size(), -1);
+    _impl->staticCbvSrvUavRootParameterIndices.assign(_setLayouts.size(), -1);
     _impl->samplerRootParameterIndices.assign(_setLayouts.size(), -1);
 
     auto *device = CCD3D12Device::getInstance();
@@ -149,6 +160,10 @@ void CCD3D12PipelineLayout::doInit(const PipelineLayoutInfo &info) {
         // Separate ranges by heap type: Sampler vs CBV/SRV/UAV
         ccstd::vector<D3D12_DESCRIPTOR_RANGE> samplerRanges;
         ccstd::vector<D3D12_DESCRIPTOR_RANGE> cbvSrvUavRanges;
+        ccstd::vector<D3D12_DESCRIPTOR_RANGE> dynamicBufferCbvSrvUavRanges;
+        ccstd::vector<D3D12_DESCRIPTOR_RANGE> staticCbvSrvUavRanges;
+        bool localPartitionValid = setIndex == D3D12_LOCAL_DESCRIPTOR_SET_INDEX;
+        bool localRootCbvPrefixSeen = false;
 
         for (const auto &binding : bindings) {
             DescriptorType descType = binding.descriptorType;
@@ -164,6 +179,9 @@ void CCD3D12PipelineLayout::doInit(const PipelineLayoutInfo &info) {
                 srvRange.RegisterSpace = setIndex;
                 srvRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
                 cbvSrvUavRanges.push_back(srvRange);
+                if (localPartitionValid) {
+                    staticCbvSrvUavRanges.push_back(srvRange);
+                }
 
                 uint32_t baseRegisterSampler = static_cast<uint32_t>(samplerRanges.size());
                 D3D12_DESCRIPTOR_RANGE samplerRange{};
@@ -190,6 +208,19 @@ void CCD3D12PipelineLayout::doInit(const PipelineLayoutInfo &info) {
                 range.RegisterSpace = setIndex;
                 range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
                 cbvSrvUavRanges.push_back(range);
+                if (localPartitionValid) {
+                    const bool rootCbvPrefix = !localRootCbvPrefixSeen &&
+                                               descType == DescriptorType::UNIFORM_BUFFER &&
+                                               binding.binding == 0 && binding.count == 1;
+                    if (rootCbvPrefix) {
+                        localRootCbvPrefixSeen = true;
+                    } else if (descType == DescriptorType::DYNAMIC_UNIFORM_BUFFER ||
+                               descType == DescriptorType::DYNAMIC_STORAGE_BUFFER) {
+                        dynamicBufferCbvSrvUavRanges.push_back(range);
+                    } else {
+                        staticCbvSrvUavRanges.push_back(range);
+                    }
+                }
             }
         }
 
@@ -199,7 +230,38 @@ void CCD3D12PipelineLayout::doInit(const PipelineLayoutInfo &info) {
         // set is accessed from multiple shader stages.
         D3D12_SHADER_VISIBILITY visibility = D3D12_SHADER_VISIBILITY_ALL;
 
-        if (!cbvSrvUavRanges.empty()) {
+        const bool splitLocalCbvSrvUav = D3D12_ENABLE_LOCAL_ROOT_TABLE_SPLIT && localPartitionValid &&
+                                         localRootCbvPrefixSeen &&
+                                         !staticCbvSrvUavRanges.empty();
+        if (splitLocalCbvSrvUav) {
+            _impl->localRootCbvParameterIndices[setIndex] = static_cast<int32_t>(rootParameters.size());
+            D3D12_ROOT_PARAMETER rootCbvParam{};
+            rootCbvParam.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+            rootCbvParam.ShaderVisibility = visibility;
+            rootCbvParam.Descriptor.ShaderRegister = 0;
+            rootCbvParam.Descriptor.RegisterSpace = setIndex;
+            rootParameters.push_back(rootCbvParam);
+
+            if (!dynamicBufferCbvSrvUavRanges.empty()) {
+                _impl->dynamicCbvSrvUavRootParameterIndices[setIndex] = static_cast<int32_t>(rootParameters.size());
+                D3D12_ROOT_PARAMETER dynamicParam{};
+                dynamicParam.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+                dynamicParam.ShaderVisibility = visibility;
+                dynamicParam.DescriptorTable.NumDescriptorRanges =
+                    static_cast<UINT>(dynamicBufferCbvSrvUavRanges.size());
+                rootParameters.push_back(dynamicParam);
+                allRanges.insert(allRanges.end(), dynamicBufferCbvSrvUavRanges.begin(),
+                                 dynamicBufferCbvSrvUavRanges.end());
+            }
+
+            _impl->staticCbvSrvUavRootParameterIndices[setIndex] = static_cast<int32_t>(rootParameters.size());
+            D3D12_ROOT_PARAMETER staticParam{};
+            staticParam.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            staticParam.ShaderVisibility = visibility;
+            staticParam.DescriptorTable.NumDescriptorRanges = static_cast<UINT>(staticCbvSrvUavRanges.size());
+            rootParameters.push_back(staticParam);
+            allRanges.insert(allRanges.end(), staticCbvSrvUavRanges.begin(), staticCbvSrvUavRanges.end());
+        } else if (!cbvSrvUavRanges.empty()) {
             _impl->cbvSrvUavRootParameterIndices[setIndex] = static_cast<int32_t>(rootParameters.size());
             D3D12_ROOT_PARAMETER param{};
             param.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -235,6 +297,9 @@ void CCD3D12PipelineLayout::doInit(const PipelineLayoutInfo &info) {
     // We iterate again, counting ranges per parameter
     uint32_t rangeIdx = 0;
     for (auto &param : rootParameters) {
+        if (param.ParameterType != D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+            continue;
+        }
         uint32_t numRanges = param.DescriptorTable.NumDescriptorRanges;
         param.DescriptorTable.pDescriptorRanges = &allRanges[rangeIdx];
         rangeIdx += numRanges;
@@ -297,6 +362,9 @@ void CCD3D12PipelineLayout::doDestroy() {
     }
     _impl->rootSignatureHash = 0;
     _impl->cbvSrvUavRootParameterIndices.clear();
+    _impl->dynamicCbvSrvUavRootParameterIndices.clear();
+    _impl->localRootCbvParameterIndices.clear();
+    _impl->staticCbvSrvUavRootParameterIndices.clear();
     _impl->samplerRootParameterIndices.clear();
 }
 
@@ -316,6 +384,21 @@ int32_t CCD3D12PipelineLayout::getSamplerRootParameterIndex(uint32_t set) const 
         return -1;
     }
     return _impl->samplerRootParameterIndices[set];
+}
+
+int32_t CCD3D12PipelineLayout::getDynamicCbvSrvUavRootParameterIndex(uint32_t set) const {
+    return (!_impl || set >= _impl->dynamicCbvSrvUavRootParameterIndices.size()) ? -1 :
+           _impl->dynamicCbvSrvUavRootParameterIndices[set];
+}
+
+int32_t CCD3D12PipelineLayout::getLocalRootCbvParameterIndex(uint32_t set) const {
+    return (!_impl || set >= _impl->localRootCbvParameterIndices.size()) ? -1 :
+           _impl->localRootCbvParameterIndices[set];
+}
+
+int32_t CCD3D12PipelineLayout::getStaticCbvSrvUavRootParameterIndex(uint32_t set) const {
+    return (!_impl || set >= _impl->staticCbvSrvUavRootParameterIndices.size()) ? -1 :
+           _impl->staticCbvSrvUavRootParameterIndices[set];
 }
 
 uint64_t CCD3D12PipelineLayout::getRootSignatureHash() const {

@@ -39,13 +39,11 @@
 #include "base/Log.h"
 #include "gfx-base/GFXDef.h"
 
+
     #ifndef NOMINMAX
         #define NOMINMAX
     #endif
     #include <algorithm>
-#if CC_D3D12_PERF_COUNTERS
-    #include <chrono>
-#endif
     #include <cstring>
     #include <d3d12.h>
     #include <d3dcompiler.h>
@@ -61,6 +59,9 @@ namespace gfx {
 static constexpr uint32_t D3D12_MAX_BOUND_SETS = 4;
 static constexpr uint32_t D3D12_MAX_ROOT_PARAMETERS = 64;
 static constexpr uint32_t D3D12_MAX_VERTEX_BUFFERS = 16;
+// Cocos' standard binding ABI is GLOBAL=0, MATERIAL=1, LOCAL=2. Keep this
+// diagnostic backend-local; it must not affect generic descriptor semantics.
+static constexpr uint32_t D3D12_LOCAL_DESCRIPTOR_SET_INDEX = 2;
 
 // Maximum resource barriers per render pass transition (swapchain + color attachments + depth)
 static constexpr uint32_t MAX_PASS_BARRIERS = 16;
@@ -77,27 +78,6 @@ uint64_t hashSamplerTableKey(const ccstd::vector<uint32_t> &key) {
     return hash;
 }
 
-#if CC_D3D12_PERF_COUNTERS
-void recordD3D12DescriptorStateBinds(uint32_t setDescriptorHeapCalls, uint32_t rootDescriptorTableBinds) {
-    if (auto *device = CCD3D12Device::getInstance()) {
-        device->recordDescriptorStateBinds(setDescriptorHeapCalls, rootDescriptorTableBinds);
-    }
-}
-
-void recordD3D12ResourceBarriers(uint32_t barrierCount) {
-    if (auto *device = CCD3D12Device::getInstance()) {
-        device->recordResourceBarriers(barrierCount);
-    }
-}
-
-void recordBarrierAnalysis(uint32_t textureTransitions, uint32_t bufferTransitions,
-                           uint32_t uavBarriers, uint32_t trackedAlreadyNext) {
-    if (auto *device = CCD3D12Device::getInstance()) {
-        device->recordBarrierAnalysis(textureTransitions, bufferTransitions, uavBarriers, trackedAlreadyNext);
-    }
-}
-
-#endif
 
 void retainCommandListResource(ccstd::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> &resources,
                                std::unordered_set<ID3D12Resource *> &retainedResources,
@@ -491,9 +471,6 @@ bool shaderBlitRegion(ID3D12Device *device,
     if (bindStaticBlitState) {
         commandList->SetGraphicsRootDescriptorTable(1, samplerHeapPtr->GetGPUDescriptorHandleForHeapStart());
     }
-#if CC_D3D12_PERF_COUNTERS
-    recordD3D12DescriptorStateBinds(bindStaticBlitState ? 1 : 0, bindStaticBlitState ? 2 : 1);
-#endif
 
     const uint32_t srcMipWidth = std::max<uint32_t>(srcInfo.width >> region.srcSubres.mipLevel, 1);
     const uint32_t srcMipHeight = std::max<uint32_t>(srcInfo.height >> region.srcSubres.mipLevel, 1);
@@ -608,9 +585,6 @@ bool generateMipmaps(ID3D12Device *device,
 
             const UINT preBarrierCount = mip == 1 ? 2U : 1U;
             commandList->ResourceBarrier(preBarrierCount, mip == 1 ? preBarriers : &preBarriers[1]);
-#if CC_D3D12_PERF_COUNTERS
-            recordD3D12ResourceBarriers(preBarrierCount);
-#endif
 
             TextureBlit region{};
             region.srcSubres.mipLevel = mip - 1;
@@ -632,9 +606,6 @@ bool generateMipmaps(ID3D12Device *device,
             toShaderRead.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
             toShaderRead.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
             commandList->ResourceBarrier(1, &toShaderRead);
-#if CC_D3D12_PERF_COUNTERS
-            recordD3D12ResourceBarriers(1);
-#endif
         }
     }
 
@@ -670,36 +641,6 @@ struct CCD3D12CommandBuffer::Impl {
         uint32_t copyCount{1};
     };
 
-#if CC_D3D12_PERF_COUNTERS
-    enum PerfDrawSequenceEventKind : uint32_t {
-        PERF_ROOT_TABLE_EVENT = 1,
-        PERF_DRAW_EVENT_STATE = 2,
-        PERF_DRAW_EVENT_ARGUMENTS = 3,
-        PERF_DRAW_EVENT_VERTEX_BUFFER = 4,
-        PERF_DRAW_EVENT_INDEX_BUFFER = 5,
-        PERF_DESCRIPTOR_SOURCE_EVENT = 6,
-        PERF_DYNAMIC_OFFSET_EVENT = 7,
-        PERF_UNIFORM_CBV_EVENT = 8,
-        PERF_DESCRIPTOR_SEMANTIC_EVENT = 9,
-    };
-    struct PerfDrawSequenceEvent {
-        uint32_t kind{0};
-        uint32_t index{0};
-        uint64_t value0{0};
-        uint64_t value1{0};
-        uint64_t value2{0};
-        uint64_t value3{0};
-        uint64_t value4{0};
-        uint64_t value5{0};
-
-        bool operator==(const PerfDrawSequenceEvent &other) const {
-            return kind == other.kind && index == other.index &&
-                   value0 == other.value0 && value1 == other.value1 &&
-                   value2 == other.value2 && value3 == other.value3 &&
-                   value4 == other.value4 && value5 == other.value5;
-        }
-    };
-#endif
     struct CommandRecordingContext {
         Microsoft::WRL::ComPtr<ID3D12CommandAllocator> commandAllocator;
         Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commandList;
@@ -708,14 +649,8 @@ struct CCD3D12CommandBuffer::Impl {
         ccstd::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> pendingUploadResources;
         std::unordered_set<ID3D12Resource *> pendingUploadResourceSet;
         ccstd::vector<Microsoft::WRL::ComPtr<ID3D12DescriptorHeap>> pendingDescriptorHeaps;
-#if CC_D3D12_PERF_COUNTERS
-        ccstd::vector<PerfDrawSequenceEvent> perfPreviousDrawSequence;
-        ccstd::vector<PerfDrawSequenceEvent> perfCurrentDrawSequence;
-        bool perfHasPreviousDrawSequence{false};
-        uint32_t perfDrawSequenceComparisonCount{0};
-#endif
     };
-    CommandRecordingContext recordingContexts[2];
+    CommandRecordingContext recordingContexts[D3D12_MAX_FRAMES_IN_FLIGHT];
     uint32_t activeRecordingContext{1};
 
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator> commandAllocator;
@@ -745,10 +680,6 @@ struct CCD3D12CommandBuffer::Impl {
     D3D12_RECT boundScissor{};
     bool scissorValid{false};
     bool isRecording{false};
-#if CC_D3D12_PERF_COUNTERS
-    std::chrono::steady_clock::time_point perfRecordingStart{};
-    bool perfRecordingStartValid{false};
-#endif
 
     // Track swapchain for resource barriers during render pass
     CCD3D12Swapchain *activeSwapchain{nullptr};
@@ -803,6 +734,27 @@ struct CCD3D12CommandBuffer::Impl {
         uint32_t heapIndex{0};
         ID3D12DescriptorHeap *heap{nullptr};
     };
+    // The command-buffer half of the local root-table split uses the same
+    // heap-epoch lifetime rule as samplerTableCache.  It remains inert until
+    // both split root parameters are emitted by the active PipelineLayout.
+    struct CachedLocalStaticCbvSrvUavTable {
+        CCD3D12DescriptorSet *owner{nullptr};
+        uint64_t signature{0};
+        uint64_t gpuHandle{0};
+        uint32_t descriptorCount{0};
+        uint32_t heapIndex{0};
+        ID3D12DescriptorHeap *heap{nullptr};
+    };
+    // All-null dynamic slots produce the same explicit null CBV/SRV
+    // descriptors. Reuse their GPU table only for the same layout and heap
+    // epoch; any real buffer binding takes the normal per-set path.
+    struct CachedLocalNullDynamicCbvSrvUavTable {
+        const DescriptorSetLayout *layout{nullptr};
+        uint64_t gpuHandle{0};
+        uint32_t descriptorCount{0};
+        uint32_t heapIndex{0};
+        ID3D12DescriptorHeap *heap{nullptr};
+    };
     struct BoundRootTable {
         uint64_t gpuHandle{0};
         bool valid{false};
@@ -811,17 +763,36 @@ struct CCD3D12CommandBuffer::Impl {
     BoundRootTable boundRootTables[D3D12_MAX_ROOT_PARAMETERS]{};
     CachedGpuDescriptorSet gpuDescriptorCache[D3D12_MAX_BOUND_SETS]{};
     std::unordered_map<uint64_t, ccstd::vector<CachedSamplerTable>> samplerTableCache;
+    std::unordered_map<uint64_t, ccstd::vector<CachedLocalStaticCbvSrvUavTable>> localStaticCbvSrvUavTableCache;
+    CachedLocalNullDynamicCbvSrvUavTable localNullDynamicCbvSrvUavTable;
     ID3D12DescriptorHeap *samplerTableCacheHeap{nullptr};
     uint32_t samplerTableCacheHeapIndex{std::numeric_limits<uint32_t>::max()};
-#if CC_D3D12_PERF_COUNTERS
-    ccstd::vector<uint32_t> perfLastSamplerTableKey;
-    ID3D12DescriptorHeap *perfLastSamplerTableHeap{nullptr};
-    uint32_t perfLastSamplerTableHeapIndex{std::numeric_limits<uint32_t>::max()};
-#endif
     uint32_t pendingSetCount{0};
     bool descriptorSetsDirty{false};
+    bool localDescriptorSetOnlyDirty{false};
     ID3D12DescriptorHeap *boundCbvSrvUavHeap{nullptr};
     ID3D12DescriptorHeap *boundSamplerHeap{nullptr};
+    struct LocalRootCbvIndirectDraw {
+        uint64_t rootCbvGpuAddress{0};
+        D3D12_DRAW_ARGUMENTS arguments{};
+    };
+    struct LocalRootCbvIndexedIndirectDraw {
+        uint64_t rootCbvGpuAddress{0};
+        D3D12_DRAW_INDEXED_ARGUMENTS arguments{};
+        uint32_t padding{0};
+    };
+    static_assert(sizeof(LocalRootCbvIndirectDraw) == 24, "Unexpected D3D12 indirect draw stride");
+    static_assert(sizeof(LocalRootCbvIndexedIndirectDraw) == 32, "Unexpected D3D12 indexed indirect draw stride");
+    bool localRootCbvBatchActive{false};
+    bool localRootCbvBatchReady{false};
+    bool localRootCbvBatchIndexed{false};
+    uint32_t localRootCbvBatchRootParameterIndex{0};
+    ID3D12RootSignature *localRootCbvBatchRootSignature{nullptr};
+    CCD3D12DescriptorSet *localRootCbvBatchDescriptorSet{nullptr};
+    uint64_t localRootCbvBatchStaticSignature{0};
+    ccstd::vector<uint32_t> localRootCbvBatchSamplerKey;
+    ccstd::vector<LocalRootCbvIndirectDraw> localRootCbvBatchDraws;
+    ccstd::vector<LocalRootCbvIndexedIndirectDraw> localRootCbvBatchIndexedDraws;
     float dynamicDepthBias{0.F};
     float dynamicDepthBiasClamp{0.F};
     float dynamicDepthBiasSlope{0.F};
@@ -837,19 +808,7 @@ struct CCD3D12CommandBuffer::Impl {
     uint32_t lastDynamicStencilReadMask{0xFFFFFFFFU};
     uint32_t lastDynamicStencilWriteMask{0xFFFFFFFFU};
     bool dynamicPipelineStateValid{false};
-#if CC_D3D12_PERF_COUNTERS
-    uint64_t perfPipelineNativeStateChanges{0};
-#endif
 
-#if CC_D3D12_PERF_COUNTERS
-    void appendPerfDrawSequenceEvent(uint32_t kind, uint32_t index,
-                                     uint64_t value0 = 0, uint64_t value1 = 0,
-                                     uint64_t value2 = 0, uint64_t value3 = 0,
-                                     uint64_t value4 = 0, uint64_t value5 = 0) {
-        recordingContexts[activeRecordingContext].perfCurrentDrawSequence.push_back(
-            {kind, index, value0, value1, value2, value3, value4, value5});
-    }
-#endif
 
     // Resources replaced while recording stay alive until this command buffer
     // can be safely reused. Upload heap pages are owned by the device ring.
@@ -863,15 +822,9 @@ struct CCD3D12CommandBuffer::Impl {
     ccstd::vector<D3D12_RESOURCE_BARRIER> bufferUpdatePostCopyBarriers;
     bool bufferUpdateBatchActive{false};
     bool bufferUpdateBatchDestinationsAreUnique{false};
-#if CC_D3D12_PERF_COUNTERS
-    bool perfUniqueBatchRetentionEnabled{false};
-    uint64_t perfUniqueBatchRetentionCalls{0};
-    uint64_t perfUniqueBatchRetentionInsertions{0};
-    uint64_t perfUniqueBatchRetentionNs{0};
-#endif
     // Kept after the existing hot recording state so Bundle lifetime tracking
     // does not shift fields accessed by every draw in primary-only scenes.
-    ccstd::vector<IntrusivePtr<CCD3D12CommandBuffer>> executedBundles[2];
+    ccstd::vector<IntrusivePtr<CCD3D12CommandBuffer>> executedBundles[D3D12_MAX_FRAMES_IN_FLIGHT];
 };
 
 CCD3D12CommandBuffer::CCD3D12CommandBuffer()
@@ -953,13 +906,10 @@ void CCD3D12CommandBuffer::doDestroy() {
         cachedSet.reset();
     }
     _impl->samplerTableCache.clear();
+    _impl->localStaticCbvSrvUavTableCache.clear();
+    _impl->localNullDynamicCbvSrvUavTable = {};
     _impl->samplerTableCacheHeap = nullptr;
     _impl->samplerTableCacheHeapIndex = std::numeric_limits<uint32_t>::max();
-#if CC_D3D12_PERF_COUNTERS
-    _impl->perfLastSamplerTableKey.clear();
-    _impl->perfLastSamplerTableHeap = nullptr;
-    _impl->perfLastSamplerTableHeapIndex = std::numeric_limits<uint32_t>::max();
-#endif
     _impl->pendingDefaultBufferCopies.clear();
     _impl->pendingDefaultBufferTransitions.clear();
     _impl->pendingDefaultBufferTransitionIndices.clear();
@@ -1002,17 +952,7 @@ void CCD3D12CommandBuffer::waitForFenceValue() {
     }
     HRESULT hr = context.lastSubmittedFence->SetEventOnCompletion(context.lastSubmittedFenceValue, fenceEvent);
     if (SUCCEEDED(hr)) {
-#if CC_D3D12_PERF_COUNTERS
-        const auto waitStart = std::chrono::steady_clock::now();
-#endif
         WaitForSingleObject(fenceEvent, INFINITE);
-#if CC_D3D12_PERF_COUNTERS
-        const auto waitEnd = std::chrono::steady_clock::now();
-        const auto waitUs = std::chrono::duration_cast<std::chrono::microseconds>(waitEnd - waitStart).count();
-        if (auto *device = CCD3D12Device::getInstance()) {
-            device->recordFenceWait(static_cast<uint64_t>(std::max<int64_t>(waitUs, 0)));
-        }
-#endif
         context.lastSubmittedFence.Reset();
         context.lastSubmittedFenceValue = 0;
     } else {
@@ -1032,14 +972,6 @@ void CCD3D12CommandBuffer::startBufferUpdateBatch(bool destinationsAreUnique) {
     _impl->bufferUpdatePostCopyBarriers.clear();
     _impl->bufferUpdateBatchDestinationsAreUnique = destinationsAreUnique;
     _impl->bufferUpdateBatchActive = true;
-#if CC_D3D12_PERF_COUNTERS
-    auto *device = CCD3D12Device::getInstance();
-    _impl->perfUniqueBatchRetentionEnabled =
-        destinationsAreUnique && device && device->isPerfLoggingEnabled();
-    _impl->perfUniqueBatchRetentionCalls = 0;
-    _impl->perfUniqueBatchRetentionInsertions = 0;
-    _impl->perfUniqueBatchRetentionNs = 0;
-#endif
 }
 
 void CCD3D12CommandBuffer::finishBufferUpdateBatch() {
@@ -1052,19 +984,9 @@ void CCD3D12CommandBuffer::finishBufferUpdateBatch() {
     if (_impl->pendingDefaultBufferCopies.empty()) {
         _impl->pendingDefaultBufferTransitions.clear();
         _impl->pendingDefaultBufferTransitionIndices.clear();
-#if CC_D3D12_PERF_COUNTERS
-        _impl->perfUniqueBatchRetentionEnabled = false;
-#endif
         return;
     }
 
-#if CC_D3D12_PERF_COUNTERS
-    auto *device = CCD3D12Device::getInstance();
-    const bool perfTimingEnabled = device && device->isPerfLoggingEnabled();
-    const auto batchStart = perfTimingEnabled
-                                ? std::chrono::steady_clock::now()
-                                : std::chrono::steady_clock::time_point{};
-#endif
 
     auto &preCopyBarriers = _impl->bufferUpdatePreCopyBarriers;
     auto &postCopyBarriers = _impl->bufferUpdatePostCopyBarriers;
@@ -1095,33 +1017,10 @@ void CCD3D12CommandBuffer::finishBufferUpdateBatch() {
         barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         postCopyBarriers.push_back(barrier);
     }
-#if CC_D3D12_PERF_COUNTERS
-    const auto barrierBuildEnd = perfTimingEnabled
-                                     ? std::chrono::steady_clock::now()
-                                     : std::chrono::steady_clock::time_point{};
-    uint64_t barrierSubmitNs = 0;
-#endif
 
     if (!preCopyBarriers.empty()) {
-#if CC_D3D12_PERF_COUNTERS
-        const auto barrierStart = perfTimingEnabled
-                                      ? std::chrono::steady_clock::now()
-                                      : std::chrono::steady_clock::time_point{};
-#endif
         _impl->commandList->ResourceBarrier(static_cast<UINT>(preCopyBarriers.size()), preCopyBarriers.data());
-#if CC_D3D12_PERF_COUNTERS
-        if (perfTimingEnabled) {
-            barrierSubmitNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now() - barrierStart).count());
-        }
-        recordD3D12ResourceBarriers(static_cast<uint32_t>(preCopyBarriers.size()));
-#endif
     }
-#if CC_D3D12_PERF_COUNTERS
-    const auto copyStart = perfTimingEnabled
-                               ? std::chrono::steady_clock::now()
-                               : std::chrono::steady_clock::time_point{};
-#endif
     for (const auto &copy : _impl->pendingDefaultBufferCopies) {
         if (copy.transitionIndex >= _impl->pendingDefaultBufferTransitions.size() ||
             _impl->pendingDefaultBufferTransitions[copy.transitionIndex].copyCount != 1) {
@@ -1131,43 +1030,15 @@ void CCD3D12CommandBuffer::finishBufferUpdateBatch() {
             copy.destination, copy.destinationOffset,
             copy.source, copy.sourceOffset, copy.size);
     }
-#if CC_D3D12_PERF_COUNTERS
-    const auto copyEnd = perfTimingEnabled
-                             ? std::chrono::steady_clock::now()
-                             : std::chrono::steady_clock::time_point{};
-#endif
     if (!postCopyBarriers.empty()) {
-#if CC_D3D12_PERF_COUNTERS
-        const auto barrierStart = perfTimingEnabled
-                                      ? std::chrono::steady_clock::now()
-                                      : std::chrono::steady_clock::time_point{};
-#endif
         _impl->commandList->ResourceBarrier(static_cast<UINT>(postCopyBarriers.size()), postCopyBarriers.data());
-#if CC_D3D12_PERF_COUNTERS
-        if (perfTimingEnabled) {
-            barrierSubmitNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now() - barrierStart).count());
-        }
-        recordD3D12ResourceBarriers(static_cast<uint32_t>(postCopyBarriers.size()));
-#endif
     }
-#if CC_D3D12_PERF_COUNTERS
-    const auto stateStart = perfTimingEnabled
-                                ? std::chrono::steady_clock::now()
-                                : std::chrono::steady_clock::time_point{};
-#endif
     for (const auto &copy : _impl->pendingDefaultBufferCopies) {
         if (copy.buffer && copy.transitionIndex < _impl->pendingDefaultBufferTransitions.size() &&
             _impl->pendingDefaultBufferTransitions[copy.transitionIndex].copyCount == 1) {
             copy.buffer->setCurrentState(D3D12_RESOURCE_STATE_GENERIC_READ);
         }
     }
-#if CC_D3D12_PERF_COUNTERS
-    const auto stateEnd = perfTimingEnabled
-                              ? std::chrono::steady_clock::now()
-                              : std::chrono::steady_clock::time_point{};
-    const auto fallbackStart = stateEnd;
-#endif
 
     // A repeated destination may represent multiple writes or aliased buffer
     // wrappers. Preserve the original per-copy barrier ordering for that rare
@@ -1191,9 +1062,6 @@ void CCD3D12CommandBuffer::finishBufferUpdateBatch() {
             toCopyDest.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
             toCopyDest.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
             _impl->commandList->ResourceBarrier(1, &toCopyDest);
-#if CC_D3D12_PERF_COUNTERS
-            recordD3D12ResourceBarriers(1);
-#endif
         }
         _impl->commandList->CopyBufferRegion(
             copy.destination, copy.destinationOffset,
@@ -1205,37 +1073,9 @@ void CCD3D12CommandBuffer::finishBufferUpdateBatch() {
         toRead.Transition.StateAfter = D3D12_RESOURCE_STATE_GENERIC_READ;
         toRead.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         _impl->commandList->ResourceBarrier(1, &toRead);
-#if CC_D3D12_PERF_COUNTERS
-        recordD3D12ResourceBarriers(1);
-#endif
         copy.buffer->setCurrentState(D3D12_RESOURCE_STATE_GENERIC_READ);
     }
 
-#if CC_D3D12_PERF_COUNTERS
-    if (device && perfTimingEnabled) {
-        const auto batchEnd = std::chrono::steady_clock::now();
-        const auto batchNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-            batchEnd - batchStart).count());
-        const auto buildNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-            barrierBuildEnd - batchStart).count());
-        const auto copyNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-            copyEnd - copyStart).count());
-        const auto stateNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-            stateEnd - stateStart).count());
-        const auto fallbackNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-            batchEnd - fallbackStart).count());
-        device->recordHotPathTimings(0, 0, batchNs, 0, 0, 0);
-        device->recordBufferBatchPhaseTimings(
-            batchNs, buildNs, barrierSubmitNs, copyNs, stateNs, fallbackNs);
-    }
-    if (device && _impl->perfUniqueBatchRetentionCalls > 0) {
-        device->recordUniqueBatchRetentionTiming(
-            _impl->perfUniqueBatchRetentionCalls,
-            _impl->perfUniqueBatchRetentionInsertions,
-            _impl->perfUniqueBatchRetentionNs);
-    }
-    _impl->perfUniqueBatchRetentionEnabled = false;
-#endif
     _impl->pendingDefaultBufferCopies.clear();
     _impl->pendingDefaultBufferTransitions.clear();
     _impl->pendingDefaultBufferTransitionIndices.clear();
@@ -1245,6 +1085,7 @@ void CCD3D12CommandBuffer::invalidateDescriptorTables() {
     for (auto &table : _impl->boundRootTables) {
         table = {};
     }
+    _impl->localDescriptorSetOnlyDirty = false;
     if (_impl->pendingSetCount > 0) {
         _impl->descriptorSetsDirty = true;
     }
@@ -1274,9 +1115,6 @@ void CCD3D12CommandBuffer::begin(RenderPass *renderPass, uint32_t subpass, Frame
     (void)renderPass;
     (void)subpass;
     (void)frameBuffer;
-#if CC_D3D12_PERF_COUNTERS
-    const auto commandBeginStart = std::chrono::steady_clock::now();
-#endif
     if (!_impl->commandAllocator || !_impl->commandList) {
         CC_LOG_ERROR("D3D12CommandBuffer::begin - allocator or command list is null.");
         return;
@@ -1286,18 +1124,13 @@ void CCD3D12CommandBuffer::begin(RenderPass *renderPass, uint32_t subpass, Frame
     previousContext.pendingUploadResources = std::move(_impl->pendingUploadResources);
     previousContext.pendingUploadResourceSet = std::move(_impl->pendingUploadResourceSet);
     previousContext.pendingDescriptorHeaps = std::move(_impl->pendingDescriptorHeaps);
-    _impl->activeRecordingContext = (_impl->activeRecordingContext + 1) % 2;
+    _impl->activeRecordingContext = (_impl->activeRecordingContext + 1) % D3D12_MAX_FRAMES_IN_FLIGHT;
     auto &activeContext = _impl->recordingContexts[_impl->activeRecordingContext];
     _impl->commandAllocator = activeContext.commandAllocator;
     _impl->commandList = activeContext.commandList;
 
     waitForFenceValue();
 
-#if CC_D3D12_PERF_COUNTERS
-    if (auto *device = CCD3D12Device::getInstance(); device && device->isPerfLoggingEnabled()) {
-        activeContext.perfCurrentDrawSequence.clear();
-    }
-#endif
 
     // The selected context's fence has completed, so its retained resources can
     // be released before recording a new command list into the same allocator.
@@ -1345,17 +1178,15 @@ void CCD3D12CommandBuffer::begin(RenderPass *renderPass, uint32_t subpass, Frame
     }
     _impl->pendingSetCount = 0;
     _impl->descriptorSetsDirty = false;
+    _impl->localDescriptorSetOnlyDirty = false;
     for (auto &cachedSet : _impl->gpuDescriptorCache) {
         cachedSet.reset();
     }
     _impl->samplerTableCache.clear();
+    _impl->localStaticCbvSrvUavTableCache.clear();
+    _impl->localNullDynamicCbvSrvUavTable = {};
     _impl->samplerTableCacheHeap = nullptr;
     _impl->samplerTableCacheHeapIndex = std::numeric_limits<uint32_t>::max();
-#if CC_D3D12_PERF_COUNTERS
-    _impl->perfLastSamplerTableKey.clear();
-    _impl->perfLastSamplerTableHeap = nullptr;
-    _impl->perfLastSamplerTableHeapIndex = std::numeric_limits<uint32_t>::max();
-#endif
     _impl->boundCbvSrvUavHeap = nullptr;
     _impl->boundSamplerHeap = nullptr;
     invalidateGraphicsState();
@@ -1372,28 +1203,10 @@ void CCD3D12CommandBuffer::begin(RenderPass *renderPass, uint32_t subpass, Frame
     _numDrawCalls = 0;
     _numInstances = 0;
     _numTriangles = 0;
-#if CC_D3D12_PERF_COUNTERS
-    const auto commandBeginEnd = std::chrono::steady_clock::now();
-    _impl->perfRecordingStart = commandBeginEnd;
-    _impl->perfRecordingStartValid = true;
-    if (auto *device = CCD3D12Device::getInstance()) {
-        device->recordFramePhaseAnalysis(
-            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                commandBeginEnd - commandBeginStart).count()),
-            0, 0, 0, 0, 0, 0, 0);
-    }
-#endif
 }
 
 void CCD3D12CommandBuffer::end() {
     if (!_impl->commandList) return;
-#if CC_D3D12_PERF_COUNTERS
-    const auto commandEndStart = std::chrono::steady_clock::now();
-    const uint64_t commandRecordingNs = _impl->perfRecordingStartValid
-                                            ? static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                                  commandEndStart - _impl->perfRecordingStart).count())
-                                            : 0;
-#endif
 
     if (_type == CommandBufferType::PRIMARY) {
         CCD3D12Device::getInstance()->flushPendingBufferUpdates(this);
@@ -1432,73 +1245,6 @@ void CCD3D12CommandBuffer::end() {
         }
     }
     _impl->isRecording = false;
-#if CC_D3D12_PERF_COUNTERS
-    _impl->perfRecordingStartValid = false;
-    if (auto *device = CCD3D12Device::getInstance()) {
-        if (device->isPerfLoggingEnabled()) {
-            auto &activeContext = _impl->recordingContexts[_impl->activeRecordingContext];
-            const bool hadPrevious = activeContext.perfHasPreviousDrawSequence;
-            const bool exactMatch = hadPrevious &&
-                                    activeContext.perfCurrentDrawSequence == activeContext.perfPreviousDrawSequence;
-            uint32_t firstMismatchIndex = std::numeric_limits<uint32_t>::max();
-            if (hadPrevious) {
-                ++activeContext.perfDrawSequenceComparisonCount;
-            }
-            if (hadPrevious && !exactMatch) {
-                const size_t commonCount = std::min(activeContext.perfCurrentDrawSequence.size(),
-                                                    activeContext.perfPreviousDrawSequence.size());
-                size_t mismatch = 0;
-                while (mismatch < commonCount &&
-                       activeContext.perfCurrentDrawSequence[mismatch] == activeContext.perfPreviousDrawSequence[mismatch]) {
-                    ++mismatch;
-                }
-                firstMismatchIndex = static_cast<uint32_t>(std::min<size_t>(
-                    mismatch, std::numeric_limits<uint32_t>::max()));
-                if (activeContext.perfDrawSequenceComparisonCount == 1U ||
-                    activeContext.perfDrawSequenceComparisonCount % 64U == 0U) {
-                    const Impl::PerfDrawSequenceEvent emptyEvent{};
-                    const auto &currentEvent = mismatch < activeContext.perfCurrentDrawSequence.size()
-                                                   ? activeContext.perfCurrentDrawSequence[mismatch]
-                                                   : emptyEvent;
-                    const auto &previousEvent = mismatch < activeContext.perfPreviousDrawSequence.size()
-                                                    ? activeContext.perfPreviousDrawSequence[mismatch]
-                                                    : emptyEvent;
-                    CC_LOG_INFO("[D3D12-PERF-REUSE-MISMATCH] context=%u comparison=%u event=%u "
-                                "currentKind=%u previousKind=%u currentIndex=%u previousIndex=%u "
-                                "currentValues=%llx,%llx,%llx,%llx,%llx,%llx "
-                                "previousValues=%llx,%llx,%llx,%llx,%llx,%llx",
-                                _impl->activeRecordingContext,
-                                activeContext.perfDrawSequenceComparisonCount, firstMismatchIndex,
-                                currentEvent.kind, previousEvent.kind,
-                                currentEvent.index, previousEvent.index,
-                                static_cast<unsigned long long>(currentEvent.value0),
-                                static_cast<unsigned long long>(currentEvent.value1),
-                                static_cast<unsigned long long>(currentEvent.value2),
-                                static_cast<unsigned long long>(currentEvent.value3),
-                                static_cast<unsigned long long>(currentEvent.value4),
-                                static_cast<unsigned long long>(currentEvent.value5),
-                                static_cast<unsigned long long>(previousEvent.value0),
-                                static_cast<unsigned long long>(previousEvent.value1),
-                                static_cast<unsigned long long>(previousEvent.value2),
-                                static_cast<unsigned long long>(previousEvent.value3),
-                                static_cast<unsigned long long>(previousEvent.value4),
-                                static_cast<unsigned long long>(previousEvent.value5));
-                }
-            }
-            device->recordCommandReuseAnalysis(
-                static_cast<uint32_t>(activeContext.perfCurrentDrawSequence.size()),
-                hadPrevious, exactMatch, firstMismatchIndex);
-            activeContext.perfPreviousDrawSequence.swap(activeContext.perfCurrentDrawSequence);
-            activeContext.perfCurrentDrawSequence.clear();
-            activeContext.perfHasPreviousDrawSequence = true;
-        }
-        device->recordFramePhaseAnalysis(
-            0, commandRecordingNs,
-            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now() - commandEndStart).count()),
-            0, 0, 0, 0, 0);
-    }
-#endif
 }
 
 void CCD3D12CommandBuffer::transitionColorAttachment(uint32_t attachment, D3D12_RESOURCE_STATES state) {
@@ -1536,10 +1282,6 @@ void CCD3D12CommandBuffer::transitionColorAttachment(uint32_t attachment, D3D12_
     barrier.Transition.StateBefore = previousState;
     barrier.Transition.StateAfter = state;
     _impl->commandList->ResourceBarrier(1, &barrier);
-#if CC_D3D12_PERF_COUNTERS
-    recordD3D12ResourceBarriers(1);
-    recordBarrierAnalysis(1, 0, 0, 0);
-#endif
 
     if (hasTextureState) {
         texture->setCurrentState(state);
@@ -1811,9 +1553,6 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
     // Submit all pre-pass barriers at once
     if (prePassBarrierCount > 0) {
         _impl->commandList->ResourceBarrier(prePassBarrierCount, prePassBarriers);
-#if CC_D3D12_PERF_COUNTERS
-        recordD3D12ResourceBarriers(prePassBarrierCount);
-#endif
     }
 
     // Resolve attachments are part of the framebuffer but are not regular MRTs.
@@ -1988,9 +1727,6 @@ void CCD3D12CommandBuffer::endRenderPass() {
 
     if (postPassBarrierCount > 0) {
         _impl->commandList->ResourceBarrier(postPassBarrierCount, postPassBarriers);
-#if CC_D3D12_PERF_COUNTERS
-        recordD3D12ResourceBarriers(postPassBarrierCount);
-#endif
     }
 
     _impl->inRenderPass = false;
@@ -2046,9 +1782,6 @@ void CCD3D12CommandBuffer::execute(CommandBuffer *const *cmdBuffs, uint32_t coun
         }
         if (bundleHeapCount > 0) {
             _impl->commandList->SetDescriptorHeaps(bundleHeapCount, bundleHeaps);
-#if CC_D3D12_PERF_COUNTERS
-            recordD3D12DescriptorStateBinds(1, 0);
-#endif
             _impl->boundCbvSrvUavHeap = d3d12CmdBuff->_impl->boundCbvSrvUavHeap;
             _impl->boundSamplerHeap = d3d12CmdBuff->_impl->boundSamplerHeap;
         }
@@ -2067,15 +1800,18 @@ void CCD3D12CommandBuffer::execute(CommandBuffer *const *cmdBuffs, uint32_t coun
 void CCD3D12CommandBuffer::bindPipelineState(PipelineState *pso) {
     if (!_impl->commandList || !pso) return;
 
-#if CC_D3D12_PERF_COUNTERS
-    auto *perfDevice = CCD3D12Device::getInstance();
-    const bool perfTimingEnabled = perfDevice && perfDevice->isPerfLoggingEnabled();
-    const auto pipelineBindStart = perfTimingEnabled
-                                       ? std::chrono::steady_clock::now()
-                                       : std::chrono::steady_clock::time_point{};
-    const uint64_t nativeChangesBefore = _impl->perfPipelineNativeStateChanges;
-#endif
+    if (_impl->localRootCbvBatchActive && _impl->boundPipelineState != pso) {
+        flushLocalRootCbvBatch();
+    }
+
     const bool logicalPipelineChanged = _impl->boundPipelineState != pso;
+    if (!logicalPipelineChanged) {
+        // Pipeline, root signature, blend constants, stencil reference, and topology
+        // remain valid for the same logical PSO. Dynamic state still needs its
+        // normal update path because it may have been changed between draws.
+        applyDynamicPipelineState();
+        return;
+    }
     auto *d3d12PSO = static_cast<CCD3D12PipelineState *>(pso);
     auto *d3d12PipelineState = static_cast<ID3D12PipelineState *>(d3d12PSO->getID3D12PipelineState());
     if (!d3d12PipelineState) {
@@ -2085,9 +1821,6 @@ void CCD3D12CommandBuffer::bindPipelineState(PipelineState *pso) {
 
     if (logicalPipelineChanged && _impl->boundNativePipelineState != d3d12PipelineState) {
         _impl->commandList->SetPipelineState(d3d12PipelineState);
-#if CC_D3D12_PERF_COUNTERS
-        ++_impl->perfPipelineNativeStateChanges;
-#endif
         _impl->boundNativePipelineState = d3d12PipelineState;
     }
 
@@ -2141,6 +1874,7 @@ void CCD3D12CommandBuffer::bindPipelineState(PipelineState *pso) {
         _impl->boundPipelineLayout = newPipelineLayout;
         if (_impl->pendingSetCount > 0) {
             _impl->descriptorSetsDirty = true;
+            _impl->localDescriptorSetOnlyDirty = false;
         }
     }
 
@@ -2149,16 +1883,6 @@ void CCD3D12CommandBuffer::bindPipelineState(PipelineState *pso) {
         _impl->dynamicPipelineStateValid = false;
     }
     applyDynamicPipelineState();
-#if CC_D3D12_PERF_COUNTERS
-    if (perfDevice && perfTimingEnabled) {
-        const auto pipelineBindNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - pipelineBindStart).count());
-        perfDevice->recordGraphicsBindAnalysis(
-            1, logicalPipelineChanged ? 0U : 1U,
-            static_cast<uint32_t>(_impl->perfPipelineNativeStateChanges - nativeChangesBefore),
-            0, 0, 0, 0, pipelineBindNs, 0);
-    }
-#endif
 }
 
 void CCD3D12CommandBuffer::applyDynamicPipelineState() {
@@ -2208,9 +1932,6 @@ void CCD3D12CommandBuffer::applyDynamicPipelineState() {
     if (variant) {
         if (_impl->boundNativePipelineState != variant) {
             _impl->commandList->SetPipelineState(variant);
-#if CC_D3D12_PERF_COUNTERS
-            ++_impl->perfPipelineNativeStateChanges;
-#endif
             _impl->boundNativePipelineState = variant;
         }
         _impl->lastDynamicPipelineStateOwner = _impl->boundPipelineState;
@@ -2230,20 +1951,9 @@ void CCD3D12CommandBuffer::bindDescriptorSet(uint32_t set, DescriptorSet *descri
                      set, D3D12_MAX_BOUND_SETS);
         return;
     }
-#if CC_D3D12_PERF_COUNTERS
-    auto *perfDevice = CCD3D12Device::getInstance();
-    const bool perfTimingEnabled = perfDevice && perfDevice->isPerfLoggingEnabled();
-    const auto bindDescriptorSetStart = perfTimingEnabled
-                                            ? std::chrono::steady_clock::now()
-                                            : std::chrono::steady_clock::time_point{};
-    const auto recordBindDescriptorSetTiming = [&]() {
-        if (perfTimingEnabled) {
-            const auto elapsed = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now() - bindDescriptorSetStart).count());
-            perfDevice->recordCommandHotPathAnalysis(1, elapsed, 0, 0);
-        }
-    };
-#endif
+    if (_impl->localRootCbvBatchActive && set != D3D12_LOCAL_DESCRIPTOR_SET_INDEX) {
+        flushLocalRootCbvBatch();
+    }
 
     // Defer the actual GPU binding until draw time.
     // D3D12 only allows one CBV/SRV/UAV heap and one Sampler heap bound at a time,
@@ -2268,9 +1978,6 @@ void CCD3D12CommandBuffer::bindDescriptorSet(uint32_t set, DescriptorSet *descri
             if (_impl->pendingSets[i].set == descriptorSet &&
                 _impl->pendingSets[i].version == version &&
                 sameDynamicOffsets(_impl->pendingSets[i].dynamicOffsets)) {
-#if CC_D3D12_PERF_COUNTERS
-                recordBindDescriptorSetTiming();
-#endif
                 return;
             }
             _impl->pendingSets[i].set = descriptorSet;
@@ -2296,9 +2003,7 @@ void CCD3D12CommandBuffer::bindDescriptorSet(uint32_t set, DescriptorSet *descri
         ++_impl->pendingSetCount;
     }
     _impl->descriptorSetsDirty = true;
-#if CC_D3D12_PERF_COUNTERS
-    recordBindDescriptorSetTiming();
-#endif
+    _impl->localDescriptorSetOnlyDirty = set == D3D12_LOCAL_DESCRIPTOR_SET_INDEX;
 }
 
 bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental() {
@@ -2312,22 +2017,152 @@ bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental() {
         return false;
     }
 
+    // Steady local draws change only b0's GPU virtual address. Once the
+    // global/material tables and the local static/null-dynamic tables are
+    // already bound, avoid rebuilding the complete three-set descriptor view.
+    // A cache miss deliberately falls through to the conservative full path.
+    auto tryFlushLocalRootCbvOnly = [&]() {
+        if (!_impl->localDescriptorSetOnlyDirty) {
+            return false;
+        }
+
+        auto *localPending = static_cast<Impl::PendingDescriptorSet *>(nullptr);
+        for (uint32_t i = 0; i < _impl->pendingSetCount; ++i) {
+            auto &pending = _impl->pendingSets[i];
+            if (pending.valid && pending.set && pending.setIndex == D3D12_LOCAL_DESCRIPTOR_SET_INDEX) {
+                localPending = &pending;
+                break;
+            }
+        }
+        if (!localPending) {
+            return false;
+        }
+
+        auto *set = static_cast<CCD3D12DescriptorSet *>(localPending->set);
+        const int32_t rootCbvIndex = boundLayout->getLocalRootCbvParameterIndex(D3D12_LOCAL_DESCRIPTOR_SET_INDEX);
+        const int32_t dynamicRootIndex = boundLayout->getDynamicCbvSrvUavRootParameterIndex(D3D12_LOCAL_DESCRIPTOR_SET_INDEX);
+        const int32_t staticRootIndex = boundLayout->getStaticCbvSrvUavRootParameterIndex(D3D12_LOCAL_DESCRIPTOR_SET_INDEX);
+        const int32_t samplerRootIndex = boundLayout->getSamplerRootParameterIndex(D3D12_LOCAL_DESCRIPTOR_SET_INDEX);
+        if (!set || rootCbvIndex < 0 || dynamicRootIndex < 0 || staticRootIndex < 0) {
+            return false;
+        }
+
+        set->updateForLocalRootCbv(true);
+        uint32_t rootCbvDescriptorOffset = 0;
+        uint32_t staticCbvSrvUavCount = 0;
+        if (!set->getCbvSrvUavPartition(rootCbvDescriptorOffset, staticCbvSrvUavCount) ||
+            !set->hasOnlyNullDynamicDescriptorSources()) {
+            return false;
+        }
+        const uint32_t dynamicDescriptorCount = set->getDynamicDescriptorSlotCount();
+        const auto &cachedDynamic = _impl->localNullDynamicCbvSrvUavTable;
+        if (dynamicDescriptorCount == 0 || cachedDynamic.layout != set->getLayout() ||
+            cachedDynamic.descriptorCount != dynamicDescriptorCount || !cachedDynamic.heap ||
+            _impl->boundCbvSrvUavHeap != cachedDynamic.heap) {
+            return false;
+        }
+
+        uint32_t dynamicCbvDescriptors = 0;
+        uint32_t staticTextureDescriptors = 0;
+        uint32_t staticCbvSrvUavDescriptors = 0;
+        uint64_t staticSignature = 0;
+        set->getStaticDescriptorAnalysis(dynamicCbvDescriptors, staticTextureDescriptors,
+                                         staticCbvSrvUavDescriptors, staticSignature);
+        if (dynamicCbvDescriptors != 1 || staticCbvSrvUavDescriptors != staticCbvSrvUavCount ||
+            staticSignature == 0 || !set->canReuseStaticCbvSrvUavResources()) {
+            return false;
+        }
+
+        const Impl::CachedLocalStaticCbvSrvUavTable *cachedStatic = nullptr;
+        const auto staticBucket = _impl->localStaticCbvSrvUavTableCache.find(staticSignature);
+        if (staticBucket != _impl->localStaticCbvSrvUavTableCache.end()) {
+            for (const auto &entry : staticBucket->second) {
+                if (entry.heap == cachedDynamic.heap && entry.heapIndex == cachedDynamic.heapIndex &&
+                    entry.descriptorCount == staticCbvSrvUavCount && entry.owner &&
+                    entry.owner->hasMatchingStaticCbvSrvUavResources(*set)) {
+                    cachedStatic = &entry;
+                    break;
+                }
+            }
+        }
+        if (!cachedStatic) {
+            return false;
+        }
+
+        const Impl::CachedSamplerTable *cachedSampler = nullptr;
+        const uint32_t samplerDescriptorCount = set->getSamplerDescriptorCount();
+        if (samplerDescriptorCount > 0) {
+            if (samplerRootIndex < 0 || !_impl->samplerTableCacheHeap ||
+                _impl->boundSamplerHeap != _impl->samplerTableCacheHeap) {
+                return false;
+            }
+            const auto &samplerKey = set->getSamplerTableKey();
+            const auto samplerBucket = _impl->samplerTableCache.find(hashSamplerTableKey(samplerKey));
+            if (samplerBucket == _impl->samplerTableCache.end()) {
+                return false;
+            }
+            for (const auto &entry : samplerBucket->second) {
+                if (entry.heap == _impl->samplerTableCacheHeap &&
+                    entry.heapIndex == _impl->samplerTableCacheHeapIndex &&
+                    entry.descriptorCount == samplerDescriptorCount && entry.key == samplerKey) {
+                    cachedSampler = &entry;
+                    break;
+                }
+            }
+            if (!cachedSampler) {
+                return false;
+            }
+        }
+
+        auto bindCachedRootTable = [&](int32_t rootIndex, uint64_t gpuHandle) {
+            if (rootIndex < 0 || rootIndex >= static_cast<int32_t>(D3D12_MAX_ROOT_PARAMETERS) || gpuHandle == 0) {
+                return false;
+            }
+            auto &bound = _impl->boundRootTables[rootIndex];
+            if (!bound.valid || bound.gpuHandle != gpuHandle) {
+                _impl->commandList->SetGraphicsRootDescriptorTable(static_cast<UINT>(rootIndex), {gpuHandle});
+                bound = {gpuHandle, true};
+            }
+            return true;
+        };
+        if (!bindCachedRootTable(dynamicRootIndex, cachedDynamic.gpuHandle) ||
+            !bindCachedRootTable(staticRootIndex, cachedStatic->gpuHandle) ||
+            (cachedSampler && !bindCachedRootTable(samplerRootIndex, cachedSampler->gpuHandle))) {
+            return false;
+        }
+
+        uint64_t rootCbvGpuAddress = 0;
+        uint32_t rootCbvSize = 0;
+        const uint32_t uniformSlotCount = set->getUniformDescriptorSlotCount();
+        for (uint32_t slotIndex = 0; slotIndex < uniformSlotCount; ++slotIndex) {
+            uint32_t descriptorOffset = 0;
+            if (set->getUniformDescriptorSignature(slotIndex, descriptorOffset,
+                                                   rootCbvGpuAddress, rootCbvSize) &&
+                descriptorOffset == rootCbvDescriptorOffset) {
+                break;
+            }
+        }
+        if (rootCbvGpuAddress == 0 || rootCbvSize < 256U) {
+            auto *dummyBuffer = device->getDummyBuffer();
+            rootCbvGpuAddress = dummyBuffer ? dummyBuffer->getD3D12GPUVirtualAddress() : 0;
+        }
+        if (rootCbvGpuAddress == 0) {
+            return false;
+        }
+        _impl->commandList->SetGraphicsRootConstantBufferView(
+            static_cast<UINT>(rootCbvIndex), rootCbvGpuAddress);
+        _impl->descriptorSetsDirty = false;
+        _impl->localDescriptorSetOnlyDirty = false;
+        return true;
+    };
+    _impl->localDescriptorSetOnlyDirty = false;
+
     auto *d3dDevice = static_cast<ID3D12Device *>(device->getD3D12DeviceHandle());
     auto *cbvPool = device->getGPUDescriptorHeapPool();
     auto *samplerPool = device->getSamplerDescriptorHeapPool();
     if (!d3dDevice || !cbvPool) {
         return false;
     }
-#if CC_D3D12_PERF_COUNTERS
-    const bool perfTimingEnabled = device->isPerfLoggingEnabled();
-    const auto descriptorFullFlushStart = perfTimingEnabled
-                                              ? std::chrono::steady_clock::now()
-                                              : std::chrono::steady_clock::time_point{};
-    uint32_t descriptorCacheSlotLookups = 0;
-    uint32_t descriptorCacheSlotOwnerChanges = 0;
-    uint64_t descriptorCacheProbeNanoseconds = 0;
-    uint64_t descriptorSetUpdateNs = 0;
-#endif
 
     struct PreparedRange {
         ID3D12DescriptorHeap *heap{nullptr};
@@ -2342,10 +2177,22 @@ bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental() {
         const ccstd::vector<uint32_t> *dynamicOffsets{nullptr};
         uint64_t version{0};
         uint32_t cbvCount{0};
+        uint32_t dynamicCbvCount{0};
+        uint32_t dynamicDescriptorCount{0};
+        uint32_t localRootCbvDescriptorOffset{0};
+        uint32_t staticCbvSrvUavCount{0};
         uint32_t samplerCount{0};
         int32_t cbvRootIndex{-1};
+        int32_t dynamicCbvRootIndex{-1};
+        int32_t localRootCbvRootIndex{-1};
+        int32_t staticCbvSrvUavRootIndex{-1};
         int32_t samplerRootIndex{-1};
+        bool splitLocalCbvSrvUav{false};
+        bool useLocalRootCbv{false};
+        uint64_t localRootCbvGpuAddress{0};
         PreparedRange cbvRange;
+        PreparedRange dynamicCbvSrvUavRange;
+        PreparedRange staticCbvSrvUavRange;
         PreparedRange samplerRange;
     };
 
@@ -2358,100 +2205,52 @@ bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental() {
             continue;
         }
         auto *set = static_cast<CCD3D12DescriptorSet *>(pending.set);
-#if CC_D3D12_PERF_COUNTERS
-        const auto descriptorSetUpdateStart = perfTimingEnabled
-                                                  ? std::chrono::steady_clock::now()
-                                                  : std::chrono::steady_clock::time_point{};
-#endif
-        set->update();
-#if CC_D3D12_PERF_COUNTERS
-        if (perfTimingEnabled) {
-            descriptorSetUpdateNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now() - descriptorSetUpdateStart).count());
+        const bool localRootCbvLayout = pending.setIndex == D3D12_LOCAL_DESCRIPTOR_SET_INDEX &&
+                                        boundLayout->getLocalRootCbvParameterIndex(pending.setIndex) >= 0;
+        if (localRootCbvLayout) {
+            set->updateForLocalRootCbv(true);
+        } else {
+            set->update();
         }
-#endif
         pending.version = set->getVersion();
-#if CC_D3D12_PERF_COUNTERS
-        const auto descriptorCacheProbeStart = perfTimingEnabled
-                                                   ? std::chrono::steady_clock::now()
-                                                   : std::chrono::steady_clock::time_point{};
-#endif
         auto &cachedSet = _impl->gpuDescriptorCache[pending.setIndex];
         const bool ownerChanged = cachedSet.owner != set;
         if (ownerChanged) {
             cachedSet.reset(set);
         }
-#if CC_D3D12_PERF_COUNTERS
-        if (perfTimingEnabled) {
-            descriptorCacheProbeNanoseconds += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now() - descriptorCacheProbeStart).count());
-        }
-        ++descriptorCacheSlotLookups;
-        descriptorCacheSlotOwnerChanges += ownerChanged ? 1U : 0U;
-#endif
-        bindings[bindingCount++] = {
-            set,
-            &cachedSet,
-            &pending.dynamicOffsets,
-            pending.version,
-            set->getCbvSrvUavDescriptorCount(),
-            set->getSamplerDescriptorCount(),
-            boundLayout->getCbvSrvUavRootParameterIndex(pending.setIndex),
-            boundLayout->getSamplerRootParameterIndex(pending.setIndex),
-        };
+        auto &binding = bindings[bindingCount++];
+        binding.set = set;
+        binding.cachedSet = &cachedSet;
+        binding.dynamicOffsets = &pending.dynamicOffsets;
+        binding.version = pending.version;
+        binding.cbvCount = set->getCbvSrvUavDescriptorCount();
+        binding.dynamicDescriptorCount = set->getDynamicDescriptorSlotCount();
+        binding.samplerCount = set->getSamplerDescriptorCount();
+        binding.cbvRootIndex = boundLayout->getCbvSrvUavRootParameterIndex(pending.setIndex);
+        binding.dynamicCbvRootIndex = boundLayout->getDynamicCbvSrvUavRootParameterIndex(pending.setIndex);
+        binding.localRootCbvRootIndex = boundLayout->getLocalRootCbvParameterIndex(pending.setIndex);
+        binding.staticCbvSrvUavRootIndex = boundLayout->getStaticCbvSrvUavRootParameterIndex(pending.setIndex);
+        binding.samplerRootIndex = boundLayout->getSamplerRootParameterIndex(pending.setIndex);
+        const bool localCbvSrvUavPartition = set->getCbvSrvUavPartition(
+            binding.localRootCbvDescriptorOffset, binding.staticCbvSrvUavCount);
+        binding.dynamicCbvCount = localCbvSrvUavPartition ? 1U : 0U;
+        binding.splitLocalCbvSrvUav = pending.setIndex == D3D12_LOCAL_DESCRIPTOR_SET_INDEX &&
+                                       localCbvSrvUavPartition &&
+                                       binding.localRootCbvRootIndex >= 0 &&
+                                       binding.dynamicCbvCount == 1 &&
+                                       binding.staticCbvSrvUavRootIndex >= 0 &&
+                                       (binding.dynamicDescriptorCount == 0 ||
+                                        binding.dynamicCbvRootIndex >= 0);
+        binding.useLocalRootCbv = binding.splitLocalCbvSrvUav;
     }
-#if CC_D3D12_PERF_COUNTERS
-    const auto descriptorBindingBuildEnd = perfTimingEnabled
-                                               ? std::chrono::steady_clock::now()
-                                               : std::chrono::steady_clock::time_point{};
-#endif
 
-#if CC_D3D12_PERF_COUNTERS
-    uint32_t copyDescriptorCalls = 0;
-    uint32_t copiedDescriptorCount = 0;
-    uint32_t dynamicOffsetRewriteCount = 0;
-    uint32_t dynamicOffsetDescriptorCount = 0;
-    uint32_t dynamicCbvTableDescriptorCount = 0;
-    uint32_t setDescriptorHeapCalls = 0;
-    uint32_t rootTableBindCount = 0;
-    uint32_t descriptorCacheHits = 0;
-    uint32_t descriptorCacheMisses = 0;
-    uint32_t descriptorRepackPasses = 0;
-    uint32_t descriptorRepackDescriptors = 0;
-    uint32_t cbvCacheHits = 0;
-    uint32_t samplerCacheHits = 0;
-    uint32_t cbvCacheMisses = 0;
-    uint32_t samplerCacheMisses = 0;
-    uint32_t cbvCopiedDescriptors = 0;
-    uint32_t samplerCopiedDescriptors = 0;
-    uint32_t cbvRepackPasses = 0;
-    uint32_t samplerRepackPasses = 0;
-    uint32_t cbvHeapChanges = 0;
-    uint32_t samplerHeapChanges = 0;
-    uint32_t samplerTableLookups = 0;
-    uint32_t samplerUniqueTables = 0;
-    uint32_t samplerUniqueDescriptors = 0;
-    uint32_t samplerDuplicateTableHits = 0;
-    uint32_t samplerSignatureHashCollisions = 0;
-    uint32_t samplerConsecutiveExactHits = 0;
-    const auto descriptorFlushStart = descriptorBindingBuildEnd;
-    uint64_t descriptorCopyNanoseconds = 0;
-    uint64_t dynamicOffsetNanoseconds = 0;
-    uint64_t descriptorAllocateNanoseconds = 0;
-    uint64_t rootTableBindNanoseconds = 0;
-    uint64_t descriptorRangePrepareNs = 0;
-    uint64_t descriptorHeapNormalizeNs = 0;
-    uint64_t descriptorHeapRootNs = 0;
-    uint64_t descriptorCbvPrepareNs = 0;
-    uint64_t descriptorSamplerPrepareNs = 0;
-#endif
 
     const uint32_t cbvDescriptorSize = cbvPool->getDescriptorSize();
     const uint32_t samplerDescriptorSize = samplerPool ? samplerPool->getDescriptorSize() : 0;
     auto copyRange = [&](SetBindingInfo &binding, bool sampler,
                           const D3D12DescriptorHeapPool::Allocation &allocation,
-                          uint32_t descriptorOffset) {
-        const uint32_t count = sampler ? binding.samplerCount : binding.cbvCount;
+                          uint32_t descriptorOffset, uint32_t sourceDescriptorOffset,
+                          uint32_t count) {
         const uint32_t descriptorSize = sampler ? samplerDescriptorSize : cbvDescriptorSize;
         const uint64_t sourceHandle = sampler ? binding.set->getSamplerCPUDescriptorHandle()
                                               : binding.set->getCbvSrvUavCPUDescriptorHandle();
@@ -2459,67 +2258,178 @@ bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental() {
             return false;
         }
         D3D12_CPU_DESCRIPTOR_HANDLE source{static_cast<SIZE_T>(sourceHandle)};
+        source.ptr += static_cast<SIZE_T>(sourceDescriptorOffset) * descriptorSize;
         D3D12_CPU_DESCRIPTOR_HANDLE destination{
             reinterpret_cast<SIZE_T>(allocation.cpuHandle) +
             static_cast<SIZE_T>(descriptorOffset) * descriptorSize};
-#if CC_D3D12_PERF_COUNTERS
-        if (perfTimingEnabled) {
-            _impl->appendPerfDrawSequenceEvent(
-                Impl::PERF_DESCRIPTOR_SOURCE_EVENT, sampler ? 1U : 0U,
-                count,
-                static_cast<uint64_t>(static_cast<int64_t>(
-                    sampler ? binding.samplerRootIndex : binding.cbvRootIndex)));
-            const uint32_t semanticCount = binding.set->getDescriptorSemanticCount();
-            for (uint32_t semanticIndex = 0; semanticIndex < semanticCount; ++semanticIndex) {
-                uint32_t semanticKind = 0;
-                uint64_t semanticValue0 = 0;
-                uint64_t semanticValue1 = 0;
-                if (!binding.set->getDescriptorSemanticSignature(
-                        semanticIndex, semanticKind, semanticValue0, semanticValue1) ||
-                    (sampler ? semanticKind != 3U : semanticKind == 3U)) {
-                    continue;
-                }
-                _impl->appendPerfDrawSequenceEvent(
-                    Impl::PERF_DESCRIPTOR_SEMANTIC_EVENT, semanticIndex,
-                    semanticKind, semanticValue0, semanticValue1);
-            }
-            if (!sampler) {
-                const uint32_t uniformSlotCount = binding.set->getUniformDescriptorSlotCount();
-                for (uint32_t slotIndex = 0; slotIndex < uniformSlotCount; ++slotIndex) {
-                    uint32_t descriptorOffset = 0;
-                    uint64_t gpuAddress = 0;
-                    uint32_t cbvSize = 0;
-                    if (binding.set->getUniformDescriptorSignature(
-                            slotIndex, descriptorOffset, gpuAddress, cbvSize)) {
-                        _impl->appendPerfDrawSequenceEvent(
-                            Impl::PERF_UNIFORM_CBV_EVENT, descriptorOffset,
-                            gpuAddress, cbvSize);
-                    }
-                }
-            }
-        }
-        const auto descriptorCopyStart = perfTimingEnabled
-                                             ? std::chrono::steady_clock::now()
-                                             : std::chrono::steady_clock::time_point{};
-#endif
         d3dDevice->CopyDescriptorsSimple(
             count, destination, source,
             sampler ? D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER
                     : D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-#if CC_D3D12_PERF_COUNTERS
-        if (perfTimingEnabled) {
-            descriptorCopyNanoseconds += static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() - descriptorCopyStart).count());
+        return true;
+    };
+
+    auto copyLocalStaticCbvRange = [&](SetBindingInfo &binding,
+                                        const D3D12DescriptorHeapPool::Allocation &allocation,
+                                        uint32_t descriptorOffset,
+                                        uint32_t sourceDescriptorOffset,
+                                        uint32_t count) {
+        // A shader-visible heap has a CPU handle by design.  For local b1+
+        // CBVs, creating the view at that final destination is legal and
+        // avoids the otherwise duplicate staging CreateCBV plus descriptor
+        // copy.  Non-CBV descriptors still use their staging representation.
+        if (!binding.useLocalRootCbv || !binding.set || count == 0) {
+            return copyRange(binding, false, allocation, descriptorOffset,
+                             sourceDescriptorOffset, count);
         }
-        ++copyDescriptorCalls;
-        copiedDescriptorCount += count;
-        if (sampler) {
-            samplerCopiedDescriptors += count;
-        } else {
-            cbvCopiedDescriptors += count;
+
+        const uint32_t uniformSlotCount = binding.set->getUniformDescriptorSlotCount();
+        bool hasDirectCbv = false;
+        for (uint32_t relativeOffset = 0; relativeOffset < count; ++relativeOffset) {
+            const uint32_t expectedOffset = sourceDescriptorOffset + relativeOffset;
+            for (uint32_t slotIndex = 0; slotIndex < uniformSlotCount; ++slotIndex) {
+                uint32_t uniformOffset = 0;
+                uint64_t gpuAddress = 0;
+                uint32_t cbvSize = 0;
+                if (!binding.set->getUniformDescriptorSignature(
+                        slotIndex, uniformOffset, gpuAddress, cbvSize) ||
+                    uniformOffset != expectedOffset) {
+                    continue;
+                }
+                // Preserve the staging copy if an unusual or invalid CBV is
+                // encountered.  The ordinary staging path already owns its
+                // null/invalid-descriptor semantics.
+                if (gpuAddress == 0 || cbvSize < 256U) {
+                    return copyRange(binding, false, allocation, descriptorOffset,
+                                     sourceDescriptorOffset, count);
+                }
+                hasDirectCbv = true;
+                break;
+            }
         }
-#endif
+        if (!hasDirectCbv) {
+            return copyRange(binding, false, allocation, descriptorOffset,
+                             sourceDescriptorOffset, count);
+        }
+
+        uint32_t copiedRangeStart = 0;
+        uint32_t copiedRangeCount = 0;
+        const auto flushCopiedRange = [&]() {
+            if (copiedRangeCount == 0) {
+                return true;
+            }
+            const bool copied = copyRange(binding, false, allocation,
+                                          descriptorOffset + copiedRangeStart,
+                                          sourceDescriptorOffset + copiedRangeStart,
+                                          copiedRangeCount);
+            copiedRangeCount = 0;
+            return copied;
+        };
+
+        for (uint32_t relativeOffset = 0; relativeOffset < count; ++relativeOffset) {
+            const uint32_t expectedOffset = sourceDescriptorOffset + relativeOffset;
+            bool isUniformCbv = false;
+            uint64_t gpuAddress = 0;
+            uint32_t cbvSize = 0;
+            for (uint32_t slotIndex = 0; slotIndex < uniformSlotCount; ++slotIndex) {
+                uint32_t uniformOffset = 0;
+                if (binding.set->getUniformDescriptorSignature(
+                        slotIndex, uniformOffset, gpuAddress, cbvSize) &&
+                    uniformOffset == expectedOffset) {
+                    isUniformCbv = true;
+                    break;
+                }
+            }
+            if (!isUniformCbv) {
+                if (copiedRangeCount == 0) {
+                    copiedRangeStart = relativeOffset;
+                }
+                ++copiedRangeCount;
+                continue;
+            }
+            if (!flushCopiedRange()) {
+                return false;
+            }
+            D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc{};
+            cbvDesc.BufferLocation = gpuAddress;
+            cbvDesc.SizeInBytes = cbvSize;
+            D3D12_CPU_DESCRIPTOR_HANDLE destination{
+                reinterpret_cast<SIZE_T>(allocation.cpuHandle) +
+                static_cast<SIZE_T>(descriptorOffset + relativeOffset) * cbvDescriptorSize};
+            d3dDevice->CreateConstantBufferView(&cbvDesc, destination);
+        }
+        return flushCopiedRange();
+    };
+
+    auto copyLocalStaticCbvTable = [&](SetBindingInfo &binding,
+                                        const D3D12DescriptorHeapPool::Allocation &allocation,
+                                        uint32_t descriptorOffset) {
+        const uint32_t rootCbvOffset = binding.localRootCbvDescriptorOffset;
+        if (rootCbvOffset >= binding.cbvCount ||
+            binding.staticCbvSrvUavCount + binding.dynamicDescriptorCount + 1U != binding.cbvCount) {
+            return false;
+        }
+        uint32_t destinationOffset = descriptorOffset;
+        uint32_t sourceRangeStart = 0;
+        uint32_t sourceRangeCount = 0;
+        const auto flushStaticRange = [&]() {
+            if (sourceRangeCount == 0) {
+                return true;
+            }
+            const bool copied = copyLocalStaticCbvRange(
+                binding, allocation, destinationOffset, sourceRangeStart, sourceRangeCount);
+            destinationOffset += sourceRangeCount;
+            sourceRangeCount = 0;
+            return copied;
+        };
+        for (uint32_t sourceOffset = 0; sourceOffset < binding.cbvCount; ++sourceOffset) {
+            bool excluded = sourceOffset == rootCbvOffset;
+            for (uint32_t dynamicIndex = 0;
+                 !excluded && dynamicIndex < binding.dynamicDescriptorCount;
+                 ++dynamicIndex) {
+                uint32_t dynamicOffset = 0;
+                excluded = binding.set->getDynamicDescriptorOffset(dynamicIndex, dynamicOffset) &&
+                           dynamicOffset == sourceOffset;
+            }
+            if (excluded) {
+                if (!flushStaticRange()) {
+                    return false;
+                }
+                continue;
+            }
+            if (sourceRangeCount == 0) {
+                sourceRangeStart = sourceOffset;
+            }
+            ++sourceRangeCount;
+        }
+        return flushStaticRange() &&
+               destinationOffset == descriptorOffset + binding.staticCbvSrvUavCount;
+    };
+
+    auto copyLocalDynamicCbvSrvUavTable = [&](SetBindingInfo &binding,
+                                                const D3D12DescriptorHeapPool::Allocation &allocation,
+                                                uint32_t descriptorOffset) {
+        uint32_t copiedCount = 0;
+        while (copiedCount < binding.dynamicDescriptorCount) {
+            uint32_t sourceOffset = 0;
+            if (!binding.set->getDynamicDescriptorOffset(copiedCount, sourceOffset)) {
+                return false;
+            }
+            uint32_t rangeCount = 1;
+            while (copiedCount + rangeCount < binding.dynamicDescriptorCount) {
+                uint32_t nextSourceOffset = 0;
+                if (!binding.set->getDynamicDescriptorOffset(copiedCount + rangeCount, nextSourceOffset) ||
+                    nextSourceOffset != sourceOffset + rangeCount) {
+                    break;
+                }
+                ++rangeCount;
+            }
+            if (!copyRange(binding, false, allocation, descriptorOffset + copiedCount,
+                           sourceOffset, rangeCount)) {
+                return false;
+            }
+            copiedCount += rangeCount;
+        }
         return true;
     };
 
@@ -2548,12 +2458,6 @@ bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental() {
         if (!_impl->samplerTableCacheHeap) {
             return nullptr;
         }
-#if CC_D3D12_PERF_COUNTERS
-        const bool samplerRecentExact =
-            _impl->perfLastSamplerTableHeap == _impl->samplerTableCacheHeap &&
-            _impl->perfLastSamplerTableHeapIndex == _impl->samplerTableCacheHeapIndex &&
-            _impl->perfLastSamplerTableKey == samplerTableKey;
-#endif
         const auto bucketIt = _impl->samplerTableCache.find(hashSamplerTableKey(samplerTableKey));
         if (bucketIt == _impl->samplerTableCache.end()) {
             return nullptr;
@@ -2562,12 +2466,6 @@ bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental() {
             if (entry.heap == _impl->samplerTableCacheHeap &&
                 entry.heapIndex == _impl->samplerTableCacheHeapIndex &&
                 entry.key == samplerTableKey) {
-#if CC_D3D12_PERF_COUNTERS
-                samplerConsecutiveExactHits += samplerRecentExact ? 1U : 0U;
-                _impl->perfLastSamplerTableKey = samplerTableKey;
-                _impl->perfLastSamplerTableHeap = entry.heap;
-                _impl->perfLastSamplerTableHeapIndex = entry.heapIndex;
-#endif
                 return &entry;
             }
         }
@@ -2586,11 +2484,6 @@ bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental() {
             _impl->samplerTableCacheHeap = range.heap;
             _impl->samplerTableCacheHeapIndex = range.heapIndex;
         }
-#if CC_D3D12_PERF_COUNTERS
-        _impl->perfLastSamplerTableKey = samplerTableKey;
-        _impl->perfLastSamplerTableHeap = range.heap;
-        _impl->perfLastSamplerTableHeapIndex = range.heapIndex;
-#endif
         auto &hashBucket = _impl->samplerTableCache[hashSamplerTableKey(samplerTableKey)];
         for (auto &entry : hashBucket) {
             if (entry.key == samplerTableKey) {
@@ -2610,6 +2503,228 @@ bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental() {
         });
     };
 
+    auto findCachedLocalStaticCbvSrvUavTable = [&](const SetBindingInfo &binding,
+                                                    uint64_t signature,
+                                                    ID3D12DescriptorHeap *heap,
+                                                    uint32_t heapIndex) -> const Impl::CachedLocalStaticCbvSrvUavTable * {
+        if (!heap || binding.staticCbvSrvUavCount == 0 || !binding.set ||
+            !binding.set->canReuseStaticCbvSrvUavResources()) {
+            return nullptr;
+        }
+        const auto bucketIt = _impl->localStaticCbvSrvUavTableCache.find(signature);
+        if (bucketIt == _impl->localStaticCbvSrvUavTableCache.end()) {
+            return nullptr;
+        }
+        for (const auto &entry : bucketIt->second) {
+            if (entry.heap == heap && entry.heapIndex == heapIndex &&
+                entry.descriptorCount == binding.staticCbvSrvUavCount && entry.owner &&
+                entry.owner->hasMatchingStaticCbvSrvUavResources(*binding.set)) {
+                return &entry;
+            }
+        }
+        return nullptr;
+    };
+
+    auto cacheLocalStaticCbvSrvUavTable = [&](const SetBindingInfo &binding,
+                                               uint64_t signature,
+                                               const PreparedRange &range) {
+        if (!range.valid || !range.heap || !binding.set ||
+            !binding.set->canReuseStaticCbvSrvUavResources() ||
+            range.descriptorCount != binding.staticCbvSrvUavCount) {
+            return;
+        }
+        auto &bucket = _impl->localStaticCbvSrvUavTableCache[signature];
+        for (auto &entry : bucket) {
+            if (entry.heap == range.heap && entry.heapIndex == range.heapIndex &&
+                entry.descriptorCount == range.descriptorCount && entry.owner &&
+                entry.owner->hasMatchingStaticCbvSrvUavResources(*binding.set)) {
+                entry.gpuHandle = range.gpuHandle;
+                entry.owner = binding.set;
+                return;
+            }
+        }
+        bucket.emplace_back(Impl::CachedLocalStaticCbvSrvUavTable{
+            binding.set, signature, range.gpuHandle, range.descriptorCount,
+            range.heapIndex, range.heap,
+        });
+    };
+
+    auto prepareLocalStaticSplit = [&](SetBindingInfo &binding) {
+        if (!binding.splitLocalCbvSrvUav || binding.dynamicCbvCount == 0 ||
+            binding.staticCbvSrvUavCount == 0 || !cbvPool) {
+            return false;
+        }
+
+        if (binding.useLocalRootCbv) {
+            const uint32_t rootCbvDescriptorOffset = binding.localRootCbvDescriptorOffset;
+            uint32_t cbvSize = 0;
+            bool rootCbvFound = false;
+            const uint32_t uniformSlotCount = binding.set->getUniformDescriptorSlotCount();
+            for (uint32_t slotIndex = 0; slotIndex < uniformSlotCount; ++slotIndex) {
+                uint32_t descriptorOffset = 0;
+                if (binding.set->getUniformDescriptorSignature(slotIndex, descriptorOffset,
+                                                               binding.localRootCbvGpuAddress, cbvSize) &&
+                    descriptorOffset == rootCbvDescriptorOffset) {
+                    rootCbvFound = true;
+                    break;
+                }
+            }
+            if (!rootCbvFound || binding.localRootCbvGpuAddress == 0 || cbvSize < 256U) {
+                auto *dummyBuffer = device->getDummyBuffer();
+                binding.localRootCbvGpuAddress = dummyBuffer
+                                                    ? dummyBuffer->getD3D12GPUVirtualAddress()
+                                                    : 0;
+            }
+            if (binding.localRootCbvGpuAddress == 0) {
+                return false;
+            }
+
+            uint32_t dynamicCbvDescriptors = 0;
+            uint32_t staticTextureDescriptors = 0;
+            uint32_t staticCbvSrvUavDescriptors = 0;
+            uint64_t staticSignature = 0;
+            binding.set->getStaticDescriptorAnalysis(dynamicCbvDescriptors, staticTextureDescriptors,
+                                                     staticCbvSrvUavDescriptors, staticSignature);
+            if (dynamicCbvDescriptors != binding.dynamicCbvCount ||
+                staticCbvSrvUavDescriptors != binding.staticCbvSrvUavCount || staticSignature == 0) {
+                return false;
+            }
+
+            D3D12DescriptorHeapPool::Allocation dynamicAllocation;
+            ID3D12DescriptorHeap *dynamicHeap = nullptr;
+            uint32_t dynamicHeapIndex = 0;
+            if (binding.dynamicDescriptorCount > 0) {
+                const bool allNullDynamicDescriptors = binding.set->hasOnlyNullDynamicDescriptorSources();
+                const auto &cachedNullDynamic = _impl->localNullDynamicCbvSrvUavTable;
+                if (allNullDynamicDescriptors &&
+                    cachedNullDynamic.layout == binding.set->getLayout() &&
+                    cachedNullDynamic.descriptorCount == binding.dynamicDescriptorCount &&
+                    cachedNullDynamic.heap) {
+                    dynamicHeap = cachedNullDynamic.heap;
+                    dynamicHeapIndex = cachedNullDynamic.heapIndex;
+                    binding.dynamicCbvSrvUavRange = {
+                        dynamicHeap, cachedNullDynamic.gpuHandle, binding.dynamicDescriptorCount,
+                        dynamicHeapIndex, true};
+                } else {
+                    dynamicAllocation = cbvPool->allocate(binding.dynamicDescriptorCount);
+                    dynamicHeap = dynamicAllocation.isValid
+                                      ? static_cast<ID3D12DescriptorHeap *>(cbvPool->getHeap(dynamicAllocation.heapIndex))
+                                      : nullptr;
+                    if (!dynamicHeap ||
+                        !copyLocalDynamicCbvSrvUavTable(binding, dynamicAllocation, 0)) {
+                        return false;
+                    }
+                    dynamicHeapIndex = dynamicAllocation.heapIndex;
+                    binding.dynamicCbvSrvUavRange = {
+                        dynamicHeap, dynamicAllocation.gpuHandle, binding.dynamicDescriptorCount,
+                        dynamicHeapIndex, true};
+                    if (allNullDynamicDescriptors) {
+                        _impl->localNullDynamicCbvSrvUavTable = {
+                            binding.set->getLayout(), dynamicAllocation.gpuHandle,
+                            binding.dynamicDescriptorCount, dynamicHeapIndex, dynamicHeap};
+                    }
+                }
+            }
+
+            auto *activeHeap = dynamicHeap ? dynamicHeap
+                                            : static_cast<ID3D12DescriptorHeap *>(cbvPool->getHeap(0));
+            const uint32_t activeHeapIndex = dynamicHeap ? dynamicHeapIndex : 0;
+            if (const auto *cached = findCachedLocalStaticCbvSrvUavTable(
+                    binding, staticSignature, activeHeap, activeHeapIndex)) {
+                binding.staticCbvSrvUavRange = {
+                    cached->heap, cached->gpuHandle, cached->descriptorCount,
+                    cached->heapIndex, true};
+                return true;
+            }
+
+            const auto staticAllocation = cbvPool->allocate(binding.staticCbvSrvUavCount);
+            auto *staticHeap = staticAllocation.isValid
+                                   ? static_cast<ID3D12DescriptorHeap *>(cbvPool->getHeap(staticAllocation.heapIndex))
+                                   : nullptr;
+            if (!staticHeap || (dynamicHeap &&
+                                (staticHeap != dynamicHeap ||
+                                 staticAllocation.heapIndex != dynamicAllocation.heapIndex)) ||
+                !copyLocalStaticCbvTable(binding, staticAllocation, 0)) {
+                return false;
+            }
+            binding.staticCbvSrvUavRange = {
+                staticHeap, staticAllocation.gpuHandle, binding.staticCbvSrvUavCount,
+                staticAllocation.heapIndex, true};
+            cacheLocalStaticCbvSrvUavTable(binding, staticSignature, binding.staticCbvSrvUavRange);
+            return true;
+        }
+
+        const auto dynamicAllocation = cbvPool->allocate(binding.dynamicCbvCount);
+        auto *dynamicHeap = dynamicAllocation.isValid
+                                ? static_cast<ID3D12DescriptorHeap *>(cbvPool->getHeap(dynamicAllocation.heapIndex))
+                                : nullptr;
+        if (!dynamicHeap) {
+            return false;
+        }
+
+        uint32_t dynamicCbvDescriptors = 0;
+        uint32_t staticTextureDescriptors = 0;
+        uint32_t staticCbvSrvUavDescriptors = 0;
+        uint64_t staticSignature = 0;
+        binding.set->getStaticDescriptorAnalysis(dynamicCbvDescriptors, staticTextureDescriptors,
+                                                 staticCbvSrvUavDescriptors, staticSignature);
+        if (dynamicCbvDescriptors != binding.dynamicCbvCount ||
+            staticCbvSrvUavDescriptors != binding.staticCbvSrvUavCount || staticSignature == 0) {
+            return false;
+        }
+
+        binding.dynamicCbvSrvUavRange = {
+            dynamicHeap, dynamicAllocation.gpuHandle, binding.dynamicCbvCount,
+            dynamicAllocation.heapIndex, true};
+        if (const auto *cached = findCachedLocalStaticCbvSrvUavTable(
+                binding, staticSignature, dynamicHeap, dynamicAllocation.heapIndex)) {
+            binding.staticCbvSrvUavRange = {
+                cached->heap, cached->gpuHandle, cached->descriptorCount,
+                cached->heapIndex, true};
+            if (!copyRange(binding, false, dynamicAllocation, 0, 0, binding.dynamicCbvCount)) {
+                return false;
+            }
+            return true;
+        }
+
+        const auto staticAllocation = cbvPool->allocate(binding.staticCbvSrvUavCount);
+        auto *staticHeap = staticAllocation.isValid
+                               ? static_cast<ID3D12DescriptorHeap *>(cbvPool->getHeap(staticAllocation.heapIndex))
+                               : nullptr;
+        if (staticHeap == dynamicHeap && staticAllocation.heapIndex == dynamicAllocation.heapIndex) {
+            binding.staticCbvSrvUavRange = {
+                staticHeap, staticAllocation.gpuHandle, binding.staticCbvSrvUavCount,
+                staticAllocation.heapIndex, true};
+            if (!copyRange(binding, false, dynamicAllocation, 0, 0, binding.dynamicCbvCount) ||
+                !copyLocalStaticCbvRange(binding, staticAllocation, 0, binding.dynamicCbvCount,
+                                         binding.staticCbvSrvUavCount)) {
+                return false;
+            }
+        } else {
+            // The two tables must be visible through one CBV/SRV/UAV heap. A
+            // fresh contiguous allocation is a correctness fallback on overflow.
+            const auto combinedAllocation = cbvPool->allocate(binding.cbvCount);
+            auto *combinedHeap = combinedAllocation.isValid
+                                     ? static_cast<ID3D12DescriptorHeap *>(cbvPool->getHeap(combinedAllocation.heapIndex))
+                                     : nullptr;
+            if (!combinedHeap ||
+                !copyRange(binding, false, combinedAllocation, 0, 0, binding.dynamicCbvCount) ||
+                !copyLocalStaticCbvRange(binding, combinedAllocation, binding.dynamicCbvCount,
+                                         binding.dynamicCbvCount, binding.staticCbvSrvUavCount)) {
+                return false;
+            }
+            binding.dynamicCbvSrvUavRange = {
+                combinedHeap, combinedAllocation.gpuHandle, binding.dynamicCbvCount,
+                combinedAllocation.heapIndex, true};
+            binding.staticCbvSrvUavRange = {
+                combinedHeap,
+                combinedAllocation.gpuHandle + static_cast<uint64_t>(binding.dynamicCbvCount) * cbvDescriptorSize,
+                binding.staticCbvSrvUavCount, combinedAllocation.heapIndex, true};
+        }
+        cacheLocalStaticCbvSrvUavTable(binding, staticSignature, binding.staticCbvSrvUavRange);
+        return true;
+    };
+
     auto prepareRange = [&](SetBindingInfo &binding, bool sampler) {
         auto *pool = sampler ? samplerPool : cbvPool;
         const uint32_t count = sampler ? binding.samplerCount : binding.cbvCount;
@@ -2621,14 +2736,6 @@ bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental() {
 
         if (cachedRangeMatches(binding, sampler)) {
             const auto &cached = sampler ? binding.cachedSet->sampler : binding.cachedSet->cbvSrvUav;
-#if CC_D3D12_PERF_COUNTERS
-            ++descriptorCacheHits;
-            if (sampler) {
-                ++samplerCacheHits;
-            } else {
-                ++cbvCacheHits;
-            }
-#endif
             prepared = {cached.heap, cached.gpuHandle, cached.descriptorCount,
                         cached.heapIndex, true};
             return true;
@@ -2638,9 +2745,6 @@ bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental() {
         if (sampler) {
             samplerTableKey = &binding.set->getSamplerTableKey();
             bool hashCollision = false;
-#if CC_D3D12_PERF_COUNTERS
-            ++samplerTableLookups;
-#endif
             if (const auto *shared = findCachedSamplerTable(*samplerTableKey, hashCollision)) {
                 prepared = {shared->heap, shared->gpuHandle, shared->descriptorCount,
                             shared->heapIndex, true};
@@ -2649,45 +2753,16 @@ bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental() {
                     cached = {binding.version, shared->gpuHandle, shared->descriptorCount,
                               shared->heapIndex, shared->heap, true};
                 }
-#if CC_D3D12_PERF_COUNTERS
-                ++descriptorCacheHits;
-                ++samplerCacheHits;
-                ++samplerDuplicateTableHits;
-#endif
                 return true;
             }
-#if CC_D3D12_PERF_COUNTERS
-            ++samplerUniqueTables;
-            samplerUniqueDescriptors += static_cast<uint32_t>(samplerTableKey->size());
-            samplerSignatureHashCollisions += hashCollision ? 1U : 0U;
-#endif
         }
 
-#if CC_D3D12_PERF_COUNTERS
-        ++descriptorCacheMisses;
-        if (sampler) {
-            ++samplerCacheMisses;
-        } else {
-            ++cbvCacheMisses;
-        }
-#endif
 
-#if CC_D3D12_PERF_COUNTERS
-        const auto descriptorAllocateStart = perfTimingEnabled
-                                                 ? std::chrono::steady_clock::now()
-                                                 : std::chrono::steady_clock::time_point{};
-#endif
         const auto allocation = pool->allocate(count);
-#if CC_D3D12_PERF_COUNTERS
-        if (perfTimingEnabled) {
-            descriptorAllocateNanoseconds += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now() - descriptorAllocateStart).count());
-        }
-#endif
         auto *heap = allocation.isValid
                          ? static_cast<ID3D12DescriptorHeap *>(pool->getHeap(allocation.heapIndex))
                          : nullptr;
-        if (!heap || !copyRange(binding, sampler, allocation, 0)) {
+        if (!heap || !copyRange(binding, sampler, allocation, 0, 0, count)) {
             return false;
         }
         prepared = {heap, allocation.gpuHandle, count, allocation.heapIndex, true};
@@ -2705,101 +2780,28 @@ bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental() {
         return true;
     };
 
-#if CC_D3D12_PERF_COUNTERS
-    const auto descriptorRangePrepareStart = perfTimingEnabled
-                                                 ? std::chrono::steady_clock::now()
-                                                 : std::chrono::steady_clock::time_point{};
-#endif
     for (uint32_t i = 0; i < bindingCount; ++i) {
         auto &binding = bindings[i];
         const bool hasDynamicOffsets = binding.dynamicOffsets && !binding.dynamicOffsets->empty();
-#if CC_D3D12_PERF_COUNTERS
-        if (perfTimingEnabled && hasDynamicOffsets) {
-            for (uint32_t offsetIndex = 0;
-                 offsetIndex < static_cast<uint32_t>(binding.dynamicOffsets->size());
-                 ++offsetIndex) {
-                _impl->appendPerfDrawSequenceEvent(
-                    Impl::PERF_DYNAMIC_OFFSET_EVENT, offsetIndex,
-                    (*binding.dynamicOffsets)[offsetIndex], binding.set->getStaticDescriptorVersion(),
-                    static_cast<uint64_t>(static_cast<int64_t>(binding.cbvRootIndex)));
-            }
-        }
-#endif
-        const bool dynamicCbvCacheHit = hasDynamicOffsets && cachedRangeMatches(binding, false);
+        const bool dynamicCbvCacheHit = !binding.splitLocalCbvSrvUav &&
+                                        hasDynamicOffsets && cachedRangeMatches(binding, false);
         bool appliedDynamicOffsets = false;
         if (hasDynamicOffsets && !dynamicCbvCacheHit) {
-#if CC_D3D12_PERF_COUNTERS
-            dynamicCbvTableDescriptorCount += binding.cbvCount;
-#endif
-#if CC_D3D12_PERF_COUNTERS
-            const auto dynamicOffsetStart = perfTimingEnabled
-                                                ? std::chrono::steady_clock::now()
-                                                : std::chrono::steady_clock::time_point{};
-#endif
             binding.set->applyDynamicOffsets(
                 static_cast<uint32_t>(binding.dynamicOffsets->size()), binding.dynamicOffsets->data());
             appliedDynamicOffsets = true;
-#if CC_D3D12_PERF_COUNTERS
-            if (perfTimingEnabled) {
-                dynamicOffsetNanoseconds += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() - dynamicOffsetStart).count());
-            }
-#endif
-#if CC_D3D12_PERF_COUNTERS
-            ++dynamicOffsetRewriteCount;
-            dynamicOffsetDescriptorCount += static_cast<uint32_t>(binding.dynamicOffsets->size());
-#endif
         }
-#if CC_D3D12_PERF_COUNTERS
-        const auto descriptorCbvPrepareStart = perfTimingEnabled
-                                                   ? std::chrono::steady_clock::now()
-                                                   : std::chrono::steady_clock::time_point{};
-#endif
-        const bool cbvReady = prepareRange(binding, false);
-#if CC_D3D12_PERF_COUNTERS
-        const auto descriptorSamplerPrepareStart = perfTimingEnabled
-                                                       ? std::chrono::steady_clock::now()
-                                                       : std::chrono::steady_clock::time_point{};
-        if (perfTimingEnabled) {
-            descriptorCbvPrepareNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                descriptorSamplerPrepareStart - descriptorCbvPrepareStart).count());
-        }
-#endif
+        const bool cbvReady = binding.splitLocalCbvSrvUav
+                                  ? prepareLocalStaticSplit(binding)
+                                  : prepareRange(binding, false);
         const bool samplerReady = prepareRange(binding, true);
-#if CC_D3D12_PERF_COUNTERS
-        if (perfTimingEnabled) {
-            descriptorSamplerPrepareNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now() - descriptorSamplerPrepareStart).count());
-        }
-#endif
         if (appliedDynamicOffsets) {
-#if CC_D3D12_PERF_COUNTERS
-            const auto dynamicOffsetStart = perfTimingEnabled
-                                                ? std::chrono::steady_clock::now()
-                                                : std::chrono::steady_clock::time_point{};
-#endif
             binding.set->restoreDynamicOffsetDescriptors();
-#if CC_D3D12_PERF_COUNTERS
-            if (perfTimingEnabled) {
-                dynamicOffsetNanoseconds += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() - dynamicOffsetStart).count());
-            }
-#endif
         }
         if (!cbvReady || !samplerReady) {
             return false;
         }
     }
-#if CC_D3D12_PERF_COUNTERS
-    const auto descriptorRangePrepareEnd = perfTimingEnabled
-                                               ? std::chrono::steady_clock::now()
-                                               : std::chrono::steady_clock::time_point{};
-    if (perfTimingEnabled) {
-        descriptorRangePrepareNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-            descriptorRangePrepareEnd - descriptorRangePrepareStart).count());
-    }
-    const auto descriptorHeapNormalizeStart = descriptorRangePrepareEnd;
-#endif
 
     auto repackRanges = [&](bool sampler) {
         auto *pool = sampler ? samplerPool : cbvPool;
@@ -2807,6 +2809,12 @@ bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental() {
         uint32_t totalCount = 0;
         for (uint32_t i = 0; i < bindingCount; ++i) {
             const auto &binding = bindings[i];
+            if (!sampler && binding.splitLocalCbvSrvUav) {
+                totalCount += binding.useLocalRootCbv
+                                  ? binding.dynamicDescriptorCount + binding.staticCbvSrvUavCount
+                                  : binding.dynamicCbvCount + binding.staticCbvSrvUavCount;
+                continue;
+            }
             const uint32_t count = sampler ? binding.samplerCount : binding.cbvCount;
             const int32_t rootIndex = sampler ? binding.samplerRootIndex : binding.cbvRootIndex;
             if (count > 0 && rootIndex >= 0) {
@@ -2816,31 +2824,11 @@ bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental() {
         if (totalCount == 0) {
             return true;
         }
-#if CC_D3D12_PERF_COUNTERS
-        ++descriptorRepackPasses;
-        descriptorRepackDescriptors += totalCount;
-        if (sampler) {
-            ++samplerRepackPasses;
-        } else {
-            ++cbvRepackPasses;
-        }
-#endif
         if (!pool || descriptorSize == 0) {
             return false;
         }
 
-#if CC_D3D12_PERF_COUNTERS
-        const auto descriptorAllocateStart = perfTimingEnabled
-                                                 ? std::chrono::steady_clock::now()
-                                                 : std::chrono::steady_clock::time_point{};
-#endif
         const auto allocation = pool->allocate(totalCount);
-#if CC_D3D12_PERF_COUNTERS
-        if (perfTimingEnabled) {
-            descriptorAllocateNanoseconds += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now() - descriptorAllocateStart).count());
-        }
-#endif
         auto *heap = allocation.isValid
                          ? static_cast<ID3D12DescriptorHeap *>(pool->getHeap(allocation.heapIndex))
                          : nullptr;
@@ -2851,6 +2839,94 @@ bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental() {
         uint32_t offset = 0;
         for (uint32_t i = 0; i < bindingCount; ++i) {
             auto &binding = bindings[i];
+            if (!sampler && binding.splitLocalCbvSrvUav) {
+                if (binding.useLocalRootCbv) {
+                    const bool hasDynamicOffsets = binding.dynamicOffsets && !binding.dynamicOffsets->empty();
+                    if (hasDynamicOffsets) {
+                        binding.set->applyDynamicOffsets(
+                            static_cast<uint32_t>(binding.dynamicOffsets->size()), binding.dynamicOffsets->data());
+                    }
+                    const bool copiedDynamic = binding.dynamicDescriptorCount == 0 ||
+                                               copyLocalDynamicCbvSrvUavTable(binding, allocation, offset);
+                    const bool copiedStatic = copiedDynamic && copyLocalStaticCbvTable(
+                        binding, allocation, offset + binding.dynamicDescriptorCount);
+                    if (hasDynamicOffsets) {
+                        binding.set->restoreDynamicOffsetDescriptors();
+                    }
+                    if (!copiedStatic) {
+                        return false;
+                    }
+                    if (binding.dynamicDescriptorCount > 0) {
+                        binding.dynamicCbvSrvUavRange = {
+                            heap,
+                            allocation.gpuHandle + static_cast<uint64_t>(offset) * descriptorSize,
+                            binding.dynamicDescriptorCount,
+                            allocation.heapIndex,
+                            true,
+                        };
+                    }
+                    binding.staticCbvSrvUavRange = {
+                        heap,
+                        allocation.gpuHandle + static_cast<uint64_t>(
+                            offset + binding.dynamicDescriptorCount) * descriptorSize,
+                        binding.staticCbvSrvUavCount,
+                        allocation.heapIndex,
+                        true,
+                    };
+                    uint32_t dynamicCbvDescriptors = 0;
+                    uint32_t staticTextureDescriptors = 0;
+                    uint32_t staticCbvSrvUavDescriptors = 0;
+                    uint64_t staticSignature = 0;
+                    binding.set->getStaticDescriptorAnalysis(dynamicCbvDescriptors, staticTextureDescriptors,
+                                                             staticCbvSrvUavDescriptors, staticSignature);
+                    if (staticSignature != 0 && staticCbvSrvUavDescriptors == binding.staticCbvSrvUavCount) {
+                        cacheLocalStaticCbvSrvUavTable(binding, staticSignature, binding.staticCbvSrvUavRange);
+                    }
+                    offset += binding.dynamicDescriptorCount + binding.staticCbvSrvUavCount;
+                    continue;
+                }
+                const bool hasDynamicOffsets = binding.dynamicOffsets && !binding.dynamicOffsets->empty();
+                if (hasDynamicOffsets) {
+                    binding.set->applyDynamicOffsets(
+                        static_cast<uint32_t>(binding.dynamicOffsets->size()), binding.dynamicOffsets->data());
+                }
+                const bool copiedDynamic = copyRange(binding, false, allocation, offset, 0,
+                                                     binding.dynamicCbvCount);
+                const bool copiedStatic = copiedDynamic && copyLocalStaticCbvRange(
+                    binding, allocation, offset + binding.dynamicCbvCount,
+                    binding.dynamicCbvCount, binding.staticCbvSrvUavCount);
+                if (hasDynamicOffsets) {
+                    binding.set->restoreDynamicOffsetDescriptors();
+                }
+                if (!copiedStatic) {
+                    return false;
+                }
+                binding.dynamicCbvSrvUavRange = {
+                    heap,
+                    allocation.gpuHandle + static_cast<uint64_t>(offset) * descriptorSize,
+                    binding.dynamicCbvCount,
+                    allocation.heapIndex,
+                    true,
+                };
+                binding.staticCbvSrvUavRange = {
+                    heap,
+                    allocation.gpuHandle + static_cast<uint64_t>(offset + binding.dynamicCbvCount) * descriptorSize,
+                    binding.staticCbvSrvUavCount,
+                    allocation.heapIndex,
+                    true,
+                };
+                uint32_t dynamicCbvDescriptors = 0;
+                uint32_t staticTextureDescriptors = 0;
+                uint32_t staticCbvSrvUavDescriptors = 0;
+                uint64_t staticSignature = 0;
+                binding.set->getStaticDescriptorAnalysis(dynamicCbvDescriptors, staticTextureDescriptors,
+                                                         staticCbvSrvUavDescriptors, staticSignature);
+                if (staticSignature != 0 && staticCbvSrvUavDescriptors == binding.staticCbvSrvUavCount) {
+                    cacheLocalStaticCbvSrvUavTable(binding, staticSignature, binding.staticCbvSrvUavRange);
+                }
+                offset += binding.dynamicCbvCount + binding.staticCbvSrvUavCount;
+                continue;
+            }
             const uint32_t count = sampler ? binding.samplerCount : binding.cbvCount;
             const int32_t rootIndex = sampler ? binding.samplerRootIndex : binding.cbvRootIndex;
             if (count == 0 || rootIndex < 0) {
@@ -2860,12 +2936,8 @@ bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental() {
             if (hasDynamicOffsets) {
                 binding.set->applyDynamicOffsets(
                     static_cast<uint32_t>(binding.dynamicOffsets->size()), binding.dynamicOffsets->data());
-#if CC_D3D12_PERF_COUNTERS
-                ++dynamicOffsetRewriteCount;
-                dynamicOffsetDescriptorCount += static_cast<uint32_t>(binding.dynamicOffsets->size());
-#endif
             }
-            const bool copied = copyRange(binding, sampler, allocation, offset);
+            const bool copied = copyRange(binding, sampler, allocation, offset, 0, count);
             if (hasDynamicOffsets) {
                 binding.set->restoreDynamicOffsetDescriptors();
             }
@@ -2900,13 +2972,22 @@ bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental() {
     auto rangesUseSingleHeap = [&](bool sampler) {
         ID3D12DescriptorHeap *heap = nullptr;
         for (uint32_t i = 0; i < bindingCount; ++i) {
-            const auto &range = sampler ? bindings[i].samplerRange : bindings[i].cbvRange;
-            if (!range.valid) {
-                continue;
-            }
-            if (!heap) {
-                heap = range.heap;
-            } else if (heap != range.heap) {
+            const auto checkRange = [&](const PreparedRange &range) {
+                if (!range.valid) {
+                    return true;
+                }
+                if (!heap) {
+                    heap = range.heap;
+                    return true;
+                }
+                return heap == range.heap;
+            };
+            if (sampler || !bindings[i].splitLocalCbvSrvUav) {
+                if (!checkRange(sampler ? bindings[i].samplerRange : bindings[i].cbvRange)) {
+                    return false;
+                }
+            } else if (!checkRange(bindings[i].dynamicCbvSrvUavRange) ||
+                       !checkRange(bindings[i].staticCbvSrvUavRange)) {
                 return false;
             }
         }
@@ -2923,23 +3004,20 @@ bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental() {
     ID3D12DescriptorHeap *cbvHeap = nullptr;
     ID3D12DescriptorHeap *samplerHeap = nullptr;
     for (uint32_t i = 0; i < bindingCount; ++i) {
-        if (bindings[i].cbvRange.valid) {
+        if (bindings[i].splitLocalCbvSrvUav) {
+            if (bindings[i].dynamicCbvSrvUavRange.valid) {
+                cbvHeap = bindings[i].dynamicCbvSrvUavRange.heap;
+            }
+            if (bindings[i].staticCbvSrvUavRange.valid) {
+                cbvHeap = bindings[i].staticCbvSrvUavRange.heap;
+            }
+        } else if (bindings[i].cbvRange.valid) {
             cbvHeap = bindings[i].cbvRange.heap;
         }
         if (bindings[i].samplerRange.valid) {
             samplerHeap = bindings[i].samplerRange.heap;
         }
     }
-#if CC_D3D12_PERF_COUNTERS
-    const auto descriptorHeapNormalizeEnd = perfTimingEnabled
-                                                ? std::chrono::steady_clock::now()
-                                                : std::chrono::steady_clock::time_point{};
-    if (perfTimingEnabled) {
-        descriptorHeapNormalizeNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-            descriptorHeapNormalizeEnd - descriptorHeapNormalizeStart).count());
-    }
-    const auto descriptorHeapRootStart = descriptorHeapNormalizeEnd;
-#endif
 
     ID3D12DescriptorHeap *boundHeaps[2]{};
     UINT boundHeapCount = 0;
@@ -2955,23 +3033,10 @@ bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental() {
             (_impl->boundCbvSrvUavHeap || _impl->boundSamplerHeap)) {
             return false;
         }
-#if CC_D3D12_PERF_COUNTERS
-        const bool cbvHeapChanged = _impl->boundCbvSrvUavHeap != cbvHeap;
-        const bool samplerHeapChanged = _impl->boundSamplerHeap != samplerHeap;
-#endif
         _impl->commandList->SetDescriptorHeaps(boundHeapCount, boundHeaps);
         _impl->boundCbvSrvUavHeap = cbvHeap;
         _impl->boundSamplerHeap = samplerHeap;
         invalidateDescriptorTables();
-#if CC_D3D12_PERF_COUNTERS
-        ++setDescriptorHeapCalls;
-        if (cbvHeapChanged) {
-            ++cbvHeapChanges;
-        }
-        if (samplerHeapChanged) {
-            ++samplerHeapChanges;
-        }
-#endif
     }
 
     auto bindRootTable = [&](int32_t rootIndex, const PreparedRange &range) {
@@ -2984,88 +3049,34 @@ bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental() {
         }
         auto &bound = _impl->boundRootTables[rootIndex];
         if (!bound.valid || bound.gpuHandle != range.gpuHandle) {
-#if CC_D3D12_PERF_COUNTERS
-            const auto rootTableBindStart = perfTimingEnabled
-                                                ? std::chrono::steady_clock::now()
-                                                : std::chrono::steady_clock::time_point{};
-#endif
             _impl->commandList->SetGraphicsRootDescriptorTable(
                 static_cast<UINT>(rootIndex), {range.gpuHandle});
-#if CC_D3D12_PERF_COUNTERS
-            if (perfTimingEnabled) {
-                _impl->appendPerfDrawSequenceEvent(Impl::PERF_ROOT_TABLE_EVENT,
-                                                   static_cast<uint32_t>(rootIndex), range.gpuHandle);
-            }
-            if (perfTimingEnabled) {
-                rootTableBindNanoseconds += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() - rootTableBindStart).count());
-            }
-#endif
             bound = {range.gpuHandle, true};
-#if CC_D3D12_PERF_COUNTERS
-            ++rootTableBindCount;
-#endif
         }
         return true;
     };
 
     for (uint32_t i = 0; i < bindingCount; ++i) {
-        if (!bindRootTable(bindings[i].cbvRootIndex, bindings[i].cbvRange) ||
-            !bindRootTable(bindings[i].samplerRootIndex, bindings[i].samplerRange)) {
+        const auto &binding = bindings[i];
+        if ((binding.splitLocalCbvSrvUav &&
+             ((binding.useLocalRootCbv && binding.localRootCbvGpuAddress == 0) ||
+              (binding.useLocalRootCbv && binding.dynamicDescriptorCount > 0 &&
+               !bindRootTable(binding.dynamicCbvRootIndex, binding.dynamicCbvSrvUavRange)) ||
+              (!binding.useLocalRootCbv &&
+               !bindRootTable(binding.dynamicCbvRootIndex, binding.dynamicCbvSrvUavRange)) ||
+              !bindRootTable(binding.staticCbvSrvUavRootIndex, binding.staticCbvSrvUavRange))) ||
+            (!binding.splitLocalCbvSrvUav && !bindRootTable(binding.cbvRootIndex, binding.cbvRange)) ||
+            !bindRootTable(binding.samplerRootIndex, binding.samplerRange)) {
             return false;
         }
+        if (binding.useLocalRootCbv) {
+            _impl->commandList->SetGraphicsRootConstantBufferView(
+                static_cast<UINT>(binding.localRootCbvRootIndex), binding.localRootCbvGpuAddress);
+        }
     }
-#if CC_D3D12_PERF_COUNTERS
-    if (perfTimingEnabled) {
-        descriptorHeapRootNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - descriptorHeapRootStart).count());
-    }
-#endif
 
     _impl->descriptorSetsDirty = false;
-#if CC_D3D12_PERF_COUNTERS
-    const auto descriptorFlushEnd = perfTimingEnabled
-                                        ? std::chrono::steady_clock::now()
-                                        : std::chrono::steady_clock::time_point{};
-    const uint64_t descriptorFlushNanoseconds = perfTimingEnabled
-                                                     ? static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                                           descriptorFlushEnd - descriptorFlushStart).count())
-                                                     : 0;
-    const uint64_t descriptorFullFlushNanoseconds = perfTimingEnabled
-                                                         ? static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                                               descriptorFlushEnd - descriptorFullFlushStart).count())
-                                                         : 0;
-    const uint64_t descriptorBindingBuildNanoseconds = perfTimingEnabled
-                                                            ? static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                                                  descriptorBindingBuildEnd - descriptorFullFlushStart).count())
-                                                            : 0;
-    device->recordDescriptorFlush(copyDescriptorCalls, copiedDescriptorCount,
-                                  dynamicOffsetRewriteCount, dynamicOffsetDescriptorCount,
-                                  dynamicCbvTableDescriptorCount,
-                                  setDescriptorHeapCalls, rootTableBindCount);
-    device->recordDescriptorCacheAnalysis(descriptorCacheHits, descriptorCacheMisses,
-                                          descriptorRepackPasses, descriptorRepackDescriptors);
-    device->recordDescriptorTypeAnalysis(
-        cbvCacheHits, samplerCacheHits, cbvCacheMisses, samplerCacheMisses,
-        cbvCopiedDescriptors, samplerCopiedDescriptors,
-        cbvRepackPasses, samplerRepackPasses,
-        cbvHeapChanges, samplerHeapChanges);
-    device->recordSamplerTableAnalysis(
-        samplerTableLookups, samplerUniqueTables, samplerUniqueDescriptors,
-        samplerDuplicateTableHits, samplerSignatureHashCollisions,
-        samplerConsecutiveExactHits);
-    device->recordDescriptorBindingAnalysis(
-        descriptorCacheSlotLookups, descriptorCacheSlotOwnerChanges,
-        descriptorFullFlushNanoseconds, descriptorBindingBuildNanoseconds,
-        descriptorCacheProbeNanoseconds, descriptorSetUpdateNs);
-    device->recordDescriptorPostPhaseAnalysis(
-        descriptorRangePrepareNs, descriptorHeapNormalizeNs, descriptorHeapRootNs);
-    device->recordDescriptorRangePhaseAnalysis(
-        descriptorCbvPrepareNs, descriptorSamplerPrepareNs);
-    device->recordHotPathTimings(descriptorFlushNanoseconds, descriptorCopyNanoseconds, 0,
-                                 dynamicOffsetNanoseconds, descriptorAllocateNanoseconds,
-                                 rootTableBindNanoseconds);
-#endif
+    _impl->localDescriptorSetOnlyDirty = false;
     return true;
 }
 
@@ -3076,15 +3087,12 @@ void CCD3D12CommandBuffer::flushDescriptorSets() {
     // The fallback path owns its descriptor allocations independently. Drop
     // incremental sampler ranges so a later draw cannot reuse another heap epoch.
     _impl->samplerTableCache.clear();
+    _impl->localStaticCbvSrvUavTableCache.clear();
     _impl->samplerTableCacheHeap = nullptr;
     _impl->samplerTableCacheHeapIndex = std::numeric_limits<uint32_t>::max();
-#if CC_D3D12_PERF_COUNTERS
-    _impl->perfLastSamplerTableKey.clear();
-    _impl->perfLastSamplerTableHeap = nullptr;
-    _impl->perfLastSamplerTableHeapIndex = std::numeric_limits<uint32_t>::max();
-#endif
     if (!_impl->descriptorSetsDirty || !_impl->commandList) return;
     _impl->descriptorSetsDirty = false;
+    _impl->localDescriptorSetOnlyDirty = false;
 
     auto *device = CCD3D12Device::getInstance();
     if (!device) return;
@@ -3179,29 +3187,14 @@ void CCD3D12CommandBuffer::flushDescriptorSets() {
     uint32_t samplerOffset = 0;
     const uint32_t cbvDescriptorSize = heapPool->getDescriptorSize();
     const uint32_t samplerDescriptorSize = samplerPool ? samplerPool->getDescriptorSize() : 0;
-#if CC_D3D12_PERF_COUNTERS
-    uint32_t copyDescriptorCalls = 0;
-    uint32_t copiedDescriptorCount = 0;
-    uint32_t dynamicOffsetRewriteCount = 0;
-    uint32_t dynamicOffsetDescriptorCount = 0;
-    uint32_t dynamicCbvTableDescriptorCount = 0;
-    uint32_t setDescriptorHeapCalls = 0;
-#endif
     for (uint32_t i = 0; i < bindingCount; ++i) {
         auto &binding = bindings[i];
         bool appliedDynamicOffsets = false;
 
         if (!binding.dynamicOffsets.empty()) {
-#if CC_D3D12_PERF_COUNTERS
-            dynamicCbvTableDescriptorCount += binding.cbvCount;
-#endif
             binding.set->forceUpdate();
             binding.set->applyDynamicOffsets(static_cast<uint32_t>(binding.dynamicOffsets.size()), binding.dynamicOffsets.data());
             appliedDynamicOffsets = true;
-#if CC_D3D12_PERF_COUNTERS
-            ++dynamicOffsetRewriteCount;
-            dynamicOffsetDescriptorCount += static_cast<uint32_t>(binding.dynamicOffsets.size());
-#endif
         } else {
             binding.set->update();
         }
@@ -3214,10 +3207,6 @@ void CCD3D12CommandBuffer::flushDescriptorSets() {
                 dstStart.ptr = reinterpret_cast<SIZE_T>(cbvAlloc.cpuHandle) +
                                static_cast<SIZE_T>(cbvOffset) * cbvDescriptorSize;
                 d3dDevice->CopyDescriptorsSimple(binding.cbvCount, dstStart, srcStart, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-#if CC_D3D12_PERF_COUNTERS
-                ++copyDescriptorCalls;
-                copiedDescriptorCount += binding.cbvCount;
-#endif
                 if (cbvEntryCount < MAX_ROOT_TABLE_ENTRIES) {
                     cbvEntries[cbvEntryCount++] = {
                         static_cast<UINT>(binding.cbvRootIndex),
@@ -3236,10 +3225,6 @@ void CCD3D12CommandBuffer::flushDescriptorSets() {
                 dstStart.ptr = reinterpret_cast<SIZE_T>(samplerAlloc.cpuHandle) +
                                static_cast<SIZE_T>(samplerOffset) * samplerDescriptorSize;
                 d3dDevice->CopyDescriptorsSimple(binding.samplerCount, dstStart, srcStart, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
-#if CC_D3D12_PERF_COUNTERS
-                ++copyDescriptorCalls;
-                copiedDescriptorCount += binding.samplerCount;
-#endif
                 if (samplerEntryCount < MAX_ROOT_TABLE_ENTRIES) {
                     samplerEntries[samplerEntryCount++] = {
                         static_cast<UINT>(binding.samplerRootIndex),
@@ -3283,9 +3268,6 @@ void CCD3D12CommandBuffer::flushDescriptorSets() {
         }
         if (setDescriptorHeaps) {
             _impl->commandList->SetDescriptorHeaps(boundHeapCount, boundHeaps);
-#if CC_D3D12_PERF_COUNTERS
-            ++setDescriptorHeapCalls;
-#endif
         }
         _impl->boundCbvSrvUavHeap = cbvHeap;
         _impl->boundSamplerHeap = samplerHeap;
@@ -3294,48 +3276,181 @@ void CCD3D12CommandBuffer::flushDescriptorSets() {
     // Set all root descriptor tables
     for (uint32_t i = 0; i < cbvEntryCount; ++i) {
         _impl->commandList->SetGraphicsRootDescriptorTable(cbvEntries[i].rootParameterIndex, cbvEntries[i].gpuHandle);
-#if CC_D3D12_PERF_COUNTERS
-        if (device->isPerfLoggingEnabled()) {
-            _impl->appendPerfDrawSequenceEvent(Impl::PERF_ROOT_TABLE_EVENT,
-                                               cbvEntries[i].rootParameterIndex,
-                                               cbvEntries[i].gpuHandle.ptr);
-        }
-#endif
     }
     for (uint32_t i = 0; i < samplerEntryCount; ++i) {
         _impl->commandList->SetGraphicsRootDescriptorTable(samplerEntries[i].rootParameterIndex, samplerEntries[i].gpuHandle);
-#if CC_D3D12_PERF_COUNTERS
-        if (device->isPerfLoggingEnabled()) {
-            _impl->appendPerfDrawSequenceEvent(Impl::PERF_ROOT_TABLE_EVENT,
-                                               samplerEntries[i].rootParameterIndex,
-                                               samplerEntries[i].gpuHandle.ptr);
-        }
-#endif
     }
-#if CC_D3D12_PERF_COUNTERS
-    device->recordDescriptorFlush(copyDescriptorCalls, copiedDescriptorCount,
-                                  dynamicOffsetRewriteCount, dynamicOffsetDescriptorCount,
-                                  dynamicCbvTableDescriptorCount,
-                                  setDescriptorHeapCalls, cbvEntryCount + samplerEntryCount);
-#endif
+}
+
+bool CCD3D12CommandBuffer::captureLocalRootCbvBatchBinding(uint64_t &gpuAddress,
+                                                            uint32_t &rootParameterIndex,
+                                                            CCD3D12DescriptorSet *&descriptorSet,
+                                                            uint64_t &staticSignature,
+                                                            CCD3D12DescriptorSet *directDescriptorSet) {
+    gpuAddress = 0;
+    rootParameterIndex = 0;
+    descriptorSet = nullptr;
+    staticSignature = 0;
+    if (!_impl || !_impl->boundPipelineLayout) {
+        return false;
+    }
+
+    auto *boundLayout = static_cast<CCD3D12PipelineLayout *>(_impl->boundPipelineLayout);
+    auto *set = directDescriptorSet;
+    if (!set) {
+        auto *localPending = static_cast<Impl::PendingDescriptorSet *>(nullptr);
+        for (uint32_t i = 0; i < _impl->pendingSetCount; ++i) {
+            auto &pending = _impl->pendingSets[i];
+            if (pending.valid && pending.set && pending.setIndex == D3D12_LOCAL_DESCRIPTOR_SET_INDEX) {
+                localPending = &pending;
+                break;
+            }
+        }
+        if (!localPending) {
+            return false;
+        }
+        set = static_cast<CCD3D12DescriptorSet *>(localPending->set);
+    }
+
+    const int32_t rootCbvIndex = boundLayout->getLocalRootCbvParameterIndex(D3D12_LOCAL_DESCRIPTOR_SET_INDEX);
+    if (!set || rootCbvIndex < 0 || !_impl->boundRootSignature) {
+        return false;
+    }
+
+    set->updateForLocalRootCbv(true);
+    uint32_t rootCbvDescriptorOffset = 0;
+    uint32_t staticCbvSrvUavCount = 0;
+    if (!set->getCbvSrvUavPartition(rootCbvDescriptorOffset, staticCbvSrvUavCount) ||
+        !set->hasOnlyNullDynamicDescriptorSources()) {
+        return false;
+    }
+
+    uint32_t dynamicCbvDescriptors = 0;
+    uint32_t staticTextureDescriptors = 0;
+    uint32_t staticCbvSrvUavDescriptors = 0;
+    set->getStaticDescriptorAnalysis(dynamicCbvDescriptors, staticTextureDescriptors,
+                                     staticCbvSrvUavDescriptors, staticSignature);
+    if (dynamicCbvDescriptors != 1 || staticSignature == 0 ||
+        staticCbvSrvUavDescriptors != staticCbvSrvUavCount ||
+        !set->canReuseStaticCbvSrvUavResources()) {
+        return false;
+    }
+
+    uint32_t rootCbvSize = 0;
+    const uint32_t uniformSlotCount = set->getUniformDescriptorSlotCount();
+    for (uint32_t slotIndex = 0; slotIndex < uniformSlotCount; ++slotIndex) {
+        uint32_t descriptorOffset = 0;
+        if (set->getUniformDescriptorSignature(slotIndex, descriptorOffset, gpuAddress, rootCbvSize) &&
+            descriptorOffset == rootCbvDescriptorOffset) {
+            break;
+        }
+    }
+    if (gpuAddress == 0 || rootCbvSize < 256U) {
+        auto *device = CCD3D12Device::getInstance();
+        auto *dummyBuffer = device ? device->getDummyBuffer() : nullptr;
+        gpuAddress = dummyBuffer ? dummyBuffer->getD3D12GPUVirtualAddress() : 0;
+    }
+    if (gpuAddress == 0) {
+        return false;
+    }
+
+    rootParameterIndex = static_cast<uint32_t>(rootCbvIndex);
+    descriptorSet = set;
+    return true;
+}
+
+void CCD3D12CommandBuffer::flushLocalRootCbvBatch() {
+    if (!_impl || !_impl->localRootCbvBatchActive) {
+        return;
+    }
+
+    const bool indexed = _impl->localRootCbvBatchIndexed;
+    const uint32_t commandCount = indexed
+                                      ? static_cast<uint32_t>(_impl->localRootCbvBatchIndexedDraws.size())
+                                      : static_cast<uint32_t>(_impl->localRootCbvBatchDraws.size());
+    if (commandCount == 0) {
+        _impl->localRootCbvBatchReady = false;
+        _impl->localRootCbvBatchDescriptorSet = nullptr;
+        _impl->localRootCbvBatchStaticSignature = 0;
+        _impl->localRootCbvBatchSamplerKey.clear();
+        return;
+    }
+
+    auto *device = CCD3D12Device::getInstance();
+    auto *signature = static_cast<ID3D12CommandSignature *>(
+        device ? device->getOrCreateLocalRootCbvIndirectSignature(
+                     _impl->localRootCbvBatchRootSignature,
+                     _impl->localRootCbvBatchRootParameterIndex, indexed)
+               : nullptr);
+    const uint64_t stride = indexed ? sizeof(Impl::LocalRootCbvIndexedIndirectDraw)
+                                    : sizeof(Impl::LocalRootCbvIndirectDraw);
+    const uint64_t byteCount = stride * commandCount;
+    const auto upload = signature && device
+                            ? device->allocateUploadBuffer(byteCount, sizeof(uint64_t))
+                            : D3D12UploadAllocation{};
+
+    if (signature && upload.isValid && upload.resource && upload.mappedData) {
+        const void *commands = indexed
+                                   ? static_cast<const void *>(_impl->localRootCbvBatchIndexedDraws.data())
+                                   : static_cast<const void *>(_impl->localRootCbvBatchDraws.data());
+        std::memcpy(upload.mappedData, commands, static_cast<size_t>(byteCount));
+        auto *resource = static_cast<ID3D12Resource *>(upload.resource);
+        retainCommandListResource(_impl->pendingUploadResources, _impl->pendingUploadResourceSet, resource);
+        _impl->commandList->ExecuteIndirect(signature, commandCount, resource, upload.offset, nullptr, 0);
+    } else {
+        // Allocation/signature failures are intentionally non-fatal: preserve
+        // the original Root-CBV plus Draw sequence for this batch.
+        if (indexed) {
+            for (const auto &command : _impl->localRootCbvBatchIndexedDraws) {
+                _impl->commandList->SetGraphicsRootConstantBufferView(
+                    _impl->localRootCbvBatchRootParameterIndex, command.rootCbvGpuAddress);
+                _impl->commandList->DrawIndexedInstanced(
+                    command.arguments.IndexCountPerInstance, command.arguments.InstanceCount,
+                    command.arguments.StartIndexLocation, command.arguments.BaseVertexLocation,
+                    command.arguments.StartInstanceLocation);
+            }
+        } else {
+            for (const auto &command : _impl->localRootCbvBatchDraws) {
+                _impl->commandList->SetGraphicsRootConstantBufferView(
+                    _impl->localRootCbvBatchRootParameterIndex, command.rootCbvGpuAddress);
+                _impl->commandList->DrawInstanced(
+                    command.arguments.VertexCountPerInstance, command.arguments.InstanceCount,
+                    command.arguments.StartVertexLocation, command.arguments.StartInstanceLocation);
+            }
+        }
+    }
+
+    _numDrawCalls += commandCount;
+    if (indexed) {
+        for (const auto &command : _impl->localRootCbvBatchIndexedDraws) {
+            _numInstances += command.arguments.InstanceCount;
+            _numTriangles += (command.arguments.IndexCountPerInstance / 3U) * command.arguments.InstanceCount;
+        }
+        _impl->localRootCbvBatchIndexedDraws.clear();
+    } else {
+        for (const auto &command : _impl->localRootCbvBatchDraws) {
+            _numInstances += command.arguments.InstanceCount;
+            _numTriangles += (command.arguments.VertexCountPerInstance / 3U) * command.arguments.InstanceCount;
+        }
+        _impl->localRootCbvBatchDraws.clear();
+    }
+    _impl->localRootCbvBatchReady = false;
+    _impl->localRootCbvBatchDescriptorSet = nullptr;
+    _impl->localRootCbvBatchStaticSignature = 0;
+    _impl->localRootCbvBatchSamplerKey.clear();
 }
 
 void CCD3D12CommandBuffer::bindInputAssembler(InputAssembler *ia) {
     if (!_impl->commandList || !ia) return;
 
-    const bool sameLogicalInputAssembler = _impl->boundIA == ia;
-#if CC_D3D12_PERF_COUNTERS
-    auto *perfDevice = CCD3D12Device::getInstance();
-    const bool perfTimingEnabled = perfDevice && perfDevice->isPerfLoggingEnabled();
-    const auto inputAssemblerBindStart = perfTimingEnabled
-                                             ? std::chrono::steady_clock::now()
-                                             : std::chrono::steady_clock::time_point{};
-#endif
-    _impl->boundIA = ia;
+    auto *const previousInputAssembler = _impl->boundIA;
+    const bool sameLogicalInputAssembler = previousInputAssembler == ia;
     auto *d3d12IA = static_cast<CCD3D12InputAssembler *>(ia);
-
-    // Compare live views rather than only the IA pointer: Buffer::resize() can
-    // replace the underlying resource without recreating the InputAssembler.
+    d3d12IA->refreshBufferViews();
+    _impl->boundIA = ia;
+    // refreshBufferViews() may observe a backing-resource version change even
+    // when the IA views themselves are identical. Only an emitted IA view
+    // change must split a deferred local Root-CBV indirect batch.
     const uint32_t vbCount = d3d12IA->getVertexBufferCount();
     if (vbCount > D3D12_MAX_VERTEX_BUFFERS) {
         CC_LOG_ERROR("D3D12 InputAssembler uses %u vertex buffers; maximum supported is %u.",
@@ -3374,6 +3489,15 @@ void CCD3D12CommandBuffer::bindInputAssembler(InputAssembler *ia) {
         !_impl->indexBufferStateValid ||
         _impl->boundHasIndexBuffer != hasIndexBuffer ||
         (hasIndexBuffer && std::memcmp(&_impl->boundIndexBufferView, &ibView, sizeof(ibView)) != 0);
+    // Different InputAssembler actors may describe the exact same native IA
+    // views. A D3D12 batch only needs to split when a command-list view would
+    // actually change; object identity itself carries no GPU state.
+    if (_impl->localRootCbvBatchActive && (vertexBuffersChanged || indexBufferChanged)) {
+        flushLocalRootCbvBatch();
+    }
+    if (!vertexBuffersChanged && !indexBufferChanged) {
+        return;
+    }
     if (indexBufferChanged) {
         _impl->commandList->IASetIndexBuffer(hasIndexBuffer ? &ibView : nullptr);
         _impl->boundIndexBufferView = ibView;
@@ -3381,16 +3505,6 @@ void CCD3D12CommandBuffer::bindInputAssembler(InputAssembler *ia) {
         _impl->indexBufferStateValid = true;
     }
 
-#if CC_D3D12_PERF_COUNTERS
-    if (perfDevice && perfTimingEnabled) {
-        const auto inputAssemblerBindNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - inputAssemblerBindStart).count());
-        perfDevice->recordGraphicsBindAnalysis(
-            0, 0, 0, 1, sameLogicalInputAssembler ? 1U : 0U,
-            vertexBuffersChanged ? 1U : 0U, indexBufferChanged ? 1U : 0U,
-            0, inputAssemblerBindNs);
-    }
-#endif
 
     // Note: primitive topology is set in bindPipelineState from PSO info
 }
@@ -3546,9 +3660,6 @@ void CCD3D12CommandBuffer::nextSubpass() {
                 barrier.Transition.StateBefore = prevState;
                 barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_DEPTH_WRITE;
                 _impl->commandList->ResourceBarrier(1, &barrier);
-#if CC_D3D12_PERF_COUNTERS
-                recordD3D12ResourceBarriers(1);
-#endif
                 _impl->activeDepthTexture->setCurrentState(D3D12_RESOURCE_STATE_DEPTH_WRITE);
             }
         }
@@ -3558,106 +3669,180 @@ void CCD3D12CommandBuffer::nextSubpass() {
     _impl->currentSubpass = nextSubpassIndex;
 }
 
+void CCD3D12CommandBuffer::beginDrawBatch() {
+    if (!_impl->commandList || _type != CommandBufferType::PRIMARY) {
+        return;
+    }
+    flushLocalRootCbvBatch();
+    // RenderQueue records a CPU-stable sequence. Drain every queued buffer
+    // update before binding its first PSO/IA so the drain's conservative
+    // graphics-state invalidation cannot split every following indirect draw.
+    if (auto *device = CCD3D12Device::getInstance()) {
+        device->flushPendingBufferUpdates(this);
+    }
+    _impl->localRootCbvBatchActive = true;
+    _impl->localRootCbvBatchReady = false;
+}
+
+void CCD3D12CommandBuffer::endDrawBatch() {
+    if (!_impl->localRootCbvBatchActive) {
+        return;
+    }
+    flushLocalRootCbvBatch();
+    _impl->localRootCbvBatchActive = false;
+    _impl->localRootCbvBatchReady = false;
+    _impl->localRootCbvBatchRootSignature = nullptr;
+}
+
+void CCD3D12CommandBuffer::drawWithInputAssemblerAndDescriptorSet(InputAssembler *inputAssembler,
+                                                                   uint32_t set,
+                                                                   DescriptorSet *descriptorSet,
+                                                                   const DrawInfo &info) {
+    bindInputAssembler(inputAssembler);
+    if (!_impl->commandList || set != D3D12_LOCAL_DESCRIPTOR_SET_INDEX || !descriptorSet ||
+        !_impl->localRootCbvBatchActive || _type != CommandBufferType::PRIMARY) {
+        bindDescriptorSet(set, descriptorSet, 0, nullptr);
+        draw(info);
+        return;
+    }
+
+    auto *d3d12Set = static_cast<CCD3D12DescriptorSet *>(descriptorSet);
+    uint32_t rootCbvDescriptorOffset = 0;
+    uint32_t staticCbvSrvUavCount = 0;
+    uint32_t dynamicCbvDescriptors = 0;
+    uint32_t staticTextureDescriptors = 0;
+    uint32_t staticCbvSrvUavDescriptors = 0;
+    uint64_t staticSignature = 0;
+    const bool directBatchEligible =
+        d3d12Set->getCbvSrvUavPartition(rootCbvDescriptorOffset, staticCbvSrvUavCount) &&
+        d3d12Set->hasOnlyNullDynamicDescriptorSources() &&
+        d3d12Set->canReuseStaticCbvSrvUavResources();
+    if (directBatchEligible) {
+        d3d12Set->getStaticDescriptorAnalysis(dynamicCbvDescriptors, staticTextureDescriptors,
+                                               staticCbvSrvUavDescriptors, staticSignature);
+    }
+    const bool hasExpectedLocalPartition = directBatchEligible && dynamicCbvDescriptors == 1 &&
+                                           staticSignature != 0 &&
+                                           staticCbvSrvUavDescriptors == staticCbvSrvUavCount;
+    const bool localStaticStateChanged =
+        !_impl->localRootCbvBatchReady || !hasExpectedLocalPartition ||
+        staticSignature != _impl->localRootCbvBatchStaticSignature ||
+        !_impl->localRootCbvBatchDescriptorSet ||
+        !d3d12Set->hasMatchingStaticCbvSrvUavResources(*_impl->localRootCbvBatchDescriptorSet) ||
+        d3d12Set->getSamplerTableKey() != _impl->localRootCbvBatchSamplerKey;
+    if (localStaticStateChanged) {
+        flushLocalRootCbvBatch();
+        // The first command of a compatible run still establishes all static
+        // root tables through the normal path. Later commands only encode b0.
+        bindDescriptorSet(set, descriptorSet, 0, nullptr);
+    }
+
+    drawLocalRootCbvBatchInternal(info, d3d12Set);
+}
+
+void CCD3D12CommandBuffer::drawLocalRootCbvBatchInternal(const DrawInfo &info,
+                                                          CCD3D12DescriptorSet *directDescriptorSet) {
+    if (!_impl->commandList || !_impl->localRootCbvBatchActive ||
+        _type != CommandBufferType::PRIMARY || !_impl->boundIA) {
+        draw(info);
+        return;
+    }
+
+    auto *ia = static_cast<CCD3D12InputAssembler *>(_impl->boundIA);
+    if (ia->getIndirectBuffer()) {
+        flushLocalRootCbvBatch();
+        draw(info);
+        return;
+    }
+
+    const bool indexed = info.indexCount > 0;
+    if (_impl->localRootCbvBatchReady && indexed != _impl->localRootCbvBatchIndexed) {
+        flushLocalRootCbvBatch();
+    }
+
+    if (!_impl->localRootCbvBatchReady) {
+        // The first draw of each compatible run establishes the static
+        // descriptor tables. Subsequent draws only append their local b0
+        // address to the indirect argument stream.
+        flushDescriptorSets();
+    }
+
+    uint64_t rootCbvGpuAddress = 0;
+    uint32_t rootParameterIndex = 0;
+    CCD3D12DescriptorSet *descriptorSet = nullptr;
+    uint64_t staticSignature = 0;
+    if (!captureLocalRootCbvBatchBinding(rootCbvGpuAddress, rootParameterIndex,
+                                         descriptorSet, staticSignature, directDescriptorSet)) {
+        flushLocalRootCbvBatch();
+        if (directDescriptorSet) {
+            bindDescriptorSet(D3D12_LOCAL_DESCRIPTOR_SET_INDEX, directDescriptorSet, 0, nullptr);
+        }
+        draw(info);
+        return;
+    }
+
+    if (_impl->localRootCbvBatchReady) {
+        if (rootParameterIndex != _impl->localRootCbvBatchRootParameterIndex ||
+            _impl->boundRootSignature != _impl->localRootCbvBatchRootSignature ||
+            staticSignature != _impl->localRootCbvBatchStaticSignature ||
+            !descriptorSet || !_impl->localRootCbvBatchDescriptorSet ||
+            !descriptorSet->hasMatchingStaticCbvSrvUavResources(*_impl->localRootCbvBatchDescriptorSet) ||
+            descriptorSet->getSamplerTableKey() != _impl->localRootCbvBatchSamplerKey) {
+            flushLocalRootCbvBatch();
+            if (directDescriptorSet) {
+                bindDescriptorSet(D3D12_LOCAL_DESCRIPTOR_SET_INDEX, directDescriptorSet, 0, nullptr);
+            }
+            drawLocalRootCbvBatchInternal(info, directDescriptorSet);
+            return;
+        }
+    } else {
+        _impl->localRootCbvBatchReady = true;
+        _impl->localRootCbvBatchIndexed = indexed;
+        _impl->localRootCbvBatchRootParameterIndex = rootParameterIndex;
+        _impl->localRootCbvBatchRootSignature = _impl->boundRootSignature;
+        _impl->localRootCbvBatchDescriptorSet = descriptorSet;
+        _impl->localRootCbvBatchStaticSignature = staticSignature;
+        _impl->localRootCbvBatchSamplerKey = descriptorSet->getSamplerTableKey();
+    }
+
+    if (indexed) {
+        auto &command = _impl->localRootCbvBatchIndexedDraws.emplace_back();
+        command.rootCbvGpuAddress = rootCbvGpuAddress;
+        command.arguments.IndexCountPerInstance = info.indexCount;
+        command.arguments.InstanceCount = std::max<uint32_t>(info.instanceCount, 1U);
+        command.arguments.StartIndexLocation = info.firstIndex;
+        command.arguments.BaseVertexLocation = info.vertexOffset;
+        command.arguments.StartInstanceLocation = info.firstInstance;
+    } else {
+        auto &command = _impl->localRootCbvBatchDraws.emplace_back();
+        command.rootCbvGpuAddress = rootCbvGpuAddress;
+        command.arguments.VertexCountPerInstance = info.vertexCount;
+        command.arguments.InstanceCount = std::max<uint32_t>(info.instanceCount, 1U);
+        command.arguments.StartVertexLocation = info.firstVertex;
+        command.arguments.StartInstanceLocation = info.firstInstance;
+    }
+
+    // The root-CBV address is encoded in the pending indirect command, so a
+    // later normal draw must not re-flush this local descriptor binding.
+    _impl->descriptorSetsDirty = false;
+    _impl->localDescriptorSetOnlyDirty = false;
+}
+
 void CCD3D12CommandBuffer::draw(const DrawInfo &info) {
     if (!_impl->commandList) return;
-#if CC_D3D12_PERF_COUNTERS
-    auto *perfDevice = CCD3D12Device::getInstance();
-    const bool perfTimingEnabled = perfDevice && perfDevice->isPerfLoggingEnabled();
-    const auto drawStart = perfTimingEnabled
-                               ? std::chrono::steady_clock::now()
-                               : std::chrono::steady_clock::time_point{};
-    uint64_t drawPendingBufferNs = 0;
-    uint64_t drawDescriptorFlushNs = 0;
-    uint64_t drawIssueNs = 0;
-    auto drawPhaseStart = std::chrono::steady_clock::time_point{};
-    auto drawIssueStart = std::chrono::steady_clock::time_point{};
-    const auto recordDrawTiming = [&]() {
-        if (perfTimingEnabled) {
-            const auto drawEnd = std::chrono::steady_clock::now();
-            const auto elapsed = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                drawEnd - drawStart).count());
-            drawIssueNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                drawEnd - drawIssueStart).count());
-            perfDevice->recordCommandHotPathAnalysis(0, 0, 1, elapsed);
-            perfDevice->recordDrawPhaseAnalysis(drawPendingBufferNs, drawDescriptorFlushNs, drawIssueNs);
-        }
-    };
-#endif
-
-#if CC_D3D12_PERF_COUNTERS
-    if (perfTimingEnabled) {
-        drawPhaseStart = std::chrono::steady_clock::now();
+    if (_impl->localRootCbvBatchActive) {
+        flushLocalRootCbvBatch();
     }
-#endif
+
     if (_type == CommandBufferType::PRIMARY) {
         CCD3D12Device::getInstance()->flushPendingBufferUpdates(this);
     }
-#if CC_D3D12_PERF_COUNTERS
-    if (perfTimingEnabled) {
-        const auto phaseEnd = std::chrono::steady_clock::now();
-        drawPendingBufferNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-            phaseEnd - drawPhaseStart).count());
-        drawPhaseStart = phaseEnd;
-    }
-#endif
 
     // Flush any pending descriptor set bindings before drawing
     flushDescriptorSets();
-#if CC_D3D12_PERF_COUNTERS
-    if (perfTimingEnabled) {
-        const auto phaseEnd = std::chrono::steady_clock::now();
-        drawDescriptorFlushNs += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-            phaseEnd - drawPhaseStart).count());
-        drawIssueStart = phaseEnd;
-    }
-#endif
 
     const uint32_t instanceCount = std::max<uint32_t>(info.instanceCount, 1);
     const uint32_t firstInstance = info.firstInstance;
-#if CC_D3D12_PERF_COUNTERS
-    const auto recordPerfDrawSequence = [&](bool indexed, bool indirect,
-                                            ID3D12CommandSignature *signature = nullptr,
-                                            ID3D12Resource *argumentBuffer = nullptr) {
-        if (!perfTimingEnabled) {
-            return;
-        }
-        _impl->appendPerfDrawSequenceEvent(
-            Impl::PERF_DRAW_EVENT_STATE, 0,
-            reinterpret_cast<uintptr_t>(_impl->boundNativePipelineState),
-            reinterpret_cast<uintptr_t>(_impl->boundRootSignature),
-            reinterpret_cast<uintptr_t>(_impl->boundCbvSrvUavHeap),
-            reinterpret_cast<uintptr_t>(_impl->boundSamplerHeap),
-            static_cast<uint64_t>(_impl->boundPrimitiveTopology),
-            _impl->boundVertexBufferCount);
-        for (uint32_t i = 0; i < _impl->boundVertexBufferCount; ++i) {
-            const auto &view = _impl->boundVertexBufferViews[i];
-            _impl->appendPerfDrawSequenceEvent(
-                Impl::PERF_DRAW_EVENT_VERTEX_BUFFER, i,
-                view.BufferLocation, view.SizeInBytes, view.StrideInBytes);
-        }
-        _impl->appendPerfDrawSequenceEvent(
-            Impl::PERF_DRAW_EVENT_INDEX_BUFFER, _impl->boundHasIndexBuffer ? 1U : 0U,
-            _impl->boundIndexBufferView.BufferLocation,
-            _impl->boundIndexBufferView.SizeInBytes,
-            static_cast<uint64_t>(_impl->boundIndexBufferView.Format));
-        const uint32_t flags = (indexed ? 1U : 0U) | (indirect ? 2U : 0U);
-        if (indirect) {
-            _impl->appendPerfDrawSequenceEvent(
-                Impl::PERF_DRAW_EVENT_ARGUMENTS, flags,
-                reinterpret_cast<uintptr_t>(signature),
-                reinterpret_cast<uintptr_t>(argumentBuffer), 1, 0, 0, 0);
-        } else if (indexed) {
-            _impl->appendPerfDrawSequenceEvent(
-                Impl::PERF_DRAW_EVENT_ARGUMENTS, flags,
-                info.indexCount, instanceCount, info.firstIndex,
-                static_cast<uint64_t>(static_cast<int64_t>(info.vertexOffset)), firstInstance);
-        } else {
-            _impl->appendPerfDrawSequenceEvent(
-                Impl::PERF_DRAW_EVENT_ARGUMENTS, flags,
-                info.vertexCount, instanceCount, info.firstVertex, firstInstance);
-        }
-    };
-#endif
     // Check for indirect draw via InputAssembler's indirect buffer
     if (_impl->boundIA) {
         auto *ia = static_cast<CCD3D12InputAssembler *>(_impl->boundIA);
@@ -3671,24 +3856,15 @@ void CCD3D12CommandBuffer::draw(const DrawInfo &info) {
                 if (info.indexCount > 0) {
                     auto *sig = static_cast<ID3D12CommandSignature *>(device->getDrawIndexedIndirectSignature());
                     if (sig) {
-#if CC_D3D12_PERF_COUNTERS
-                        recordPerfDrawSequence(true, true, sig, resource);
-#endif
                         _impl->commandList->ExecuteIndirect(sig, 1, resource, 0, nullptr, 0);
                     }
                 } else {
                     auto *sig = static_cast<ID3D12CommandSignature *>(device->getDrawIndirectSignature());
                     if (sig) {
-#if CC_D3D12_PERF_COUNTERS
-                        recordPerfDrawSequence(false, true, sig, resource);
-#endif
                         _impl->commandList->ExecuteIndirect(sig, 1, resource, 0, nullptr, 0);
                     }
                 }
                 ++_numDrawCalls;
-#if CC_D3D12_PERF_COUNTERS
-                recordDrawTiming();
-#endif
                 return;
             }
         }
@@ -3696,9 +3872,6 @@ void CCD3D12CommandBuffer::draw(const DrawInfo &info) {
 
     if (info.indexCount > 0) {
         // Indexed draw
-#if CC_D3D12_PERF_COUNTERS
-        recordPerfDrawSequence(true, false);
-#endif
         _impl->commandList->DrawIndexedInstanced(
             info.indexCount,
             instanceCount,
@@ -3707,9 +3880,6 @@ void CCD3D12CommandBuffer::draw(const DrawInfo &info) {
             firstInstance);
     } else {
         // Non-indexed draw
-#if CC_D3D12_PERF_COUNTERS
-        recordPerfDrawSequence(false, false);
-#endif
         _impl->commandList->DrawInstanced(
             info.vertexCount,
             instanceCount,
@@ -3720,9 +3890,6 @@ void CCD3D12CommandBuffer::draw(const DrawInfo &info) {
     ++_numDrawCalls;
     _numInstances += instanceCount;
     _numTriangles += info.indexCount > 0 ? (info.indexCount / 3) * instanceCount : (info.vertexCount / 3) * instanceCount;
-#if CC_D3D12_PERF_COUNTERS
-    recordDrawTiming();
-#endif
 }
 
 void CCD3D12CommandBuffer::updateBuffer(Buffer *buff, const void *data, uint32_t size) {
@@ -3736,14 +3903,6 @@ void CCD3D12CommandBuffer::updateBuffer(Buffer *buff, const void *data, uint32_t
     // buffers, are updated through a GPU copy so descriptors keep stable backing.
     auto *resource = static_cast<ID3D12Resource *>(d3d12Buffer->getD3D12ResourceHandle());
     if (!resource) return;
-#if CC_D3D12_PERF_COUNTERS
-    size_t retainedResourceCountBefore = 0;
-    std::chrono::steady_clock::time_point retentionStart{};
-    if (_impl->perfUniqueBatchRetentionEnabled) {
-        retainedResourceCountBefore = _impl->pendingUploadResources.size();
-        retentionStart = std::chrono::steady_clock::now();
-    }
-#endif
     if (_impl->bufferUpdateBatchActive && _impl->bufferUpdateBatchDestinationsAreUnique) {
         // The proof is batch-local, so this resource may already be retained by
         // another path. An extra owning reference is safe and avoids a set lookup.
@@ -3753,50 +3912,14 @@ void CCD3D12CommandBuffer::updateBuffer(Buffer *buff, const void *data, uint32_t
     } else {
         retainCommandListResource(_impl->pendingUploadResources, _impl->pendingUploadResourceSet, resource);
     }
-#if CC_D3D12_PERF_COUNTERS
-    if (_impl->perfUniqueBatchRetentionEnabled) {
-        const auto retentionNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - retentionStart).count());
-        ++_impl->perfUniqueBatchRetentionCalls;
-        _impl->perfUniqueBatchRetentionInsertions +=
-            _impl->pendingUploadResources.size() > retainedResourceCountBefore ? 1ULL : 0ULL;
-        _impl->perfUniqueBatchRetentionNs += retentionNs;
-    }
-#endif
 
     if (!d3d12Buffer->isD3D12UploadHeap()) {
         auto *device = CCD3D12Device::getInstance();
-#if CC_D3D12_PERF_COUNTERS
-        const bool perfTimingEnabled = device && device->isPerfLoggingEnabled();
-        const auto defaultBufferUploadStart = perfTimingEnabled
-                                                  ? std::chrono::steady_clock::now()
-                                                  : std::chrono::steady_clock::time_point{};
-        const auto uploadAllocationStart = defaultBufferUploadStart;
-#endif
         auto upload = device ? device->allocateUploadBuffer(copySize, 256) : D3D12UploadAllocation{};
-#if CC_D3D12_PERF_COUNTERS
-        if (device && perfTimingEnabled) {
-            const auto allocationNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now() - uploadAllocationStart).count());
-            device->recordUploadAllocationTiming(allocationNs);
-        }
-#endif
         if (!upload.isValid || !upload.mappedData || !upload.resource) {
             return;
         }
         std::memcpy(upload.mappedData, data, copySize);
-#if CC_D3D12_PERF_COUNTERS
-        if (device) {
-            device->recordDefaultBufferUpload(
-                resource,
-                d3d12Buffer->getD3D12ResourceOffset(),
-                copySize,
-                hasFlag(buff->getUsage(), BufferUsageBit::UNIFORM),
-                hasFlag(buff->getMemUsage(), MemoryUsageBit::HOST),
-                buff->isBufferView(),
-                d3d12Buffer->isDynamicUniformOnly());
-        }
-#endif
 
         const auto previousState = d3d12Buffer->getCurrentState();
         if (_impl->bufferUpdateBatchActive) {
@@ -3824,13 +3947,6 @@ void CCD3D12CommandBuffer::updateBuffer(Buffer *buff, const void *data, uint32_t
                 copySize,
                 transitionIndex,
             });
-#if CC_D3D12_PERF_COUNTERS
-            if (device && perfTimingEnabled) {
-                const auto uploadNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() - defaultBufferUploadStart).count());
-                device->recordHotPathTimings(0, 0, uploadNs, 0, 0, 0);
-            }
-#endif
             return;
         }
 
@@ -3845,9 +3961,6 @@ void CCD3D12CommandBuffer::updateBuffer(Buffer *buff, const void *data, uint32_t
             toCopyDest.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
             toCopyDest.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
             _impl->commandList->ResourceBarrier(1, &toCopyDest);
-#if CC_D3D12_PERF_COUNTERS
-            recordD3D12ResourceBarriers(1);
-#endif
         }
         _impl->commandList->CopyBufferRegion(
             resource,
@@ -3862,17 +3975,7 @@ void CCD3D12CommandBuffer::updateBuffer(Buffer *buff, const void *data, uint32_t
         toRead.Transition.StateAfter = D3D12_RESOURCE_STATE_GENERIC_READ;
         toRead.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         _impl->commandList->ResourceBarrier(1, &toRead);
-#if CC_D3D12_PERF_COUNTERS
-        recordD3D12ResourceBarriers(1);
-#endif
         d3d12Buffer->setCurrentState(D3D12_RESOURCE_STATE_GENERIC_READ);
-#if CC_D3D12_PERF_COUNTERS
-        if (device && perfTimingEnabled) {
-            const auto uploadNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now() - defaultBufferUploadStart).count());
-            device->recordHotPathTimings(0, 0, uploadNs, 0, 0, 0);
-        }
-#endif
         return;
     }
 
@@ -3917,9 +4020,6 @@ void CCD3D12CommandBuffer::copyBuffersToTexture(const uint8_t *const *buffers, T
     toCopyDest.Transition.StateBefore = d3d12Texture->getCurrentState();
     toCopyDest.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
     _impl->commandList->ResourceBarrier(1, &toCopyDest);
-#if CC_D3D12_PERF_COUNTERS
-    recordD3D12ResourceBarriers(1);
-#endif
     d3d12Texture->setCurrentState(D3D12_RESOURCE_STATE_COPY_DEST);
 
     for (uint32_t i = 0; i < count; ++i) {
@@ -4004,9 +4104,6 @@ void CCD3D12CommandBuffer::copyBuffersToTexture(const uint8_t *const *buffers, T
                 toPostCopy.Transition.StateBefore = GENERATED_STATE;
                 toPostCopy.Transition.StateAfter = postCopyState;
                 _impl->commandList->ResourceBarrier(1, &toPostCopy);
-#if CC_D3D12_PERF_COUNTERS
-                recordD3D12ResourceBarriers(1);
-#endif
             }
             // Mipmap generation uses its own PSO, root signature, heaps,
             // viewport and scissor on this command list.
@@ -4029,9 +4126,6 @@ void CCD3D12CommandBuffer::copyBuffersToTexture(const uint8_t *const *buffers, T
     toPostCopy.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
     toPostCopy.Transition.StateAfter = postCopyState;
     _impl->commandList->ResourceBarrier(1, &toPostCopy);
-#if CC_D3D12_PERF_COUNTERS
-    recordD3D12ResourceBarriers(1);
-#endif
     d3d12Texture->setCurrentState(postCopyState);
 }
 
@@ -4066,9 +4160,6 @@ void CCD3D12CommandBuffer::blitTexture(Texture *srcTexture, Texture *dstTexture,
         barrier.Transition.StateBefore = currentState;
         barrier.Transition.StateAfter = nextState;
         _impl->commandList->ResourceBarrier(1, &barrier);
-#if CC_D3D12_PERF_COUNTERS
-        recordD3D12ResourceBarriers(1);
-#endif
         currentState = nextState;
     };
 
@@ -4152,6 +4243,7 @@ void CCD3D12CommandBuffer::blitTexture(Texture *srcTexture, Texture *dstTexture,
         invalidateGraphicsState();
     } else if (_impl->pendingSetCount > 0) {
         _impl->descriptorSetsDirty = true;
+        _impl->localDescriptorSetOnlyDirty = false;
     }
 }
 
@@ -4206,9 +4298,6 @@ void CCD3D12CommandBuffer::copyTexture(Texture *srcTexture, Texture *dstTexture,
 
     if (preBarrierCount > 0) {
         _impl->commandList->ResourceBarrier(preBarrierCount, preBarriers);
-#if CC_D3D12_PERF_COUNTERS
-        recordD3D12ResourceBarriers(preBarrierCount);
-#endif
     }
     srcD3D12->setCurrentState(D3D12_RESOURCE_STATE_COPY_SOURCE);
     dstD3D12->setCurrentState(D3D12_RESOURCE_STATE_COPY_DEST);
@@ -4282,9 +4371,6 @@ void CCD3D12CommandBuffer::copyTexture(Texture *srcTexture, Texture *dstTexture,
 
     if (postBarrierCount > 0) {
         _impl->commandList->ResourceBarrier(postBarrierCount, postBarriers);
-#if CC_D3D12_PERF_COUNTERS
-        recordD3D12ResourceBarriers(postBarrierCount);
-#endif
     }
     srcD3D12->setCurrentState(srcPostState);
     dstD3D12->setCurrentState(dstPostState);
@@ -4348,9 +4434,6 @@ void CCD3D12CommandBuffer::resolveTexture(Texture *srcTexture, Texture *dstTextu
 
     if (preBarrierCount > 0) {
         _impl->commandList->ResourceBarrier(preBarrierCount, preBarriers);
-#if CC_D3D12_PERF_COUNTERS
-        recordD3D12ResourceBarriers(preBarrierCount);
-#endif
     }
     srcD3D12->setCurrentState(D3D12_RESOURCE_STATE_RESOLVE_SOURCE);
     dstD3D12->setCurrentState(D3D12_RESOURCE_STATE_RESOLVE_DEST);
@@ -4408,9 +4491,6 @@ void CCD3D12CommandBuffer::resolveTexture(Texture *srcTexture, Texture *dstTextu
 
     if (postBarrierCount > 0) {
         _impl->commandList->ResourceBarrier(postBarrierCount, postBarriers);
-#if CC_D3D12_PERF_COUNTERS
-        recordD3D12ResourceBarriers(postBarrierCount);
-#endif
     }
 }
 
@@ -4674,15 +4754,9 @@ void CCD3D12CommandBuffer::pipelineBarrier(const GeneralBarrier *barrier, const 
         }
     }
 
-#if CC_D3D12_PERF_COUNTERS
-    recordBarrierAnalysis(textureTransitions, bufferTransitions, uavBarriers, trackedAlreadyNext);
-#endif
 
     if (!barriers.empty()) {
         _impl->commandList->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
-#if CC_D3D12_PERF_COUNTERS
-        recordD3D12ResourceBarriers(static_cast<uint32_t>(barriers.size()));
-#endif
     }
 }
 

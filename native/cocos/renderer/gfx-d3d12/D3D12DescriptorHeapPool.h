@@ -87,6 +87,12 @@ public:
      */
     void reset();
 
+    /**
+     * Restrict subsequent allocations to one reusable range in the first heap.
+     * The caller must fence-protect that range before selecting it again.
+     */
+    void beginFrameAllocationRange(uint32_t offset, uint32_t count);
+
     /** Get the D3D12 descriptor increment size for this heap type. */
     uint32_t getDescriptorSize() const;
 

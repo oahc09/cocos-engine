@@ -149,7 +149,9 @@ struct CCD3D12InputAssembler::Impl {
     ccstd::vector<ccstd::string> semanticNames; // persistent storage for SemanticName pointers
     // Cached vertex buffer views
     ccstd::vector<D3D12_VERTEX_BUFFER_VIEW> vbViews;
+    ccstd::vector<uint64_t> vbResourceVersions;
     D3D12_INDEX_BUFFER_VIEW ibView{};
+    uint64_t indexBufferResourceVersion{0};
     bool hasIndexBuffer{false};
     uint32_t indexFormat{0}; // DXGI_FORMAT as uint32_t
 };
@@ -197,39 +199,11 @@ void CCD3D12InputAssembler::doInit(const InputAssemblerInfo &info) {
 
     }
 
-    // Build vertex buffer views
     _impl->vbViews.resize(info.vertexBuffers.size());
-    for (size_t i = 0; i < info.vertexBuffers.size(); ++i) {
-        auto *d3d12Buffer = static_cast<CCD3D12Buffer *>(info.vertexBuffers[i]);
-        if (d3d12Buffer) {
-            // getD3D12GPUVirtualAddress() already includes resourceOffset internally,
-            // so we must NOT add getD3D12ResourceOffset() again.
-            _impl->vbViews[i].BufferLocation = d3d12Buffer->getD3D12GPUVirtualAddress();
-            _impl->vbViews[i].SizeInBytes = d3d12Buffer->getSize();
-            _impl->vbViews[i].StrideInBytes = d3d12Buffer->getStride();
-        }
-    }
-
-    // Build index buffer view
+    _impl->vbResourceVersions.assign(info.vertexBuffers.size(), 0);
     _impl->hasIndexBuffer = (info.indexBuffer != nullptr);
-    if (_impl->hasIndexBuffer) {
-        auto *d3d12Buffer = static_cast<CCD3D12Buffer *>(info.indexBuffer);
-        if (d3d12Buffer) {
-            // getD3D12GPUVirtualAddress() already includes resourceOffset internally.
-            _impl->ibView.BufferLocation = d3d12Buffer->getD3D12GPUVirtualAddress();
-            _impl->ibView.SizeInBytes = d3d12Buffer->getSize();
-
-            // Determine index format from buffer stride
-            const uint32_t stride = d3d12Buffer->getStride();
-            if (stride == 4) {
-            _impl->ibView.Format = DXGI_FORMAT_R32_UINT;
-                _impl->indexFormat = static_cast<uint32_t>(DXGI_FORMAT_R32_UINT);
-            } else {
-                _impl->ibView.Format = DXGI_FORMAT_R16_UINT;
-                _impl->indexFormat = static_cast<uint32_t>(DXGI_FORMAT_R16_UINT);
-            }
-        }
-    }
+    _impl->indexBufferResourceVersion = 0;
+    refreshBufferViews();
 
     CC_LOG_DEBUG("D3D12InputAssembler initialized with %u attributes, %u vertex buffers.",
                  static_cast<unsigned>(info.attributes.size()),
@@ -240,7 +214,9 @@ void CCD3D12InputAssembler::doDestroy() {
     _impl->inputElements.clear();
     _impl->semanticNames.clear();
     _impl->vbViews.clear();
+    _impl->vbResourceVersions.clear();
     _impl->hasIndexBuffer = false;
+    _impl->indexBufferResourceVersion = 0;
 }
 
 void *CCD3D12InputAssembler::getInputElementDescs() const {
@@ -255,22 +231,64 @@ uint32_t CCD3D12InputAssembler::getVertexBufferCount() const {
     return _impl ? static_cast<uint32_t>(_impl->vbViews.size()) : 0;
 }
 
-void CCD3D12InputAssembler::fillVertexBufferViews(void *views) const {
-    if (!views || _vertexBuffers.empty()) return;
-    auto *dst = static_cast<D3D12_VERTEX_BUFFER_VIEW *>(views);
+bool CCD3D12InputAssembler::refreshBufferViews() {
+    if (!_impl) {
+        return false;
+    }
+
+    bool changed = false;
+    if (_impl->vbViews.size() != _vertexBuffers.size()) {
+        _impl->vbViews.resize(_vertexBuffers.size());
+        _impl->vbResourceVersions.assign(_vertexBuffers.size(), 0);
+        changed = true;
+    }
+
     for (size_t i = 0; i < _vertexBuffers.size(); ++i) {
         auto *d3d12Buffer = static_cast<CCD3D12Buffer *>(_vertexBuffers[i]);
+        const uint64_t resourceVersion = d3d12Buffer ? d3d12Buffer->getD3D12ResourceVersion() : 0;
+        if (_impl->vbResourceVersions[i] == resourceVersion) {
+            continue;
+        }
+
         D3D12_VERTEX_BUFFER_VIEW view{};
         if (d3d12Buffer) {
-            // Buffer::resize() can recreate the D3D12 resource after the IA was
-            // initialized. Build the view from the live buffer to avoid stale
-            // GPU virtual addresses and sizes.
             view.BufferLocation = d3d12Buffer->getD3D12GPUVirtualAddress();
             view.SizeInBytes = d3d12Buffer->getSize();
             view.StrideInBytes = d3d12Buffer->getStride();
         }
-        dst[i] = view;
+        _impl->vbViews[i] = view;
+        _impl->vbResourceVersions[i] = resourceVersion;
+        changed = true;
     }
+
+    if (!_impl->hasIndexBuffer) {
+        return changed;
+    }
+
+    auto *d3d12IndexBuffer = static_cast<CCD3D12Buffer *>(_indexBuffer);
+    const uint64_t indexResourceVersion = d3d12IndexBuffer
+                                              ? d3d12IndexBuffer->getD3D12ResourceVersion()
+                                              : 0;
+    if (_impl->indexBufferResourceVersion == indexResourceVersion) {
+        return changed;
+    }
+
+    D3D12_INDEX_BUFFER_VIEW view{};
+    if (d3d12IndexBuffer) {
+        view.BufferLocation = d3d12IndexBuffer->getD3D12GPUVirtualAddress();
+        view.SizeInBytes = d3d12IndexBuffer->getSize();
+        view.Format = d3d12IndexBuffer->getStride() == 4 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT;
+        _impl->indexFormat = static_cast<uint32_t>(view.Format);
+    }
+    _impl->ibView = view;
+    _impl->indexBufferResourceVersion = indexResourceVersion;
+    return true;
+}
+
+void CCD3D12InputAssembler::fillVertexBufferViews(void *views) const {
+    if (!views || !_impl || _impl->vbViews.empty()) return;
+    auto *dst = static_cast<D3D12_VERTEX_BUFFER_VIEW *>(views);
+    std::memcpy(dst, _impl->vbViews.data(), sizeof(D3D12_VERTEX_BUFFER_VIEW) * _impl->vbViews.size());
 }
 
 bool CCD3D12InputAssembler::hasIndexBuffer() const {
@@ -278,17 +296,8 @@ bool CCD3D12InputAssembler::hasIndexBuffer() const {
 }
 
 void CCD3D12InputAssembler::fillIndexBufferView(void *view) const {
-    if (!view || !_indexBuffer) return;
-    auto *d3d12Buffer = static_cast<CCD3D12Buffer *>(_indexBuffer);
-    D3D12_INDEX_BUFFER_VIEW liveView{};
-    if (d3d12Buffer) {
-        // Keep index binding in sync with Buffer::resize(), which can replace
-        // the underlying D3D12 resource after IA creation.
-        liveView.BufferLocation = d3d12Buffer->getD3D12GPUVirtualAddress();
-        liveView.SizeInBytes = d3d12Buffer->getSize();
-        liveView.Format = d3d12Buffer->getStride() == 4 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT;
-    }
-    *static_cast<D3D12_INDEX_BUFFER_VIEW *>(view) = liveView;
+    if (!view || !_impl || !_impl->hasIndexBuffer) return;
+    *static_cast<D3D12_INDEX_BUFFER_VIEW *>(view) = _impl->ibView;
 }
 
 uint32_t CCD3D12InputAssembler::getIndexFormat() const {

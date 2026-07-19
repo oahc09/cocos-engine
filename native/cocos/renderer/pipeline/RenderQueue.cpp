@@ -81,6 +81,25 @@ void RenderQueue::recordCommandBuffer(gfx::Device * /*device*/, scene::Camera *c
     PipelineSceneData *const sceneData = _pipeline->getPipelineSceneData();
     bool enableOcclusionQuery = _pipeline->isOcclusionQueryEnabled() && _useOcclusionQuery;
     auto *queryPool = _pipeline->getQueryPools()[0];
+    auto *lastPipelineState = static_cast<gfx::PipelineState *>(nullptr);
+    auto *lastMaterialDescriptorSet = static_cast<gfx::DescriptorSet *>(nullptr);
+    const bool useDrawBatch = !enableOcclusionQuery && cmdBuff->supportsDrawBatch();
+    const auto bindPipelineStateIfChanged = [&](gfx::PipelineState *pso) {
+        if (!useDrawBatch || pso != lastPipelineState) {
+            cmdBuff->bindPipelineState(pso);
+            lastPipelineState = pso;
+            lastMaterialDescriptorSet = nullptr;
+        }
+    };
+    const auto bindMaterialDescriptorSetIfChanged = [&](gfx::DescriptorSet *descriptorSet) {
+        if (!useDrawBatch || descriptorSet != lastMaterialDescriptorSet) {
+            cmdBuff->bindDescriptorSet(materialSet, descriptorSet);
+            lastMaterialDescriptorSet = descriptorSet;
+        }
+    };
+    if (useDrawBatch) {
+        cmdBuff->beginDrawBatch();
+    }
     for (auto &i : _queue) {
         const auto *subModel = i.subModel;
         if (enableOcclusionQuery) {
@@ -93,8 +112,8 @@ void RenderQueue::recordCommandBuffer(gfx::Device * /*device*/, scene::Camera *c
             gfx::Shader *shader = sceneData->getOcclusionQueryShader();
             auto *pso = PipelineStateManager::getOrCreatePipelineState(pass, shader, inputAssembler, renderPass, subpassIndex);
 
-            cmdBuff->bindPipelineState(pso);
-            cmdBuff->bindDescriptorSet(materialSet, pass->getDescriptorSet());
+            bindPipelineStateIfChanged(pso);
+            bindMaterialDescriptorSetIfChanged(pass->getDescriptorSet());
             cmdBuff->bindDescriptorSet(localSet, subModel->getWorldBoundDescriptorSet());
             cmdBuff->bindInputAssembler(inputAssembler);
             cmdBuff->draw(inputAssembler);
@@ -105,16 +124,18 @@ void RenderQueue::recordCommandBuffer(gfx::Device * /*device*/, scene::Camera *c
             auto *shader = subModel->getShader(passIdx);
             auto *pso = PipelineStateManager::getOrCreatePipelineState(pass, shader, inputAssembler, renderPass, subpassIndex);
 
-            cmdBuff->bindPipelineState(pso);
-            cmdBuff->bindDescriptorSet(materialSet, pass->getDescriptorSet());
-            cmdBuff->bindDescriptorSet(localSet, subModel->getDescriptorSet());
-            cmdBuff->bindInputAssembler(inputAssembler);
-            cmdBuff->draw(inputAssembler);
+            bindPipelineStateIfChanged(pso);
+            bindMaterialDescriptorSetIfChanged(pass->getDescriptorSet());
+            cmdBuff->drawWithInputAssemblerAndDescriptorSet(
+                inputAssembler, localSet, subModel->getDescriptorSet(), inputAssembler->getDrawInfo());
         }
 
         if (enableOcclusionQuery) {
             cmdBuff->endQuery(queryPool, subModel->getId());
         }
+    }
+    if (useDrawBatch) {
+        cmdBuff->endDrawBatch();
     }
 }
 

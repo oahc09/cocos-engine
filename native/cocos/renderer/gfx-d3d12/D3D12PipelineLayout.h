@@ -38,6 +38,9 @@ public:
     void *getID3D12RootSignature() const;
     uint64_t getRootSignatureHash() const;
     int32_t getCbvSrvUavRootParameterIndex(uint32_t set) const;
+    int32_t getDynamicCbvSrvUavRootParameterIndex(uint32_t set) const;
+    int32_t getLocalRootCbvParameterIndex(uint32_t set) const;
+    int32_t getStaticCbvSrvUavRootParameterIndex(uint32_t set) const;
     int32_t getSamplerRootParameterIndex(uint32_t set) const;
 
 protected:

@@ -62,6 +62,19 @@ public:
     virtual void setStencilCompareMask(StencilFace face, uint32_t ref, uint32_t mask) = 0;
     virtual void nextSubpass() = 0;
     virtual void draw(const DrawInfo &info) = 0;
+    // Optional scope for backends that can defer and combine compatible draws.
+    // Implementations must flush before an incompatible state change and
+    // preserve the original command order. Unsupported backends retain the
+    // immediate bind-and-draw path below.
+    virtual bool supportsDrawBatch() const { return false; }
+    virtual void beginDrawBatch() {}
+    virtual void endDrawBatch() {}
+    virtual void drawWithInputAssemblerAndDescriptorSet(InputAssembler *inputAssembler, uint32_t set,
+                                                        DescriptorSet *descriptorSet, const DrawInfo &info) {
+        bindInputAssembler(inputAssembler);
+        bindDescriptorSet(set, descriptorSet, 0, nullptr);
+        draw(info);
+    }
     virtual void updateBuffer(Buffer *buff, const void *data, uint32_t size) = 0;
     virtual void copyBuffersToTexture(const uint8_t *const *buffers, Texture *texture, const BufferTextureCopy *regions, uint32_t count) = 0;
     virtual void blitTexture(Texture *srcTexture, Texture *dstTexture, const TextureBlit *regions, uint32_t count, Filter filter) = 0;

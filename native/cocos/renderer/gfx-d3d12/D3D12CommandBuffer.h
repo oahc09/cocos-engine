@@ -64,6 +64,11 @@ public:
     void setStencilCompareMask(StencilFace face, uint32_t ref, uint32_t mask) override;
     void nextSubpass() override;
     void draw(const DrawInfo &info) override;
+    bool supportsDrawBatch() const override { return _type == CommandBufferType::PRIMARY; }
+    void beginDrawBatch() override;
+    void endDrawBatch() override;
+    void drawWithInputAssemblerAndDescriptorSet(InputAssembler *inputAssembler, uint32_t set,
+                                                DescriptorSet *descriptorSet, const DrawInfo &info) override;
     void updateBuffer(Buffer *buff, const void *data, uint32_t size) override;
     void copyBuffersToTexture(const uint8_t *const *buffers, Texture *texture, const BufferTextureCopy *regions, uint32_t count) override;
     void blitTexture(Texture *srcTexture, Texture *dstTexture, const TextureBlit *regions, uint32_t count, Filter filter) override;
@@ -101,6 +106,13 @@ private:
     void invalidateGraphicsState();
     void invalidateDescriptorTables();
     bool flushDescriptorSetsIncremental();
+    bool captureLocalRootCbvBatchBinding(uint64_t &gpuAddress, uint32_t &rootParameterIndex,
+                                         class CCD3D12DescriptorSet *&descriptorSet,
+                                         uint64_t &staticSignature,
+                                         class CCD3D12DescriptorSet *directDescriptorSet = nullptr);
+    void drawLocalRootCbvBatchInternal(const DrawInfo &info,
+                                       class CCD3D12DescriptorSet *directDescriptorSet);
+    void flushLocalRootCbvBatch();
     void applyDynamicPipelineState();
     void transitionColorAttachment(uint32_t attachment, D3D12_RESOURCE_STATES state);
     void bindSubpassRenderTargets(uint32_t subpass);

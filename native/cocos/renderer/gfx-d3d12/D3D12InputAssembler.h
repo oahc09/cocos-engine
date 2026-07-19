@@ -42,6 +42,8 @@ public:
     // Returns D3D12_VERTEX_BUFFER_VIEW info as flat arrays
     // gpuAddresses/sizeInBytes/strideInBytes arrays, count = num vertex buffers
     uint32_t getVertexBufferCount() const;
+    // Rebuild cached views only when a backing D3D12 resource was replaced.
+    bool refreshBufferViews();
     void fillVertexBufferViews(void *views) const; // fills D3D12_VERTEX_BUFFER_VIEW array
 
     // Returns index buffer view info (or nullptr if no index buffer)

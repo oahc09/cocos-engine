@@ -35,52 +35,7 @@
     #include <wrl/client.h>
 
 namespace {
-#ifndef CC_D3D12_QUEUE_DIAG
-    #define CC_D3D12_QUEUE_DIAG 0
-#endif
 
-#if !defined(NDEBUG) && CC_D3D12_QUEUE_DIAG
-void dumpQueueDebugMessages(ID3D12Device *device, const char *checkpoint) {
-    if (!device) {
-        return;
-    }
-    Microsoft::WRL::ComPtr<ID3D12InfoQueue> infoQueue;
-    if (FAILED(device->QueryInterface(IID_PPV_ARGS(&infoQueue)))) {
-        return;
-    }
-    const UINT64 msgCount = infoQueue->GetNumStoredMessages();
-    if (msgCount == 0) {
-        return;
-    }
-    bool emittedHeader = false;
-    for (UINT64 i = 0; i < msgCount; ++i) {
-        SIZE_T msgSize = 0;
-        infoQueue->GetMessage(i, nullptr, &msgSize);
-        if (msgSize == 0) {
-            continue;
-        }
-        ccstd::vector<uint8_t> storage(msgSize);
-        auto *msg = reinterpret_cast<D3D12_MESSAGE *>(storage.data());
-        if (SUCCEEDED(infoQueue->GetMessage(i, msg, &msgSize))) {
-            if (msg->Severity > D3D12_MESSAGE_SEVERITY_WARNING) {
-                continue;
-            }
-            if (!emittedHeader) {
-                CC_LOG_INFO("[QUEUE-DIAG] %s: %llu pending messages", checkpoint, static_cast<unsigned long long>(msgCount));
-                emittedHeader = true;
-            }
-            CC_LOG_INFO("[QUEUE-DIAG]   ID=%u severity=%d: %.*s",
-                        static_cast<unsigned>(msg->ID),
-                        static_cast<int>(msg->Severity),
-                        static_cast<int>(msg->DescriptionByteLength),
-                        msg->pDescription);
-        }
-    }
-    infoQueue->ClearStoredMessages();
-}
-#else
-void dumpQueueDebugMessages(ID3D12Device *, const char *) {}
-#endif
 } // namespace
 
 namespace cc {
@@ -152,9 +107,6 @@ void CCD3D12Queue::submit(CommandBuffer *const *cmdBuffs, uint32_t count) {
     }
 
     if (count == 0 || !cmdBuffs) return;
-#if CC_D3D12_PERF_COUNTERS
-    const auto queueSubmitStart = std::chrono::steady_clock::now();
-#endif
 
     device->flushDeferredCubeUploads();
 
@@ -177,18 +129,10 @@ void CCD3D12Queue::submit(CommandBuffer *const *cmdBuffs, uint32_t count) {
     if (commandLists.empty()) return;
 
     // Execute command lists
-#if CC_D3D12_PERF_COUNTERS
-    const auto queueExecuteStart = std::chrono::steady_clock::now();
-#endif
     graphicsQueue->ExecuteCommandLists(static_cast<UINT>(commandLists.size()), commandLists.data());
-#if CC_D3D12_PERF_COUNTERS
-    const auto queueExecuteEnd = std::chrono::steady_clock::now();
-    const auto queueSignalStart = queueExecuteEnd;
-#endif
     // Every buffer decays to COMMON when this ExecuteCommandLists operation
     // completes. All lists in this call share one operation and one epoch.
     device->advanceBufferStateEpoch();
-    dumpQueueDebugMessages(d3dDevice, "after-execute");
 
     // Signal completion for allocator/resource reuse. Reuse waits happen lazily
     // in CommandBuffer::begin() and Device::retireFrameResources(), not here.
@@ -208,18 +152,6 @@ void CCD3D12Queue::submit(CommandBuffer *const *cmdBuffs, uint32_t count) {
         }
         device->notifySubmittedFence(_impl->fence.Get(), _impl->fenceValue);
     }
-#if CC_D3D12_PERF_COUNTERS
-    const auto queueSubmitEnd = std::chrono::steady_clock::now();
-    device->recordFramePhaseAnalysis(
-        0, 0, 0,
-        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-            queueSubmitEnd - queueSubmitStart).count()),
-        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-            queueExecuteEnd - queueExecuteStart).count()),
-        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-            queueSubmitEnd - queueSignalStart).count()),
-        0, 0);
-#endif
 }
 
 } // namespace gfx

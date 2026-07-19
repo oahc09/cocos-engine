@@ -27,6 +27,7 @@
 #include "base/Log.h"
 
 #include <algorithm>
+#include <limits>
 
     #ifndef NOMINMAX
         #define NOMINMAX
@@ -52,6 +53,9 @@ struct D3D12DescriptorHeapPool::Impl {
     uint32_t descriptorSize{0};
     bool shaderVisible{false};
     bool initialized{false};
+    bool hasAllocationRange{false};
+    uint32_t allocationRangeStart{0};
+    uint32_t allocationRangeEnd{0};
 
     ccstd::vector<HeapEntry> heaps;
 
@@ -78,6 +82,9 @@ void D3D12DescriptorHeapPool::initialize(HeapType heapType, uint32_t maxDescript
     _impl->heapType = heapType;
     _impl->maxDescriptorsPerHeap = maxDescriptorsPerHeap;
     _impl->shaderVisible = shaderVisible;
+    _impl->hasAllocationRange = false;
+    _impl->allocationRangeStart = 0;
+    _impl->allocationRangeEnd = 0;
 
     auto *device = CCD3D12Device::getInstance();
     auto *d3dDevice = static_cast<ID3D12Device *>(device ? device->getD3D12DeviceHandle() : nullptr);
@@ -108,6 +115,9 @@ void D3D12DescriptorHeapPool::shutdown() {
         _impl->heaps.clear();
         _impl->freeList.clear();
         _impl->initialized = false;
+        _impl->hasAllocationRange = false;
+        _impl->allocationRangeStart = 0;
+        _impl->allocationRangeEnd = 0;
     }
 }
 
@@ -118,41 +128,49 @@ D3D12DescriptorHeapPool::Allocation D3D12DescriptorHeapPool::allocate(uint32_t c
         return alloc;
     }
 
-    // First try to find a free block that fits
-    for (auto it = _impl->freeList.begin(); it != _impl->freeList.end(); ++it) {
-        if (it->count >= count) {
-            auto &heap = _impl->heaps[it->heapIndex];
-            alloc.heapIndex = it->heapIndex;
-            alloc.numDescriptors = count;
+    if (!_impl->hasAllocationRange) {
+        // First try to find a free block that fits.
+        for (auto it = _impl->freeList.begin(); it != _impl->freeList.end(); ++it) {
+            if (it->count >= count) {
+                auto &heap = _impl->heaps[it->heapIndex];
+                alloc.heapIndex = it->heapIndex;
+                alloc.numDescriptors = count;
 
-            D3D12_CPU_DESCRIPTOR_HANDLE cpuStart = heap.cpuStart;
-            cpuStart.ptr += static_cast<UINT64>(it->offset) * _impl->descriptorSize;
-            alloc.cpuHandle = reinterpret_cast<void *>(cpuStart.ptr);
+                D3D12_CPU_DESCRIPTOR_HANDLE cpuStart = heap.cpuStart;
+                cpuStart.ptr += static_cast<UINT64>(it->offset) * _impl->descriptorSize;
+                alloc.cpuHandle = reinterpret_cast<void *>(cpuStart.ptr);
 
-            if (_impl->shaderVisible) {
-                D3D12_GPU_DESCRIPTOR_HANDLE gpuStart = heap.gpuStart;
-                gpuStart.ptr += static_cast<UINT64>(it->offset) * _impl->descriptorSize;
-                alloc.gpuHandle = gpuStart.ptr;
+                if (_impl->shaderVisible) {
+                    D3D12_GPU_DESCRIPTOR_HANDLE gpuStart = heap.gpuStart;
+                    gpuStart.ptr += static_cast<UINT64>(it->offset) * _impl->descriptorSize;
+                    alloc.gpuHandle = gpuStart.ptr;
+                }
+
+                alloc.isValid = true;
+
+                // If the free block is larger, shrink it; otherwise remove it.
+                if (it->count > count) {
+                    it->offset += count;
+                    it->count -= count;
+                } else {
+                    _impl->freeList.erase(it);
+                }
+
+                return alloc;
             }
-
-            alloc.isValid = true;
-
-            // If the free block is larger, shrink it; otherwise remove it
-            if (it->count > count) {
-                it->offset += count;
-                it->count -= count;
-            } else {
-                _impl->freeList.erase(it);
-            }
-
-            return alloc;
         }
     }
 
     // No free block found; try to allocate from the end of an existing heap
-    for (uint32_t i = 0; i < static_cast<uint32_t>(_impl->heaps.size()); ++i) {
+    const uint32_t existingHeapCount = _impl->hasAllocationRange
+                                           ? std::min<uint32_t>(1U, static_cast<uint32_t>(_impl->heaps.size()))
+                                           : static_cast<uint32_t>(_impl->heaps.size());
+    for (uint32_t i = 0; i < existingHeapCount; ++i) {
         auto &heap = _impl->heaps[i];
-        if (heap.usedCount + count <= heap.capacity) {
+        const uint32_t allocationLimit = _impl->hasAllocationRange
+                                             ? std::min(heap.capacity, _impl->allocationRangeEnd)
+                                             : heap.capacity;
+        if (heap.usedCount + count <= allocationLimit) {
             alloc.heapIndex = i;
             alloc.numDescriptors = count;
 
@@ -180,7 +198,9 @@ D3D12DescriptorHeapPool::Allocation D3D12DescriptorHeapPool::allocate(uint32_t c
         return alloc;
     }
 
-    uint32_t heapCapacity = (count > _impl->maxDescriptorsPerHeap) ? count : _impl->maxDescriptorsPerHeap;
+    const uint32_t allocationOffset = _impl->hasAllocationRange ? _impl->allocationRangeStart : 0;
+    const uint32_t requiredCapacity = allocationOffset + count;
+    uint32_t heapCapacity = std::max(requiredCapacity, _impl->maxDescriptorsPerHeap);
 
     D3D12_DESCRIPTOR_HEAP_DESC heapDesc{};
     heapDesc.Type = _impl->d3dHeapType;
@@ -201,7 +221,7 @@ D3D12DescriptorHeapPool::Allocation D3D12DescriptorHeapPool::allocate(uint32_t c
         newEntry.gpuStart = newEntry.heap->GetGPUDescriptorHandleForHeapStart();
     }
     newEntry.capacity = heapCapacity;
-    newEntry.usedCount = count;
+    newEntry.usedCount = requiredCapacity;
 
     uint32_t newHeapIndex = static_cast<uint32_t>(_impl->heaps.size());
     _impl->heaps.push_back(std::move(newEntry));
@@ -210,10 +230,12 @@ D3D12DescriptorHeapPool::Allocation D3D12DescriptorHeapPool::allocate(uint32_t c
     alloc.numDescriptors = count;
 
     D3D12_CPU_DESCRIPTOR_HANDLE cpuStart = _impl->heaps[newHeapIndex].cpuStart;
+    cpuStart.ptr += static_cast<UINT64>(allocationOffset) * _impl->descriptorSize;
     alloc.cpuHandle = reinterpret_cast<void *>(cpuStart.ptr);
 
     if (_impl->shaderVisible) {
         D3D12_GPU_DESCRIPTOR_HANDLE gpuStart = _impl->heaps[newHeapIndex].gpuStart;
+        gpuStart.ptr += static_cast<UINT64>(allocationOffset) * _impl->descriptorSize;
         alloc.gpuHandle = gpuStart.ptr;
     }
 
@@ -268,6 +290,33 @@ void D3D12DescriptorHeapPool::reset() {
         heap.usedCount = 0;
     }
     _impl->freeList.clear();
+    _impl->hasAllocationRange = false;
+    _impl->allocationRangeStart = 0;
+    _impl->allocationRangeEnd = 0;
+}
+
+void D3D12DescriptorHeapPool::beginFrameAllocationRange(uint32_t offset, uint32_t count) {
+    if (!_impl || !_impl->initialized || count == 0 || offset > std::numeric_limits<uint32_t>::max() - count) {
+        CC_LOG_ERROR("D3D12DescriptorHeapPool: invalid frame allocation range (offset=%u, count=%u).",
+                     offset, count);
+        return;
+    }
+
+    _impl->hasAllocationRange = true;
+    _impl->allocationRangeStart = offset;
+    _impl->allocationRangeEnd = offset + count;
+    _impl->freeList.clear();
+
+    if (!_impl->heaps.empty()) {
+        auto &heap = _impl->heaps.front();
+        if (_impl->allocationRangeEnd <= heap.capacity) {
+            heap.usedCount = _impl->allocationRangeStart;
+        } else {
+            CC_LOG_ERROR("D3D12DescriptorHeapPool: frame allocation range exceeds heap capacity "
+                         "(end=%u, capacity=%u).",
+                         _impl->allocationRangeEnd, heap.capacity);
+        }
+    }
 }
 
 uint32_t D3D12DescriptorHeapPool::getDescriptorSize() const {

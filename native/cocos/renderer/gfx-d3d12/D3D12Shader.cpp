@@ -1239,7 +1239,9 @@ bool CCD3D12Shader::compileGLSLToDXBC(ShaderStageFlagBit stage,
     const char *profile = getHLSLProfile(stage);
     UINT compileFlags = D3DCOMPILE_OPTIMIZATION_LEVEL3;
 #if !defined(NDEBUG)
-    compileFlags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+    // Keep symbols for source-level diagnostics, but retain /O3: the Debug
+    // executable is also the engine's performance-validation configuration.
+    compileFlags |= D3DCOMPILE_DEBUG;
 #endif
 
     // ============================================================
