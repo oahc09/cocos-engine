@@ -65,6 +65,8 @@ public:
     void endDrawBatch() override;
     void drawWithInputAssemblerAndDescriptorSet(InputAssembler *inputAssembler, uint32_t set,
                                                 DescriptorSet *descriptorSet, const DrawInfo &info) override;
+    void drawPackets(const DrawPacket *packets, uint32_t count,
+                     uint32_t materialSet, uint32_t localSet) override;
     void updateBuffer(Buffer *buff, const void *data, uint32_t size) override;
     void copyBuffersToTexture(const uint8_t *const *buffers, Texture *texture, const BufferTextureCopy *regions, uint32_t count) override;
     void blitTexture(Texture *srcTexture, Texture *dstTexture, const TextureBlit *regions, uint32_t count, Filter filter) override;

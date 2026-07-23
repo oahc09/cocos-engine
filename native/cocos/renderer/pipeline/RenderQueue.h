@@ -29,25 +29,53 @@
 namespace cc {
 namespace scene {
 class Camera;
+class Pass;
+class SubModel;
 }
 namespace pipeline {
 
 class RenderPipeline;
+class InstancedBuffer;
+
+struct AutoInstancedRun {
+    uint32_t first{0};
+    uint32_t count{0};
+    InstancedBuffer *buffer{nullptr};
+    bool ready{false};
+};
+
+struct AutoInstanceQueueSignature {
+    const scene::Pass *pass{nullptr};
+    uint32_t shaderID{0};
+    uint32_t passIndex{0};
+};
+
+struct AutoInstanceRange {
+    uint32_t first{0};
+    uint32_t count{0};
+};
 
 class CC_DLL RenderQueue final {
 public:
     explicit RenderQueue(RenderPipeline *pipeline, RenderQueueCreateInfo desc, bool useOcclusionQuery = false);
+    ~RenderQueue();
 
     void clear();
     bool insertRenderPass(const RenderObject &renderObj, uint32_t subModelIdx, uint32_t passIdx);
     void recordCommandBuffer(gfx::Device *device, scene::Camera *camera, gfx::RenderPass *renderPass, gfx::CommandBuffer *cmdBuff, uint32_t subpassIndex = 0);
     void sort();
+    void prepareAutoInstancing(gfx::Device *device, gfx::CommandBuffer *cmdBuff);
     bool empty() { return _queue.empty(); }
 
 private:
     // weak reference
     RenderPipeline *_pipeline{nullptr};
     RenderPassList _queue;
+    gfx::DrawPacketList _drawPackets;
+    ccstd::vector<InstancedBuffer *> _autoInstancedBuffers;
+    ccstd::vector<AutoInstancedRun> _autoInstancedRuns;
+    ccstd::vector<AutoInstanceQueueSignature> _autoInstanceQueueSignatures;
+    ccstd::vector<AutoInstanceRange> _autoInstanceCachedRanges;
     RenderQueueCreateInfo _passDesc;
     bool _useOcclusionQuery{false};
 };

@@ -44,6 +44,9 @@ public:
     uint32_t getVertexBufferCount() const;
     // Rebuild cached views only when a backing D3D12 resource was replaced.
     bool refreshBufferViews();
+    CC_FORCE_INLINE uint64_t getD3D12ViewSignature() const {
+        return _d3d12ViewSignature;
+    }
     void fillVertexBufferViews(void *views) const; // fills D3D12_VERTEX_BUFFER_VIEW array
 
     // Returns index buffer view info (or nullptr if no index buffer)
@@ -60,6 +63,7 @@ protected:
 private:
     struct Impl;
     std::unique_ptr<Impl> _impl;
+    uint64_t _d3d12ViewSignature{0};
 };
 
 } // namespace gfx

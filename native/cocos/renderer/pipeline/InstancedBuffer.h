@@ -59,6 +59,9 @@ class InstancedBuffer : public RefCounted {
 public:
     static constexpr uint32_t INITIAL_CAPACITY = 32;
     static constexpr uint32_t MAX_CAPACITY = 1024;
+    static constexpr uint32_t getControlledBatchCount(uint32_t instanceCount) {
+        return (instanceCount + MAX_CAPACITY - 1) / MAX_CAPACITY;
+    }
 
     explicit InstancedBuffer(const scene::Pass *pass);
     ~InstancedBuffer() override;
@@ -66,6 +69,8 @@ public:
     void destroy();
     void merge(scene::SubModel *, uint32_t);
     void merge(scene::SubModel *, uint32_t, gfx::Shader *);
+    bool mergeWorldMatrix(const scene::SubModel *, uint32_t, gfx::Shader *);
+    gfx::Shader *getControlledShader(const scene::SubModel *, uint32_t);
     void uploadBuffers(gfx::CommandBuffer *cmdBuff) const;
     void clear();
     void setDynamicOffset(uint32_t idx, uint32_t value);
@@ -75,10 +80,24 @@ public:
     inline const scene::Pass *getPass() const { return _pass; }
     inline void setPass(const scene::Pass *pass) noexcept { _pass = pass; }
     inline bool hasPendingModels() const { return _hasPendingModels; }
+    uint32_t getPendingInstanceCount() const;
     inline const DynamicOffsetList &dynamicOffsets() const { return _dynamicOffsets; }
 
 private:
+    struct ControlledInstanceLayout {
+        gfx::Shader *shader{nullptr};
+        ccstd::vector<gfx::Attribute> attributes;
+        uint32_t stride{0};
+        int32_t worldOffsets[3]{-1, -1, -1};
+        int32_t shadowOffset{-1};
+        bool valid{false};
+    };
+
     InstancedItemList _instances;
+    ControlledInstanceLayout _controlledLayout;
+    const scene::Pass *_controlledShaderPass{nullptr};
+    gfx::Shader *_controlledSourceShader{nullptr};
+    gfx::Shader *_controlledShader{nullptr};
     RenderPass _sortRender;
     // weak reference
     const scene::Pass *_pass{nullptr};

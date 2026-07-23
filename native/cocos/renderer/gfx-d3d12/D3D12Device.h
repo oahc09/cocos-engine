@@ -53,6 +53,14 @@ struct D3D12UploadAllocation {
     bool isValid{false};
 };
 
+struct D3D12TransientUniformFrameState {
+    void *resource{nullptr};
+    uint8_t *mappedData{nullptr};
+    uint64_t gpuAddress{0};
+    uint64_t epoch{0};
+    bool isValid{false};
+};
+
 class CC_DLL CCD3D12Device final : public Device {
 public:
     static CCD3D12Device *getInstance();
@@ -103,12 +111,20 @@ public:
     void *getDrawIndirectSignature() const;
     void *getDrawIndexedIndirectSignature() const;
     void *getOrCreateLocalRootCbvIndirectSignature(void *rootSignature,
-                                                   uint32_t rootParameterIndex,
-                                                   bool indexed);
+                                                   const uint32_t *rootParameterIndices,
+                                                   uint32_t rootParameterCount,
+                                                   bool indexed,
+                                                   uint32_t byteStride);
     void *getDispatchIndirectSignature() const;
+    static CC_FORCE_INLINE const D3D12TransientUniformFrameState &
+    getActiveTransientUniformFrameState() {
+        return activeTransientUniformFrameState;
+    }
     uint64_t getBufferStateEpoch() const;
+    uint32_t getActiveFrameResourceIndex() const;
     uint64_t getTransientUniformUploadGeneration() const;
     void notifyTransientUniformUpload();
+    D3D12UploadAllocation getOrCreateTransientUniformSlot(uint32_t &slotIndex);
     D3D12UploadAllocation allocateUploadBuffer(uint64_t size, uint64_t alignment);
     void enqueueBufferUpdate(CCD3D12Buffer *buffer);
     void discardPendingBufferUpdate(CCD3D12Buffer *buffer);
@@ -121,6 +137,7 @@ public:
     bool storeShaderCacheValue(const void *key, uint32_t keySize, const std::vector<uint8_t> &value) const;
 protected:
     static CCD3D12Device *instance;
+    static D3D12TransientUniformFrameState activeTransientUniformFrameState;
 
     friend class DeviceManager;
     friend class CCD3D12Queue;

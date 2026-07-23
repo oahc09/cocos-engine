@@ -69,6 +69,8 @@ public:
     void endDrawBatch() override;
     void drawWithInputAssemblerAndDescriptorSet(InputAssembler *inputAssembler, uint32_t set,
                                                 DescriptorSet *descriptorSet, const DrawInfo &info) override;
+    void drawPackets(const DrawPacket *packets, uint32_t count,
+                     uint32_t materialSet, uint32_t localSet) override;
     void updateBuffer(Buffer *buff, const void *data, uint32_t size) override;
     void copyBuffersToTexture(const uint8_t *const *buffers, Texture *texture, const BufferTextureCopy *regions, uint32_t count) override;
     void blitTexture(Texture *srcTexture, Texture *dstTexture, const TextureBlit *regions, uint32_t count, Filter filter) override;
@@ -106,10 +108,16 @@ private:
     void invalidateGraphicsState();
     void invalidateDescriptorTables();
     bool flushDescriptorSetsIncremental();
-    bool captureLocalRootCbvBatchBinding(uint64_t &gpuAddress, uint32_t &rootParameterIndex,
+    bool captureLocalRootCbvBatchBinding(struct D3D12LocalRootCbvBatchData &batchData,
+                                         uint32_t *rootParameterIndices,
                                          class CCD3D12DescriptorSet *&descriptorSet,
-                                         uint64_t &staticSignature,
                                          class CCD3D12DescriptorSet *directDescriptorSet = nullptr);
+    bool tryAppendCompatibleLocalRootCbvDraw(InputAssembler *inputAssembler,
+                                             class CCD3D12DescriptorSet *descriptorSet,
+                                             const DrawInfo &info);
+    bool appendLocalRootCbvBatchCommand(const DrawInfo &info,
+                                        const uint64_t *gpuAddresses,
+                                        uint32_t rootCbvCount);
     void drawLocalRootCbvBatchInternal(const DrawInfo &info,
                                        class CCD3D12DescriptorSet *directDescriptorSet);
     void flushLocalRootCbvBatch();

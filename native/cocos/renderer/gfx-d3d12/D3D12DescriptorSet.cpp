@@ -35,6 +35,7 @@
     #ifndef NOMINMAX
         #define NOMINMAX
     #endif
+    #include <atomic>
     #include <d3d12.h>
     #include <wrl/client.h>
 
@@ -42,6 +43,8 @@ namespace cc {
 namespace gfx {
 
 namespace {
+
+std::atomic<uint64_t> DESCRIPTOR_SET_ID{1};
 
 // Map engine Format to DXGI_FORMAT for SRV/UAV descriptors
 DXGI_FORMAT toSRVFormat(Format format, DXGI_FORMAT resourceFormat) {
@@ -325,16 +328,29 @@ struct CCD3D12DescriptorSet::Impl {
     ccstd::vector<uint32_t> zeroDynamicOffsets;
     ccstd::vector<uint32_t> samplerTableKey;
     uint64_t observedTransientUniformUploadGeneration{0};
+    uint64_t identity{DESCRIPTOR_SET_ID.fetch_add(1, std::memory_order_relaxed)};
+    mutable uint64_t lastComparedStaticResourceOtherIdentity{0};
+    mutable uint64_t lastComparedStaticResourceSelfVersion{0};
+    mutable uint64_t lastComparedStaticResourceOtherVersion{0};
+    mutable bool lastComparedStaticResourceResult{false};
 
     struct StaticDescriptorMetadata {
         uint32_t dynamicCbvDescriptors{0};
         uint32_t staticTextureDescriptors{0};
         uint32_t staticCbvSrvUavDescriptors{0};
-        uint32_t rootCbvDescriptorOffset{0};
+        uint32_t rootCbvCount{0};
+        uint32_t rootCbvDescriptorOffsets[D3D12_MAX_LOCAL_ROOT_CBVS]{};
         uint32_t staticCbvSrvUavTableCount{0};
+        uint32_t rootUniformSlotIndices[D3D12_MAX_LOCAL_ROOT_CBVS]{
+            INVALID_BINDING, INVALID_BINDING, INVALID_BINDING, INVALID_BINDING,
+            INVALID_BINDING, INVALID_BINDING, INVALID_BINDING, INVALID_BINDING};
+        CCD3D12Buffer *rootBuffers[D3D12_MAX_LOCAL_ROOT_CBVS]{};
         uint64_t staticSignature{0};
+        uint64_t samplerSignature{0};
         bool cbvSrvUavPartitionValid{false};
+        bool localBatchFastPacketValid{false};
         bool staticResourceIdentityValid{false};
+        bool onlyNullDynamicDescriptorSources{false};
         ccstd::vector<uintptr_t> staticResourceIdentity;
     } staticDescriptorMetadata;
 
@@ -472,6 +488,7 @@ void CCD3D12DescriptorSet::doInit(const DescriptorSetInfo &info) {
 }
 
 void CCD3D12DescriptorSet::doDestroy() {
+    _localRootCbvPreparedPacket = {};
     if (_impl) {
         _impl->descriptors.clear();
         _impl->uniformBufferDescriptorSlots.clear();
@@ -529,6 +546,13 @@ void CCD3D12DescriptorSet::update() {
     // textures, samplers, storage descriptors, and unchanged CBVs remain intact.
     bool descriptorChanged = false;
     bool staticDescriptorChanged = false;
+    const auto isLocalRootCbvOffset = [this](uint32_t offset) {
+        const auto &metadata = _impl->staticDescriptorMetadata;
+        for (uint32_t i = 0; i < metadata.rootCbvCount; ++i) {
+            if (metadata.rootCbvDescriptorOffsets[i] == offset) return true;
+        }
+        return false;
+    };
     for (auto &slot : _impl->uniformBufferDescriptorSlots) {
         auto *buffer = static_cast<CCD3D12Buffer *>(_buffers[slot.descriptorIndex].ptr);
         if (buffer != slot.buffer) {
@@ -563,7 +587,7 @@ void CCD3D12DescriptorSet::update() {
         descriptorChanged = true;
         staticDescriptorChanged = staticDescriptorChanged ||
                                   (_impl->staticDescriptorMetadata.cbvSrvUavPartitionValid &&
-                                   slot.cbvSrvUavOffset != _impl->staticDescriptorMetadata.rootCbvDescriptorOffset);
+                                   !isLocalRootCbvOffset(slot.cbvSrvUavOffset));
     }
 
     if (_isDirty) {
@@ -591,13 +615,28 @@ void CCD3D12DescriptorSet::updateForLocalRootCbv(bool skipStaticCbvStaging) {
         return;
     }
 
+    const auto isLocalRootCbvOffset = [this](uint32_t offset) {
+        const auto &metadata = _impl->staticDescriptorMetadata;
+        for (uint32_t i = 0; i < metadata.rootCbvCount; ++i) {
+            if (metadata.rootCbvDescriptorOffsets[i] == offset) return true;
+        }
+        return false;
+    };
+
     if (skipStaticCbvStaging) {
+        auto *device = CCD3D12Device::getInstance();
+        const uint64_t transientGeneration = device
+                                                 ? device->getTransientUniformUploadGeneration()
+                                                 : 0;
+        if (_impl->observedTransientUniformUploadGeneration == transientGeneration) {
+            return;
+        }
         // The local root-table flush writes ordinary suffix CBVs directly to
         // its current shader-visible allocation.  Keep the CPU staging copy
         // untouched: it remains the conservative source for non-local and
         // fallback paths, while avoiding a duplicate CreateCBV per draw.
         for (const auto &slot : _impl->uniformBufferDescriptorSlots) {
-            if (slot.cbvSrvUavOffset == _impl->staticDescriptorMetadata.rootCbvDescriptorOffset) {
+            if (isLocalRootCbvOffset(slot.cbvSrvUavOffset)) {
                 continue;
             }
             auto *buffer = static_cast<CCD3D12Buffer *>(_buffers[slot.descriptorIndex].ptr);
@@ -606,6 +645,9 @@ void CCD3D12DescriptorSet::updateForLocalRootCbv(bool skipStaticCbvStaging) {
                 _isDirty = true;
                 break;
             }
+        }
+        if (!_isDirty) {
+            _impl->observedTransientUniformUploadGeneration = transientGeneration;
         }
         if (_isDirty) {
             forceUpdate();
@@ -628,7 +670,7 @@ void CCD3D12DescriptorSet::updateForLocalRootCbv(bool skipStaticCbvStaging) {
     // all following ordinary CBVs exact: they remain part of the static table.
     bool staticDescriptorChanged = false;
     for (auto &slot : _impl->uniformBufferDescriptorSlots) {
-        if (slot.cbvSrvUavOffset == _impl->staticDescriptorMetadata.rootCbvDescriptorOffset) {
+        if (isLocalRootCbvOffset(slot.cbvSrvUavOffset)) {
             continue;
         }
         auto *buffer = static_cast<CCD3D12Buffer *>(_buffers[slot.descriptorIndex].ptr);
@@ -1066,17 +1108,27 @@ uint32_t CCD3D12DescriptorSet::getCbvSrvUavDescriptorCount() const {
     return _impl ? _impl->cbvSrvUavDescriptorCount : 0;
 }
 
-bool CCD3D12DescriptorSet::getCbvSrvUavPartition(uint32_t &rootCbvDescriptorOffset,
+bool CCD3D12DescriptorSet::getCbvSrvUavPartition(uint32_t &rootCbvCount,
                                                   uint32_t &staticTableDescriptorCount) const {
-    rootCbvDescriptorOffset = 0;
+    rootCbvCount = 0;
     staticTableDescriptorCount = 0;
     if (!_impl) {
         return false;
     }
     const auto &metadata = _impl->staticDescriptorMetadata;
-    rootCbvDescriptorOffset = metadata.rootCbvDescriptorOffset;
+    rootCbvCount = metadata.rootCbvCount;
     staticTableDescriptorCount = metadata.staticCbvSrvUavTableCount;
     return metadata.cbvSrvUavPartitionValid;
+}
+
+bool CCD3D12DescriptorSet::getLocalRootCbvDescriptorOffset(uint32_t index,
+                                                            uint32_t &descriptorOffset) const {
+    descriptorOffset = 0;
+    if (!_impl || index >= _impl->staticDescriptorMetadata.rootCbvCount) {
+        return false;
+    }
+    descriptorOffset = _impl->staticDescriptorMetadata.rootCbvDescriptorOffsets[index];
+    return true;
 }
 
 bool CCD3D12DescriptorSet::canReuseStaticCbvSrvUavResources() const {
@@ -1091,10 +1143,20 @@ bool CCD3D12DescriptorSet::hasMatchingStaticCbvSrvUavResources(const CCD3D12Desc
     if (!_impl || !other._impl || _layout != other._layout) {
         return false;
     }
+    if (_impl->lastComparedStaticResourceOtherIdentity == other._impl->identity &&
+        _impl->lastComparedStaticResourceSelfVersion == _impl->staticDescriptorVersion &&
+        _impl->lastComparedStaticResourceOtherVersion == other._impl->staticDescriptorVersion) {
+        return _impl->lastComparedStaticResourceResult;
+    }
     const auto &metadata = _impl->staticDescriptorMetadata;
-    return metadata.staticResourceIdentityValid &&
-           other._impl->staticDescriptorMetadata.staticResourceIdentityValid &&
-           metadata.staticResourceIdentity == other._impl->staticDescriptorMetadata.staticResourceIdentity;
+    const bool matches = metadata.staticResourceIdentityValid &&
+                         other._impl->staticDescriptorMetadata.staticResourceIdentityValid &&
+                         metadata.staticResourceIdentity == other._impl->staticDescriptorMetadata.staticResourceIdentity;
+    _impl->lastComparedStaticResourceOtherIdentity = other._impl->identity;
+    _impl->lastComparedStaticResourceSelfVersion = _impl->staticDescriptorVersion;
+    _impl->lastComparedStaticResourceOtherVersion = other._impl->staticDescriptorVersion;
+    _impl->lastComparedStaticResourceResult = matches;
+    return matches;
 }
 
 uint32_t CCD3D12DescriptorSet::getSamplerDescriptorCount() const {
@@ -1103,6 +1165,10 @@ uint32_t CCD3D12DescriptorSet::getSamplerDescriptorCount() const {
 
 uint64_t CCD3D12DescriptorSet::getVersion() const {
     return _impl ? _impl->version : 0;
+}
+
+uint64_t CCD3D12DescriptorSet::getIdentity() const {
+    return _impl ? _impl->identity : 0;
 }
 
 uint64_t CCD3D12DescriptorSet::getStaticDescriptorVersion() const {
@@ -1153,14 +1219,121 @@ bool CCD3D12DescriptorSet::getDynamicDescriptorSource(uint32_t index, uint64_t &
 }
 
 bool CCD3D12DescriptorSet::hasOnlyNullDynamicDescriptorSources() const {
-    if (!_impl || _impl->dynamicDescriptorSlots.empty()) {
+    return _impl && _impl->staticDescriptorMetadata.onlyNullDynamicDescriptorSources;
+}
+
+bool CCD3D12DescriptorSet::getLocalRootCbvBatchData(D3D12LocalRootCbvBatchData &data) {
+    data = {};
+    if (!_impl) {
         return false;
     }
-    for (const auto &slot : _impl->dynamicDescriptorSlots) {
-        if (slot.descriptorIndex >= _buffers.size() || _buffers[slot.descriptorIndex].ptr) {
+
+    updateForLocalRootCbv(true);
+    if (_isDirty) {
+        return false;
+    }
+
+    const auto &metadata = _impl->staticDescriptorMetadata;
+    if (!metadata.cbvSrvUavPartitionValid ||
+        !metadata.onlyNullDynamicDescriptorSources ||
+        !metadata.staticResourceIdentityValid ||
+        metadata.rootCbvCount == 0 ||
+        metadata.dynamicCbvDescriptors != metadata.rootCbvCount ||
+        metadata.staticCbvSrvUavDescriptors != metadata.staticCbvSrvUavTableCount ||
+        metadata.staticSignature == 0 ||
+        metadata.rootCbvCount > D3D12_MAX_LOCAL_ROOT_CBVS) {
+        return false;
+    }
+
+    data.rootCbvCount = metadata.rootCbvCount;
+    auto *device = CCD3D12Device::getInstance();
+    auto *dummyBuffer = device ? device->getDummyBuffer() : nullptr;
+    for (uint32_t i = 0; i < metadata.rootCbvCount; ++i) {
+        const uint32_t slotIndex = metadata.rootUniformSlotIndices[i];
+        if (slotIndex == INVALID_BINDING || slotIndex >= _impl->uniformBufferDescriptorSlots.size()) {
+            return false;
+        }
+        const auto &slot = _impl->uniformBufferDescriptorSlots[slotIndex];
+        data.rootBuffers[i] = slot.buffer ? slot.buffer : dummyBuffer;
+        data.gpuAddresses[i] = data.rootBuffers[i]
+                                   ? data.rootBuffers[i]->getD3D12UniformGPUVirtualAddress()
+                                   : 0;
+        data.sizes[i] = data.rootBuffers[i]
+                            ? data.rootBuffers[i]->getD3D12ConstantBufferSize()
+                            : 0;
+        if (!data.rootBuffers[i] || data.gpuAddresses[i] == 0 || data.sizes[i] < 256U) {
             return false;
         }
     }
+    data.staticSignature = metadata.staticSignature;
+    data.samplerSignature = metadata.samplerSignature;
+    return data.rootCbvCount > 0;
+}
+
+bool CCD3D12DescriptorSet::getLocalRootCbvBatchFastData(D3D12LocalRootCbvBatchData &data) const {
+    data = {};
+    if (!_impl || _isDirty) {
+        return false;
+    }
+
+    const auto &metadata = _impl->staticDescriptorMetadata;
+    if (!metadata.cbvSrvUavPartitionValid ||
+        !metadata.onlyNullDynamicDescriptorSources ||
+        !metadata.staticResourceIdentityValid ||
+        metadata.rootCbvCount == 0 ||
+        metadata.dynamicCbvDescriptors != metadata.rootCbvCount ||
+        metadata.staticCbvSrvUavDescriptors != metadata.staticCbvSrvUavTableCount ||
+        metadata.staticSignature == 0 ||
+        metadata.rootCbvCount > D3D12_MAX_LOCAL_ROOT_CBVS) {
+        return false;
+    }
+
+    data.rootCbvCount = metadata.rootCbvCount;
+    auto *device = CCD3D12Device::getInstance();
+    auto *dummyBuffer = device ? device->getDummyBuffer() : nullptr;
+    for (uint32_t i = 0; i < metadata.rootCbvCount; ++i) {
+        const uint32_t slotIndex = metadata.rootUniformSlotIndices[i];
+        if (slotIndex == INVALID_BINDING || slotIndex >= _impl->uniformBufferDescriptorSlots.size()) {
+            return false;
+        }
+        const auto &slot = _impl->uniformBufferDescriptorSlots[slotIndex];
+        data.rootBuffers[i] = slot.buffer ? slot.buffer : dummyBuffer;
+        data.gpuAddresses[i] = data.rootBuffers[i]
+                                   ? data.rootBuffers[i]->getD3D12UniformGPUVirtualAddress()
+                                   : 0;
+        data.sizes[i] = data.rootBuffers[i]
+                            ? data.rootBuffers[i]->getD3D12ConstantBufferSize()
+                            : 0;
+        if (!data.rootBuffers[i] || data.gpuAddresses[i] == 0 || data.sizes[i] < 256U) {
+            return false;
+        }
+    }
+    data.staticSignature = metadata.staticSignature;
+    data.samplerSignature = metadata.samplerSignature;
+    return data.rootCbvCount > 0;
+}
+
+bool CCD3D12DescriptorSet::getLocalRootCbvFastPacket(D3D12LocalRootCbvFastPacket &packet) const {
+    packet = {};
+    if (!_impl || _isDirty) {
+        return false;
+    }
+
+    const auto &metadata = _impl->staticDescriptorMetadata;
+    if (!metadata.localBatchFastPacketValid) {
+        return false;
+    }
+
+    auto *buffer = metadata.rootBuffers[0];
+    if (!buffer) {
+        return false;
+    }
+    packet.gpuAddress = buffer->getD3D12UniformGPUVirtualAddress();
+    if (packet.gpuAddress == 0 || buffer->getD3D12ConstantBufferSize() < 256U) {
+        return false;
+    }
+    packet.staticSignature = metadata.staticSignature;
+    packet.samplerSignature = metadata.samplerSignature;
     return true;
 }
 
@@ -1195,38 +1368,50 @@ void CCD3D12DescriptorSet::getStaticDescriptorAnalysis(uint32_t &dynamicCbvDescr
 }
 
 void CCD3D12DescriptorSet::refreshStaticDescriptorMetadata() {
+    _localRootCbvPreparedPacket = {};
     if (!_impl || !_layout) {
         return;
     }
 
     auto &metadata = _impl->staticDescriptorMetadata;
     metadata = {};
+    metadata.onlyNullDynamicDescriptorSources = !_impl->dynamicDescriptorSlots.empty();
+    for (const auto &slot : _impl->dynamicDescriptorSlots) {
+        if (slot.descriptorIndex >= _buffers.size() || _buffers[slot.descriptorIndex].ptr) {
+            metadata.onlyNullDynamicDescriptorSources = false;
+            break;
+        }
+    }
     const auto mixSignature = [](uint64_t &hash, uint64_t value) {
         hash ^= value;
         hash *= 1099511628211ULL;
     };
 
+    uint64_t samplerSignature = 1469598103934665603ULL;
+    for (uint32_t value : _impl->samplerTableKey) {
+        mixSignature(samplerSignature, value);
+    }
+    metadata.samplerSignature = _impl->samplerTableKey.empty() ? 0 : samplerSignature;
+
     uint64_t signature = 1469598103934665603ULL;
-    bool rootCbvSeen = false;
     bool partitionOrderValid = true;
     bool identityValid = true;
     uint32_t cbvSrvUavOffset = 0;
     const auto &bindings = _layout->getBindings();
     const auto &descriptorIndices = _layout->getDescriptorIndices();
+    bool rootCbvAssigned = false;
     for (const auto &binding : bindings) {
         const DescriptorType type = binding.descriptorType;
         if (type == DescriptorType::SAMPLER || type == DescriptorType::UNKNOWN) {
             continue;
         }
-        const bool rootCbv = !rootCbvSeen &&
-                                   type == DescriptorType::UNIFORM_BUFFER &&
-                                   binding.binding == 0 && binding.count == 1;
-        if (rootCbv) {
-            metadata.dynamicCbvDescriptors += binding.count;
-            metadata.rootCbvDescriptorOffset = cbvSrvUavOffset;
-            rootCbvSeen = true;
-            cbvSrvUavOffset += binding.count;
-            continue;
+        uint32_t staticElementStart = 0;
+        if (!rootCbvAssigned && type == DescriptorType::UNIFORM_BUFFER && binding.count > 0) {
+            metadata.rootCbvDescriptorOffsets[0] = cbvSrvUavOffset;
+            metadata.rootCbvCount = 1;
+            metadata.dynamicCbvDescriptors = 1;
+            rootCbvAssigned = true;
+            staticElementStart = 1;
         }
 
         if (type == DescriptorType::DYNAMIC_UNIFORM_BUFFER ||
@@ -1234,10 +1419,11 @@ void CCD3D12DescriptorSet::refreshStaticDescriptorMetadata() {
             cbvSrvUavOffset += binding.count;
             continue;
         }
-        metadata.staticCbvSrvUavDescriptors += binding.count;
-        metadata.staticCbvSrvUavTableCount += binding.count;
+        const uint32_t staticElementCount = binding.count - staticElementStart;
+        metadata.staticCbvSrvUavDescriptors += staticElementCount;
+        metadata.staticCbvSrvUavTableCount += staticElementCount;
         const uint32_t baseDescriptorIndex = descriptorIndices[binding.binding];
-        for (uint32_t element = 0; element < binding.count; ++element) {
+        for (uint32_t element = staticElementStart; element < binding.count; ++element) {
             const uint32_t descriptorIndex = baseDescriptorIndex + element;
             mixSignature(signature, binding.binding);
             mixSignature(signature, element);
@@ -1261,9 +1447,6 @@ void CCD3D12DescriptorSet::refreshStaticDescriptorMetadata() {
                     break;
                 }
                 case DescriptorType::UNIFORM_BUFFER: {
-                    // Ordinary suffix CBVs are safe to share only while they
-                    // name the same stable buffer object. updateForLocalRootCbv
-                    // validates its descriptor version before using this key.
                     const uintptr_t resource = reinterpret_cast<uintptr_t>(_buffers[descriptorIndex].ptr);
                     metadata.staticResourceIdentity.push_back(resource);
                     mixSignature(signature, resource);
@@ -1279,16 +1462,49 @@ void CCD3D12DescriptorSet::refreshStaticDescriptorMetadata() {
     }
 
     metadata.staticResourceIdentityValid = identityValid;
+    auto *device = CCD3D12Device::getInstance();
+    auto *dummyBuffer = device ? device->getDummyBuffer() : nullptr;
+    for (uint32_t slotIndex = 0; slotIndex < _impl->uniformBufferDescriptorSlots.size(); ++slotIndex) {
+        for (uint32_t rootIndex = 0; rootIndex < metadata.rootCbvCount; ++rootIndex) {
+            if (_impl->uniformBufferDescriptorSlots[slotIndex].cbvSrvUavOffset ==
+                metadata.rootCbvDescriptorOffsets[rootIndex]) {
+                metadata.rootUniformSlotIndices[rootIndex] = slotIndex;
+                const auto &slot = _impl->uniformBufferDescriptorSlots[slotIndex];
+                metadata.rootBuffers[rootIndex] = slot.buffer ? slot.buffer : dummyBuffer;
+                break;
+            }
+        }
+    }
     if (metadata.staticCbvSrvUavDescriptors > 0) {
         metadata.staticSignature = signature;
     }
-    metadata.cbvSrvUavPartitionValid = partitionOrderValid && rootCbvSeen &&
+    bool allRootSlotsValid = metadata.rootCbvCount > 0;
+    for (uint32_t i = 0; i < metadata.rootCbvCount; ++i) {
+        allRootSlotsValid = allRootSlotsValid &&
+                            metadata.rootUniformSlotIndices[i] != INVALID_BINDING &&
+                            metadata.rootCbvDescriptorOffsets[i] < _impl->cbvSrvUavDescriptorCount;
+    }
+    metadata.cbvSrvUavPartitionValid = partitionOrderValid && rootCbvAssigned &&
+                                        metadata.rootCbvCount == 1 &&
                                         metadata.dynamicCbvDescriptors == 1 &&
                                         metadata.staticCbvSrvUavTableCount > 0 &&
-                                        metadata.rootCbvDescriptorOffset < _impl->cbvSrvUavDescriptorCount &&
+                                        allRootSlotsValid &&
                                         metadata.dynamicCbvDescriptors + metadata.staticCbvSrvUavTableCount +
                                                 _impl->dynamicDescriptorSlots.size() ==
-                                            _impl->cbvSrvUavDescriptorCount;
+                                                _impl->cbvSrvUavDescriptorCount;
+    metadata.localBatchFastPacketValid = metadata.cbvSrvUavPartitionValid &&
+                                         metadata.rootCbvCount == 1 &&
+                                         allRootSlotsValid &&
+                                         metadata.staticSignature != 0;
+    if (metadata.localBatchFastPacketValid && metadata.rootBuffers[0]) {
+        const uint64_t *gpuAddressStorage = nullptr;
+        if (metadata.rootBuffers[0]->getD3D12UniformGPUVirtualAddressStorage(
+                gpuAddressStorage)) {
+            _localRootCbvPreparedPacket.gpuAddressStorage = gpuAddressStorage;
+            _localRootCbvPreparedPacket.staticSignature = metadata.staticSignature;
+            _localRootCbvPreparedPacket.samplerSignature = metadata.samplerSignature;
+        }
+    }
 }
 
 uint32_t CCD3D12DescriptorSet::getDescriptorSemanticCount() const {
@@ -1324,6 +1540,10 @@ bool CCD3D12DescriptorSet::getDescriptorSemanticSignature(uint32_t index, uint32
 const ccstd::vector<uint32_t> &CCD3D12DescriptorSet::getSamplerTableKey() const {
     static const ccstd::vector<uint32_t> EMPTY_KEY;
     return _impl ? _impl->samplerTableKey : EMPTY_KEY;
+}
+
+uint64_t CCD3D12DescriptorSet::getSamplerSignature() const {
+    return _impl ? _impl->staticDescriptorMetadata.samplerSignature : 0;
 }
 
 void CCD3D12DescriptorSet::restoreDynamicOffsetDescriptors() {

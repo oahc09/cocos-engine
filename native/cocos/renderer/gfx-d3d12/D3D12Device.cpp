@@ -59,8 +59,11 @@ namespace cc {
 namespace gfx {
 
 CCD3D12Device *CCD3D12Device::instance = nullptr;
+D3D12TransientUniformFrameState CCD3D12Device::activeTransientUniformFrameState{};
 
 namespace {
+constexpr uint32_t TRANSIENT_UNIFORM_SLOT_COUNT = 4096U;
+
 constexpr float D3D12_POC_CLEAR_COLOR[4] = {0.1F, 0.2F, 0.8F, 1.0F};
 constexpr uint32_t D3D12_GPU_DESCRIPTORS_PER_FRAME = 65536;
 
@@ -149,11 +152,13 @@ struct CCD3D12Device::Impl {
     struct FrameResources {
         std::unique_ptr<D3D12DescriptorHeapPool> samplerDescriptorHeapPool;
         ccstd::vector<UploadPage> uploadPages;
+        UploadPage transientUniformSlotArena;
         Microsoft::WRL::ComPtr<ID3D12Fence> fence;
         uint64_t fenceValue{0};
     };
     std::array<FrameResources, D3D12_MAX_FRAMES_IN_FLIGHT> frameResources;
     uint32_t activeFrameResource{D3D12_MAX_FRAMES_IN_FLIGHT - 1U};
+    uint32_t nextTransientUniformSlotIndex{0};
 
     // GPU-visible descriptor heap pools for shader access.
     std::unique_ptr<D3D12DescriptorHeapPool> gpuDescriptorHeapPool;
@@ -196,7 +201,9 @@ struct CCD3D12Device::Impl {
     struct LocalRootCbvIndirectSignature {
         Microsoft::WRL::ComPtr<ID3D12RootSignature> rootSignature;
         Microsoft::WRL::ComPtr<ID3D12CommandSignature> signature;
-        uint32_t rootParameterIndex{0};
+        uint32_t rootParameterIndices[D3D12_MAX_LOCAL_ROOT_CBVS]{};
+        uint32_t rootParameterCount{0};
+        uint32_t byteStride{0};
         bool indexed{false};
     };
     ccstd::vector<LocalRootCbvIndirectSignature> localRootCbvIndirectSignatures;
@@ -350,6 +357,7 @@ bool CCD3D12Device::doInit(const DeviceInfo &info) {
 }
 
 void CCD3D12Device::doDestroy() {
+    activeTransientUniformFrameState = {};
     drainD3D12ShaderCachePersistence();
     _d3d12Swapchains.clear();
     if (_impl) {
@@ -542,6 +550,16 @@ void CCD3D12Device::acquire(Swapchain *const *swapchains, uint32_t count) {
     frameResources.fence.Reset();
     frameResources.fenceValue = 0;
     _impl->activeFrameResource = nextFrameResource;
+    activeTransientUniformFrameState = {};
+    activeTransientUniformFrameState.epoch = _impl->bufferStateEpoch;
+    const auto &activeArena = frameResources.transientUniformSlotArena;
+    if (activeArena.resource && activeArena.mappedData) {
+        activeTransientUniformFrameState.resource = activeArena.resource.Get();
+        activeTransientUniformFrameState.mappedData = activeArena.mappedData;
+        activeTransientUniformFrameState.gpuAddress =
+            activeArena.resource->GetGPUVirtualAddress();
+        activeTransientUniformFrameState.isValid = true;
+    }
 
     // The DeviceAgent and DeviceValidator layers unwrap their wrappers before
     // passing swapchains down to us, so the pointers here are raw CCD3D12Swapchain*.
@@ -555,6 +573,7 @@ void CCD3D12Device::acquire(Swapchain *const *swapchains, uint32_t count) {
     if (_onAcquire) {
         _onAcquire->execute();
     }
+
 }
 
 CCD3D12Texture *CCD3D12Device::getDummyTexture() const {
@@ -567,6 +586,10 @@ CCD3D12Buffer *CCD3D12Device::getDummyBuffer() const {
 
 uint64_t CCD3D12Device::getBufferStateEpoch() const {
     return _impl ? _impl->bufferStateEpoch : 0;
+}
+
+uint32_t CCD3D12Device::getActiveFrameResourceIndex() const {
+    return _impl ? _impl->activeFrameResource : 0;
 }
 
 uint64_t CCD3D12Device::getTransientUniformUploadGeneration() const {
@@ -582,7 +605,84 @@ void CCD3D12Device::notifyTransientUniformUpload() {
 void CCD3D12Device::advanceBufferStateEpoch() {
     if (_impl) {
         ++_impl->bufferStateEpoch;
+        activeTransientUniformFrameState.epoch = _impl->bufferStateEpoch;
     }
+}
+
+D3D12UploadAllocation CCD3D12Device::getOrCreateTransientUniformSlot(uint32_t &slotIndex) {
+    D3D12UploadAllocation allocation;
+    if (!_impl || !_impl->d3dDevice) {
+        return allocation;
+    }
+
+    constexpr uint32_t INVALID_SLOT = std::numeric_limits<uint32_t>::max();
+    if (slotIndex == INVALID_SLOT &&
+        _impl->nextTransientUniformSlotIndex >= TRANSIENT_UNIFORM_SLOT_COUNT) {
+        return allocation;
+    }
+
+    auto &arena = _impl->frameResources[_impl->activeFrameResource].transientUniformSlotArena;
+    if (!arena.resource) {
+        D3D12_HEAP_PROPERTIES heapProperties{};
+        heapProperties.Type = D3D12_HEAP_TYPE_UPLOAD;
+        heapProperties.CreationNodeMask = 1;
+        heapProperties.VisibleNodeMask = 1;
+
+        D3D12_RESOURCE_DESC resourceDesc{};
+        resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        resourceDesc.Width = static_cast<uint64_t>(TRANSIENT_UNIFORM_SLOT_COUNT) *
+                             D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
+        resourceDesc.Height = 1;
+        resourceDesc.DepthOrArraySize = 1;
+        resourceDesc.MipLevels = 1;
+        resourceDesc.Format = DXGI_FORMAT_UNKNOWN;
+        resourceDesc.SampleDesc.Count = 1;
+        resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+        HRESULT hr = _impl->d3dDevice->CreateCommittedResource(
+            &heapProperties, D3D12_HEAP_FLAG_NONE, &resourceDesc,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&arena.resource));
+        if (FAILED(hr)) {
+            CC_LOG_ERROR("D3D12 transient uniform slot arena creation failed. HRESULT=0x%08x",
+                         static_cast<unsigned>(hr));
+            return allocation;
+        }
+
+        D3D12_RANGE readRange{};
+        void *mappedData = nullptr;
+        hr = arena.resource->Map(0, &readRange, &mappedData);
+        if (FAILED(hr) || !mappedData) {
+            CC_LOG_ERROR("D3D12 transient uniform slot arena Map failed. HRESULT=0x%08x",
+                         static_cast<unsigned>(hr));
+            arena.resource.Reset();
+            return allocation;
+        }
+        arena.mappedData = static_cast<uint8_t *>(mappedData);
+        arena.size = resourceDesc.Width;
+    }
+
+    if (slotIndex == INVALID_SLOT) {
+        slotIndex = _impl->nextTransientUniformSlotIndex++;
+    }
+    if (slotIndex >= TRANSIENT_UNIFORM_SLOT_COUNT) {
+        return allocation;
+    }
+
+    activeTransientUniformFrameState.resource = arena.resource.Get();
+    activeTransientUniformFrameState.mappedData = arena.mappedData;
+    activeTransientUniformFrameState.gpuAddress = arena.resource->GetGPUVirtualAddress();
+    activeTransientUniformFrameState.epoch = _impl->bufferStateEpoch;
+    activeTransientUniformFrameState.isValid = true;
+
+    const uint64_t offset = static_cast<uint64_t>(slotIndex) *
+                            D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
+    allocation.resource = arena.resource.Get();
+    allocation.mappedData = arena.mappedData + offset;
+    allocation.offset = offset;
+    allocation.gpuAddress = arena.resource->GetGPUVirtualAddress() + offset;
+    allocation.size = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
+    allocation.isValid = true;
+    return allocation;
 }
 
 D3D12UploadAllocation CCD3D12Device::allocateUploadBuffer(uint64_t size, uint64_t alignment) {
@@ -733,6 +833,7 @@ void CCD3D12Device::flushPendingBufferUpdates(CCD3D12CommandBuffer *commandBuffe
         notifyTransientUniformUpload();
     }
     commandBuffer->finishBufferUpdateBatch();
+
 }
 
 void CCD3D12Device::notifySubmittedFence(void *fence, uint64_t value) {
@@ -818,43 +919,54 @@ void *CCD3D12Device::getDrawIndexedIndirectSignature() const {
 }
 
 void *CCD3D12Device::getOrCreateLocalRootCbvIndirectSignature(void *rootSignature,
-                                                               uint32_t rootParameterIndex,
-                                                               bool indexed) {
-    if (!_impl || !_impl->d3dDevice || !rootSignature) {
+                                                               const uint32_t *rootParameterIndices,
+                                                               uint32_t rootParameterCount,
+                                                               bool indexed,
+                                                               uint32_t byteStride) {
+    if (!_impl || !_impl->d3dDevice || !rootSignature || !rootParameterIndices ||
+        rootParameterCount == 0 || rootParameterCount > D3D12_MAX_LOCAL_ROOT_CBVS ||
+        byteStride == 0) {
         return nullptr;
     }
 
     auto *d3dRootSignature = static_cast<ID3D12RootSignature *>(rootSignature);
     for (const auto &entry : _impl->localRootCbvIndirectSignatures) {
         if (entry.rootSignature.Get() == d3dRootSignature &&
-            entry.rootParameterIndex == rootParameterIndex && entry.indexed == indexed) {
+            entry.rootParameterCount == rootParameterCount && entry.byteStride == byteStride &&
+            entry.indexed == indexed &&
+            std::memcmp(entry.rootParameterIndices, rootParameterIndices,
+                        rootParameterCount * sizeof(uint32_t)) == 0) {
             return entry.signature.Get();
         }
     }
 
-    D3D12_INDIRECT_ARGUMENT_DESC arguments[2]{};
-    arguments[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW;
-    arguments[0].ConstantBufferView.RootParameterIndex = rootParameterIndex;
-    arguments[1].Type = indexed ? D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED
-                                : D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
+    D3D12_INDIRECT_ARGUMENT_DESC arguments[D3D12_MAX_LOCAL_ROOT_CBVS + 1]{};
+    for (uint32_t i = 0; i < rootParameterCount; ++i) {
+        arguments[i].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW;
+        arguments[i].ConstantBufferView.RootParameterIndex = rootParameterIndices[i];
+    }
+    arguments[rootParameterCount].Type = indexed ? D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED
+                                                 : D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
 
     D3D12_COMMAND_SIGNATURE_DESC signatureDesc{};
     signatureDesc.pArgumentDescs = arguments;
-    signatureDesc.NumArgumentDescs = 2;
-    // The indexed command deliberately includes one DWORD of tail padding so
-    // each command begins at an eight-byte-aligned root-CBV address.
-    signatureDesc.ByteStride = indexed ? 32U : 24U;
+    signatureDesc.NumArgumentDescs = rootParameterCount + 1;
+    signatureDesc.ByteStride = byteStride;
 
     Impl::LocalRootCbvIndirectSignature entry;
     entry.rootSignature = d3dRootSignature;
-    entry.rootParameterIndex = rootParameterIndex;
+    std::memcpy(entry.rootParameterIndices, rootParameterIndices,
+                rootParameterCount * sizeof(uint32_t));
+    entry.rootParameterCount = rootParameterCount;
+    entry.byteStride = byteStride;
     entry.indexed = indexed;
     const HRESULT hr = _impl->d3dDevice->CreateCommandSignature(
         &signatureDesc, d3dRootSignature, IID_PPV_ARGS(&entry.signature));
     if (FAILED(hr)) {
         CC_LOG_WARNING("D3D12: CreateCommandSignature for local Root-CBV batching failed "
-                       "(root=%u, indexed=%s, HRESULT=0x%08x).",
-                       rootParameterIndex, indexed ? "true" : "false", static_cast<unsigned>(hr));
+                       "(roots=%u, indexed=%s, stride=%u, HRESULT=0x%08x).",
+                       rootParameterCount, indexed ? "true" : "false", byteStride,
+                       static_cast<unsigned>(hr));
         return nullptr;
     }
 

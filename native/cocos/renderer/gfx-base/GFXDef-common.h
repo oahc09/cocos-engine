@@ -1078,6 +1078,19 @@ struct DrawInfo {
 
 using DrawInfoList = ccstd::vector<DrawInfo>;
 
+// A compact, backend-neutral description of one already-sorted draw. Command
+// buffers may consume a contiguous array to amortize validation and virtual
+// dispatch while preserving the original draw order.
+struct DrawPacket {
+    PipelineState *pipelineState{nullptr};
+    DescriptorSet *materialDescriptorSet{nullptr};
+    InputAssembler *inputAssembler{nullptr};
+    DescriptorSet *localDescriptorSet{nullptr};
+    DrawInfo drawInfo;
+};
+
+using DrawPacketList = ccstd::vector<DrawPacket>;
+
 struct DispatchInfo {
     uint32_t groupCountX{0};
     uint32_t groupCountY{0};

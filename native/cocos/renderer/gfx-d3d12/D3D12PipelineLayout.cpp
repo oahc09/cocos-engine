@@ -163,7 +163,7 @@ void CCD3D12PipelineLayout::doInit(const PipelineLayoutInfo &info) {
         ccstd::vector<D3D12_DESCRIPTOR_RANGE> dynamicBufferCbvSrvUavRanges;
         ccstd::vector<D3D12_DESCRIPTOR_RANGE> staticCbvSrvUavRanges;
         bool localPartitionValid = setIndex == D3D12_LOCAL_DESCRIPTOR_SET_INDEX;
-        bool localRootCbvPrefixSeen = false;
+        bool localRootCbvAssigned = false;
 
         for (const auto &binding : bindings) {
             DescriptorType descType = binding.descriptorType;
@@ -209,11 +209,15 @@ void CCD3D12PipelineLayout::doInit(const PipelineLayoutInfo &info) {
                 range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
                 cbvSrvUavRanges.push_back(range);
                 if (localPartitionValid) {
-                    const bool rootCbvPrefix = !localRootCbvPrefixSeen &&
-                                               descType == DescriptorType::UNIFORM_BUFFER &&
-                                               binding.binding == 0 && binding.count == 1;
-                    if (rootCbvPrefix) {
-                        localRootCbvPrefixSeen = true;
+                    if (!localRootCbvAssigned && descType == DescriptorType::UNIFORM_BUFFER &&
+                        binding.binding == 0 && binding.count > 0) {
+                        localRootCbvAssigned = true;
+                        if (binding.count > 1) {
+                            D3D12_DESCRIPTOR_RANGE suffixRange = range;
+                            suffixRange.NumDescriptors = binding.count - 1;
+                            suffixRange.BaseShaderRegister = binding.binding + 1;
+                            staticCbvSrvUavRanges.push_back(suffixRange);
+                        }
                     } else if (descType == DescriptorType::DYNAMIC_UNIFORM_BUFFER ||
                                descType == DescriptorType::DYNAMIC_STORAGE_BUFFER) {
                         dynamicBufferCbvSrvUavRanges.push_back(range);
@@ -231,7 +235,7 @@ void CCD3D12PipelineLayout::doInit(const PipelineLayoutInfo &info) {
         D3D12_SHADER_VISIBILITY visibility = D3D12_SHADER_VISIBILITY_ALL;
 
         const bool splitLocalCbvSrvUav = D3D12_ENABLE_LOCAL_ROOT_TABLE_SPLIT && localPartitionValid &&
-                                         localRootCbvPrefixSeen &&
+                                         localRootCbvAssigned &&
                                          !staticCbvSrvUavRanges.empty();
         if (splitLocalCbvSrvUav) {
             _impl->localRootCbvParameterIndices[setIndex] = static_cast<int32_t>(rootParameters.size());

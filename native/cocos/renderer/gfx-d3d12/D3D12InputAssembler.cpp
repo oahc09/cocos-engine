@@ -152,8 +152,30 @@ struct CCD3D12InputAssembler::Impl {
     ccstd::vector<uint64_t> vbResourceVersions;
     D3D12_INDEX_BUFFER_VIEW ibView{};
     uint64_t indexBufferResourceVersion{0};
+    uint64_t observedBufferResourceGeneration{0};
     bool hasIndexBuffer{false};
     uint32_t indexFormat{0}; // DXGI_FORMAT as uint32_t
+
+    uint64_t computeViewSignature() const {
+        uint64_t hash = 1469598103934665603ULL;
+        const auto mixBytes = [&hash](const void *data, size_t size) {
+            const auto *bytes = static_cast<const uint8_t *>(data);
+            for (size_t i = 0; i < size; ++i) {
+                hash ^= bytes[i];
+                hash *= 1099511628211ULL;
+            }
+        };
+        const uint32_t vertexBufferCount = static_cast<uint32_t>(vbViews.size());
+        mixBytes(&vertexBufferCount, sizeof(vertexBufferCount));
+        if (!vbViews.empty()) {
+            mixBytes(vbViews.data(), vbViews.size() * sizeof(vbViews[0]));
+        }
+        mixBytes(&hasIndexBuffer, sizeof(hasIndexBuffer));
+        if (hasIndexBuffer) {
+            mixBytes(&ibView, sizeof(ibView));
+        }
+        return hash;
+    }
 };
 
 CCD3D12InputAssembler::CCD3D12InputAssembler()
@@ -203,6 +225,8 @@ void CCD3D12InputAssembler::doInit(const InputAssemblerInfo &info) {
     _impl->vbResourceVersions.assign(info.vertexBuffers.size(), 0);
     _impl->hasIndexBuffer = (info.indexBuffer != nullptr);
     _impl->indexBufferResourceVersion = 0;
+    _impl->observedBufferResourceGeneration = 0;
+    _d3d12ViewSignature = 0;
     refreshBufferViews();
 
     CC_LOG_DEBUG("D3D12InputAssembler initialized with %u attributes, %u vertex buffers.",
@@ -217,6 +241,7 @@ void CCD3D12InputAssembler::doDestroy() {
     _impl->vbResourceVersions.clear();
     _impl->hasIndexBuffer = false;
     _impl->indexBufferResourceVersion = 0;
+    _impl->observedBufferResourceGeneration = 0;
 }
 
 void *CCD3D12InputAssembler::getInputElementDescs() const {
@@ -235,6 +260,12 @@ bool CCD3D12InputAssembler::refreshBufferViews() {
     if (!_impl) {
         return false;
     }
+
+    const uint64_t resourceGeneration = CCD3D12Buffer::getD3D12GlobalResourceGeneration();
+    if (_impl->observedBufferResourceGeneration == resourceGeneration) {
+        return false;
+    }
+    _impl->observedBufferResourceGeneration = resourceGeneration;
 
     bool changed = false;
     if (_impl->vbViews.size() != _vertexBuffers.size()) {
@@ -262,6 +293,9 @@ bool CCD3D12InputAssembler::refreshBufferViews() {
     }
 
     if (!_impl->hasIndexBuffer) {
+        if (changed) {
+            _d3d12ViewSignature = _impl->computeViewSignature();
+        }
         return changed;
     }
 
@@ -270,6 +304,9 @@ bool CCD3D12InputAssembler::refreshBufferViews() {
                                               ? d3d12IndexBuffer->getD3D12ResourceVersion()
                                               : 0;
     if (_impl->indexBufferResourceVersion == indexResourceVersion) {
+        if (changed) {
+            _d3d12ViewSignature = _impl->computeViewSignature();
+        }
         return changed;
     }
 
@@ -282,6 +319,7 @@ bool CCD3D12InputAssembler::refreshBufferViews() {
     }
     _impl->ibView = view;
     _impl->indexBufferResourceVersion = indexResourceVersion;
+    _d3d12ViewSignature = _impl->computeViewSignature();
     return true;
 }
 

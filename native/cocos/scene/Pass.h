@@ -253,6 +253,8 @@ public:
      */
     gfx::Shader *getShaderVariant();
     gfx::Shader *getShaderVariant(const ccstd::vector<IMacroPatch> &patches);
+    gfx::Shader *getShaderVariantWithOverrides(const ccstd::vector<IMacroPatch> &patches,
+                                               const MacroRecord &defineOverrides) const;
 
     IPassInfoFull getPassInfoFull() const;
 

@@ -24,6 +24,10 @@
 
 #pragma once
 
+#include <cstdlib>
+#include <cstring>
+
+#include "base/Log.h"
 #include "engine/EngineEvents.h"
 
 #include "gfx-agent/DeviceAgent.h"
@@ -80,6 +84,15 @@ public:
         if (Device::instance) return Device::instance;
 
         Device *device = nullptr;
+
+#ifdef CC_USE_D3D12
+        if (isRequestedGFXAPI("D3D12")) {
+            CC_LOG_INFO("Requested GFX API D3D12 through CC_GFX_API.");
+            if (tryCreate<CCD3D12Device>(info, &device)) return device;
+            CC_LOG_ERROR("Requested GFX API D3D12 initialization failed.");
+            return nullptr;
+        }
+#endif
 
 #ifdef CC_USE_NVN
         if (tryCreate<CCNVNDevice>(info, &device)) return device;
@@ -151,6 +164,11 @@ public:
     }
 
 private:
+    static bool isRequestedGFXAPI(const char *api) {
+        const char *requested = std::getenv("CC_GFX_API");
+        return requested && api && std::strcmp(requested, api) == 0;
+    }
+
     template <typename DeviceCtor, typename Enable = std::enable_if_t<std::is_base_of<Device, DeviceCtor>::value>>
     static bool tryCreate(const DeviceInfo &info, Device **pDevice) {
         Device *device = ccnew DeviceCtor;

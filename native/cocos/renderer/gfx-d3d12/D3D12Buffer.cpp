@@ -31,6 +31,8 @@
         #define NOMINMAX
     #endif
     #include <algorithm>
+    #include <array>
+    #include <atomic>
     #include <cstring>
     #include <d3d12.h>
     #include <limits>
@@ -39,8 +41,14 @@
 namespace cc {
 namespace gfx {
 
+namespace {
+std::atomic<uint64_t> BUFFER_RESOURCE_GENERATION{1};
+}
+
 struct CCD3D12Buffer::Impl {
     Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+    std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, D3D12_MAX_FRAMES_IN_FLIGHT> uploadResources;
+    uint32_t activeUploadResource{0};
     uint64_t resourceVersion{1};
     CCD3D12Buffer *parent{nullptr};
     uint32_t resourceOffset{0};
@@ -55,6 +63,8 @@ struct CCD3D12Buffer::Impl {
     ID3D12Resource *transientUniformResource{nullptr};
     uint64_t transientUniformGPUAddress{0};
     uint64_t transientUniformEpoch{std::numeric_limits<uint64_t>::max()};
+    uint32_t transientUniformSlotIndex{std::numeric_limits<uint32_t>::max()};
+    uint64_t transientUniformSlotEpoch{std::numeric_limits<uint64_t>::max()};
     uint64_t uniformContentVersion{0};
     uint64_t uploadedContentVersion{std::numeric_limits<uint64_t>::max()};
     uint64_t uniformDescriptorVersion{1};
@@ -82,6 +92,7 @@ void CCD3D12Buffer::doInit(const BufferViewInfo &info) {
     _impl->parent = buffer;
     _impl->resource.Reset();
     _impl->resourceOffset = info.offset;
+    BUFFER_RESOURCE_GENERATION.fetch_add(1, std::memory_order_relaxed);
 
     auto *owner = buffer;
     while (owner->_impl && owner->_impl->parent) {
@@ -135,11 +146,16 @@ void CCD3D12Buffer::doDestroy() {
         _impl->pendingData.clear();
         _impl->updateQueued = false;
         _impl->resource.Reset();
+        for (auto &resource : _impl->uploadResources) {
+            resource.Reset();
+        }
         ++_impl->resourceVersion;
+        BUFFER_RESOURCE_GENERATION.fetch_add(1, std::memory_order_relaxed);
         _impl->parent = nullptr;
         _impl->transientUniformResource = nullptr;
         _impl->transientUniformGPUAddress = 0;
         _impl->transientUniformEpoch = std::numeric_limits<uint64_t>::max();
+        _impl->transientUniformSlotEpoch = std::numeric_limits<uint64_t>::max();
         _impl->uniformContentVersion = 0;
         _impl->uploadedContentVersion = std::numeric_limits<uint64_t>::max();
         _impl->uniformDescriptorVersion = 1;
@@ -168,16 +184,51 @@ void CCD3D12Buffer::update(const void *buffer, uint32_t size) {
     const uint32_t resourceOffset = getD3D12ResourceOffset();
 
     if (isTransientUniformEligible()) {
-        _impl->pendingData.resize(copySize);
-        std::memcpy(_impl->pendingData.data(), buffer, copySize);
-        ++_impl->uniformContentVersion;
-        if (!_impl->updateQueued) {
-            _impl->updateQueued = true;
-            if (auto *device = CCD3D12Device::getInstance()) {
-                device->enqueueBufferUpdate(this);
+        auto *device = CCD3D12Device::getInstance();
+        D3D12UploadAllocation allocation;
+        constexpr uint32_t INVALID_SLOT = std::numeric_limits<uint32_t>::max();
+        const auto &frameState = CCD3D12Device::getActiveTransientUniformFrameState();
+        const uint64_t epoch = frameState.epoch;
+        if (device && getD3D12ConstantBufferSize() <=
+                          D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT &&
+            _impl->transientUniformSlotEpoch != epoch) {
+            if (_impl->transientUniformSlotIndex != INVALID_SLOT && frameState.isValid &&
+                frameState.resource && frameState.mappedData && frameState.gpuAddress != 0) {
+                const uint64_t offset = static_cast<uint64_t>(_impl->transientUniformSlotIndex) *
+                                        D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
+                allocation.resource = frameState.resource;
+                allocation.mappedData = frameState.mappedData + offset;
+                allocation.offset = offset;
+                allocation.gpuAddress = frameState.gpuAddress + offset;
+                allocation.size = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
+                allocation.isValid = true;
+            } else {
+                allocation = device->getOrCreateTransientUniformSlot(
+                    _impl->transientUniformSlotIndex);
+            }
+            if (allocation.isValid) {
+                _impl->transientUniformSlotEpoch = epoch;
             }
         }
-        return;
+        if (!allocation.isValid && device) {
+            allocation = device->allocateUploadBuffer(
+                getD3D12ConstantBufferSize(),
+                D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+        }
+        if (allocation.isValid && allocation.resource && allocation.mappedData &&
+            allocation.gpuAddress != 0) {
+            std::memcpy(allocation.mappedData, buffer, copySize);
+            ++_impl->uniformContentVersion;
+            _impl->updateQueued = false;
+            _impl->pendingData.clear();
+            _impl->transientUniformResource = static_cast<ID3D12Resource *>(allocation.resource);
+            _impl->transientUniformGPUAddress = allocation.gpuAddress;
+            _impl->transientUniformEpoch = epoch;
+            _impl->uploadedContentVersion = _impl->uniformContentVersion;
+            ++_impl->uniformDescriptorVersion;
+            device->notifyTransientUniformUpload();
+            return;
+        }
     }
 
     if (!isD3D12UploadHeap()) {
@@ -201,6 +252,16 @@ void CCD3D12Buffer::update(const void *buffer, uint32_t size) {
     }
 
     void *mappedData = nullptr;
+    if (auto *device = CCD3D12Device::getInstance()) {
+        const uint32_t frameIndex = device->getActiveFrameResourceIndex();
+        if (frameIndex != _impl->activeUploadResource && _impl->uploadResources[frameIndex]) {
+            _impl->activeUploadResource = frameIndex;
+            _impl->resource = _impl->uploadResources[frameIndex];
+            resource = _impl->resource.Get();
+            ++_impl->resourceVersion;
+            BUFFER_RESOURCE_GENERATION.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
     D3D12_RANGE readRange{};
     HRESULT hr = resource->Map(0, &readRange, &mappedData);
     if (FAILED(hr) || !mappedData) {
@@ -332,6 +393,10 @@ uint64_t CCD3D12Buffer::getD3D12ResourceVersion() const {
     return _impl->resource ? _impl->resourceVersion : 0;
 }
 
+uint64_t CCD3D12Buffer::getD3D12GlobalResourceGeneration() {
+    return BUFFER_RESOURCE_GENERATION.load(std::memory_order_relaxed);
+}
+
 uint64_t CCD3D12Buffer::getD3D12UniformGPUVirtualAddress() const {
     if (!_impl) {
         return 0;
@@ -342,6 +407,16 @@ uint64_t CCD3D12Buffer::getD3D12UniformGPUVirtualAddress() const {
     return _impl->transientUniformGPUAddress != 0
                ? _impl->transientUniformGPUAddress
                : getD3D12GPUVirtualAddress();
+}
+
+bool CCD3D12Buffer::getD3D12UniformGPUVirtualAddressStorage(
+    const uint64_t *&storage) const {
+    storage = nullptr;
+    if (!_impl || _impl->parent || !isTransientUniformEligible()) {
+        return false;
+    }
+    storage = &_impl->transientUniformGPUAddress;
+    return true;
 }
 
 uint64_t CCD3D12Buffer::getUniformDescriptorVersion() const {
@@ -467,20 +542,29 @@ bool CCD3D12Buffer::createResource(uint32_t size) {
     resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
 
     Microsoft::WRL::ComPtr<ID3D12Resource> resource;
-    HRESULT hr = d3dDevice->CreateCommittedResource(
-        &heapProperties,
-        D3D12_HEAP_FLAG_NONE,
-        &resourceDesc,
-        useUploadHeap ? D3D12_RESOURCE_STATE_GENERIC_READ : D3D12_RESOURCE_STATE_COMMON,
-        nullptr,
-        IID_PPV_ARGS(&resource));
-    if (FAILED(hr)) {
-        CC_LOG_ERROR("CreateCommittedResource(buffer) failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
-        return false;
+    const uint32_t resourceCount = useUploadHeap ? D3D12_MAX_FRAMES_IN_FLIGHT : 1U;
+    for (uint32_t i = 0; i < resourceCount; ++i) {
+        HRESULT hr = d3dDevice->CreateCommittedResource(
+            &heapProperties,
+            D3D12_HEAP_FLAG_NONE,
+            &resourceDesc,
+            useUploadHeap ? D3D12_RESOURCE_STATE_GENERIC_READ : D3D12_RESOURCE_STATE_COMMON,
+            nullptr,
+            IID_PPV_ARGS(&resource));
+        if (FAILED(hr)) {
+            CC_LOG_ERROR("CreateCommittedResource(buffer) failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+            return false;
+        }
+        if (useUploadHeap) {
+            _impl->uploadResources[i] = resource;
+            resource.Reset();
+        }
     }
 
-    _impl->resource = resource;
+    _impl->activeUploadResource = useUploadHeap ? device->getActiveFrameResourceIndex() : 0U;
+    _impl->resource = useUploadHeap ? _impl->uploadResources[_impl->activeUploadResource] : resource;
     ++_impl->resourceVersion;
+    BUFFER_RESOURCE_GENERATION.fetch_add(1, std::memory_order_relaxed);
     if (_impl->updateQueued) {
         device->discardPendingBufferUpdate(this);
     }
@@ -489,6 +573,7 @@ bool CCD3D12Buffer::createResource(uint32_t size) {
     _impl->transientUniformResource = nullptr;
     _impl->transientUniformGPUAddress = 0;
     _impl->transientUniformEpoch = std::numeric_limits<uint64_t>::max();
+    _impl->transientUniformSlotEpoch = std::numeric_limits<uint64_t>::max();
     _impl->uniformContentVersion = 0;
     _impl->uploadedContentVersion = std::numeric_limits<uint64_t>::max();
     ++_impl->uniformDescriptorVersion;

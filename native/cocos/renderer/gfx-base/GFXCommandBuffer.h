@@ -75,6 +75,25 @@ public:
         bindDescriptorSet(set, descriptorSet, 0, nullptr);
         draw(info);
     }
+    virtual void drawPackets(const DrawPacket *packets, uint32_t count,
+                             uint32_t materialSet, uint32_t localSet) {
+        PipelineState *lastPipelineState = nullptr;
+        DescriptorSet *lastMaterialDescriptorSet = nullptr;
+        for (uint32_t i = 0; i < count; ++i) {
+            const DrawPacket &packet = packets[i];
+            if (packet.pipelineState != lastPipelineState) {
+                bindPipelineState(packet.pipelineState);
+                lastPipelineState = packet.pipelineState;
+                lastMaterialDescriptorSet = nullptr;
+            }
+            if (packet.materialDescriptorSet != lastMaterialDescriptorSet) {
+                bindDescriptorSet(materialSet, packet.materialDescriptorSet, 0, nullptr);
+                lastMaterialDescriptorSet = packet.materialDescriptorSet;
+            }
+            drawWithInputAssemblerAndDescriptorSet(packet.inputAssembler, localSet,
+                                                   packet.localDescriptorSet, packet.drawInfo);
+        }
+    }
     virtual void updateBuffer(Buffer *buff, const void *data, uint32_t size) = 0;
     virtual void copyBuffersToTexture(const uint8_t *const *buffers, Texture *texture, const BufferTextureCopy *regions, uint32_t count) = 0;
     virtual void blitTexture(Texture *srcTexture, Texture *dstTexture, const TextureBlit *regions, uint32_t count, Filter filter) = 0;

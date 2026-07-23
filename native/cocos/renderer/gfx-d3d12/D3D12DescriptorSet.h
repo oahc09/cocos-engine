@@ -30,6 +30,33 @@
 namespace cc {
 namespace gfx {
 
+class CCD3D12Buffer;
+// The built-in standard local set currently declares five ordinary uniform
+// buffers. Keep enough room for that layout while staying well below the
+// D3D12 64-DWORD root-signature limit (each root CBV costs two DWORDs).
+static constexpr uint32_t D3D12_MAX_LOCAL_ROOT_CBVS = 8;
+
+struct D3D12LocalRootCbvBatchData {
+    CCD3D12Buffer *rootBuffers[D3D12_MAX_LOCAL_ROOT_CBVS]{};
+    uint64_t gpuAddresses[D3D12_MAX_LOCAL_ROOT_CBVS]{};
+    uint32_t sizes[D3D12_MAX_LOCAL_ROOT_CBVS]{};
+    uint32_t rootCbvCount{0};
+    uint64_t staticSignature{0};
+    uint64_t samplerSignature{0};
+};
+
+struct D3D12LocalRootCbvFastPacket {
+    uint64_t gpuAddress{0};
+    uint64_t staticSignature{0};
+    uint64_t samplerSignature{0};
+};
+
+struct D3D12LocalRootCbvPreparedPacket {
+    const uint64_t *gpuAddressStorage{nullptr};
+    uint64_t staticSignature{0};
+    uint64_t samplerSignature{0};
+};
+
 class CC_DLL CCD3D12DescriptorSet final : public DescriptorSet {
 public:
     CCD3D12DescriptorSet();
@@ -42,21 +69,32 @@ public:
     uint64_t getCbvSrvUavCPUDescriptorHandle() const;
     uint64_t getSamplerCPUDescriptorHandle() const;
     uint32_t getCbvSrvUavDescriptorCount() const;
-    // The local b0 root CBV may occur anywhere in the CPU staging table. The
-    // returned static-table count excludes that one descriptor and is packed
+    // Local ordinary-uniform Root CBVs may occur anywhere in the CPU staging table. The
+    // returned static-table count excludes those descriptors and is packed
     // in original descriptor order by CommandBuffer.
-    bool getCbvSrvUavPartition(uint32_t &rootCbvDescriptorOffset,
+    bool getCbvSrvUavPartition(uint32_t &rootCbvCount,
                                uint32_t &staticTableDescriptorCount) const;
+    bool getLocalRootCbvDescriptorOffset(uint32_t index, uint32_t &descriptorOffset) const;
     bool canReuseStaticCbvSrvUavResources() const;
     bool hasMatchingStaticCbvSrvUavResources(const CCD3D12DescriptorSet &other) const;
     uint32_t getSamplerDescriptorCount() const;
     uint64_t getVersion() const;
+    uint64_t getIdentity() const;
     uint64_t getStaticDescriptorVersion() const;
     uint32_t getUniformDescriptorSlotCount() const;
     uint32_t getDynamicDescriptorSlotCount() const;
     bool getDynamicDescriptorOffset(uint32_t index, uint32_t &descriptorOffset) const;
     bool getDynamicDescriptorSource(uint32_t index, uint64_t &gpuAddress, uint64_t &size) const;
     bool hasOnlyNullDynamicDescriptorSources() const;
+    bool getLocalRootCbvBatchData(D3D12LocalRootCbvBatchData &data);
+    bool getLocalRootCbvBatchFastData(D3D12LocalRootCbvBatchData &data) const;
+    bool getLocalRootCbvFastPacket(D3D12LocalRootCbvFastPacket &packet) const;
+    CC_FORCE_INLINE const D3D12LocalRootCbvPreparedPacket *
+    getLocalRootCbvPreparedPacket() const {
+        return !_isDirty && _localRootCbvPreparedPacket.gpuAddressStorage
+                   ? &_localRootCbvPreparedPacket
+                   : nullptr;
+    }
     bool getUniformDescriptorSignature(uint32_t index, uint32_t &descriptorOffset,
                                        uint64_t &gpuAddress, uint32_t &size) const;
     void getStaticDescriptorAnalysis(uint32_t &dynamicCbvDescriptors,
@@ -67,6 +105,7 @@ public:
     bool getDescriptorSemanticSignature(uint32_t index, uint32_t &kind,
                                         uint64_t &value0, uint64_t &value1) const;
     const ccstd::vector<uint32_t> &getSamplerTableKey() const;
+    uint64_t getSamplerSignature() const;
     void applyDynamicOffsets(uint32_t dynamicOffsetCount, const uint32_t *dynamicOffsets);
     void restoreDynamicOffsetDescriptors();
     void updateForLocalRootCbv(bool skipStaticCbvStaging = false);
@@ -80,6 +119,7 @@ private:
 
     struct Impl;
     std::unique_ptr<Impl> _impl;
+    D3D12LocalRootCbvPreparedPacket _localRootCbvPreparedPacket;
 };
 
 } // namespace gfx

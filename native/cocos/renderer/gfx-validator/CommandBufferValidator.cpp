@@ -27,6 +27,7 @@
 
 #include "BufferValidator.h"
 #include "CommandBufferValidator.h"
+
 #include "DescriptorSetValidator.h"
 #include "DeviceValidator.h"
 #include "FramebufferValidator.h"
@@ -466,6 +467,92 @@ void CommandBufferValidator::drawWithInputAssemblerAndDescriptorSet(InputAssembl
     }
 
     drawInternal(info, true, inputAssembler, set, descriptorSet);
+}
+
+void CommandBufferValidator::drawPackets(const DrawPacket *packets, uint32_t count,
+                                         uint32_t materialSet, uint32_t localSet) {
+    CC_ASSERT(isInited());
+    CC_ASSERT(_insideRenderPass);
+    CC_ASSERT(materialSet < _curStates.descriptorSets.size());
+    CC_ASSERT(localSet < _curStates.descriptorSets.size());
+    if (!count) {
+        return;
+    }
+    CC_ASSERT(packets);
+
+    _actorDrawPackets.resize(count);
+    PipelineState *lastPipelineState = nullptr;
+    DescriptorSet *lastMaterialDescriptorSet = nullptr;
+
+    for (uint32_t i = 0; i < count; ++i) {
+        const DrawPacket &packet = packets[i];
+        CC_ASSERT(packet.pipelineState && static_cast<PipelineStateValidator *>(packet.pipelineState)->isInited());
+        CC_ASSERT(packet.materialDescriptorSet && static_cast<DescriptorSetValidator *>(packet.materialDescriptorSet)->isInited());
+        CC_ASSERT(packet.inputAssembler && static_cast<InputAssemblerValidator *>(packet.inputAssembler)->isInited());
+        CC_ASSERT(packet.localDescriptorSet && static_cast<DescriptorSetValidator *>(packet.localDescriptorSet)->isInited());
+
+        if (packet.pipelineState != lastPipelineState) {
+            const auto *pipelineLayout = packet.pipelineState->getPipelineLayout();
+            if (_currentPipelineLayout != pipelineLayout) {
+                _drawLayoutsDirty = true;
+                _currentPipelineLayout = pipelineLayout;
+            }
+            _curStates.pipelineState = packet.pipelineState;
+            lastPipelineState = packet.pipelineState;
+            lastMaterialDescriptorSet = nullptr;
+        }
+
+        if (packet.materialDescriptorSet != lastMaterialDescriptorSet) {
+            const auto *previousLayout = _curStates.descriptorSets[materialSet]
+                                             ? _curStates.descriptorSets[materialSet]->getLayout()
+                                             : nullptr;
+            if (previousLayout != packet.materialDescriptorSet->getLayout()) {
+                _drawLayoutsDirty = true;
+            }
+            _curStates.descriptorSets[materialSet] = packet.materialDescriptorSet;
+            auto &materialDynamicOffsets = _curStates.dynamicOffsets[materialSet];
+            if (!materialDynamicOffsets.empty()) {
+                materialDynamicOffsets.clear();
+            }
+            lastMaterialDescriptorSet = packet.materialDescriptorSet;
+        }
+
+        _curStates.inputAssembler = packet.inputAssembler;
+        const auto *previousLocalLayout = _curStates.descriptorSets[localSet]
+                                              ? _curStates.descriptorSets[localSet]->getLayout()
+                                              : nullptr;
+        if (previousLocalLayout != packet.localDescriptorSet->getLayout()) {
+            _drawLayoutsDirty = true;
+        }
+        _curStates.descriptorSets[localSet] = packet.localDescriptorSet;
+        auto &localDynamicOffsets = _curStates.dynamicOffsets[localSet];
+        if (!localDynamicOffsets.empty()) {
+            localDynamicOffsets.clear();
+        }
+
+        if (DeviceValidator::getInstance()->isRecording()) {
+            _recorder.recordDrawcall(_curStates);
+        }
+        if (_drawLayoutsDirty) {
+            const auto &psoLayouts = _curStates.pipelineState->getPipelineLayout()->getSetLayouts();
+            for (size_t set = 0; set < psoLayouts.size(); ++set) {
+                if (!_curStates.descriptorSets[set]) continue;
+                const auto &dsBindings = _curStates.descriptorSets[set]->getLayout()->getBindings();
+                const auto &psoBindings = psoLayouts[set]->getBindings();
+                CC_ASSERT(psoBindings.size() == dsBindings.size());
+            }
+            _drawLayoutsDirty = false;
+        }
+
+        DrawPacket &actorPacket = _actorDrawPackets[i];
+        actorPacket.pipelineState = static_cast<PipelineStateValidator *>(packet.pipelineState)->getActor();
+        actorPacket.materialDescriptorSet = static_cast<DescriptorSetValidator *>(packet.materialDescriptorSet)->getActor();
+        actorPacket.inputAssembler = static_cast<InputAssemblerValidator *>(packet.inputAssembler)->getActor();
+        actorPacket.localDescriptorSet = static_cast<DescriptorSetValidator *>(packet.localDescriptorSet)->getActor();
+        actorPacket.drawInfo = packet.drawInfo;
+    }
+
+    _actor->drawPackets(_actorDrawPackets.data(), count, materialSet, localSet);
 }
 
 void CommandBufferValidator::updateBuffer(Buffer *buff, const void *data, uint32_t size) {

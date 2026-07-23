@@ -37,6 +37,7 @@ namespace scene {
 class Model;
 class SubModel;
 class Light;
+class Pass;
 } // namespace scene
 
 namespace pipeline {
@@ -75,6 +76,7 @@ struct CC_DLL RenderPass {
     uint32_t shaderID = 0;
     uint32_t passIndex = 0;
     const scene::SubModel *subModel = nullptr;
+    const scene::Pass *pass = nullptr;
 };
 using RenderPassList = ccstd::vector<RenderPass>;
 

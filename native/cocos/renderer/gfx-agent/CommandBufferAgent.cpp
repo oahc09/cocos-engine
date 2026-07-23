@@ -428,6 +428,35 @@ void CommandBufferAgent::drawWithInputAssemblerAndDescriptorSet(InputAssembler *
         });
 }
 
+void CommandBufferAgent::drawPackets(const DrawPacket *packets, uint32_t count,
+                                     uint32_t materialSet, uint32_t localSet) {
+    if (!count) {
+        return;
+    }
+
+    auto *actorPackets = _messageQueue->allocate<DrawPacket>(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        const DrawPacket &packet = packets[i];
+        DrawPacket &actorPacket = actorPackets[i];
+        actorPacket.pipelineState = static_cast<PipelineStateAgent *>(packet.pipelineState)->getActor();
+        actorPacket.materialDescriptorSet = static_cast<DescriptorSetAgent *>(packet.materialDescriptorSet)->getActor();
+        actorPacket.inputAssembler = static_cast<InputAssemblerAgent *>(packet.inputAssembler)->getActor();
+        actorPacket.localDescriptorSet = static_cast<DescriptorSetAgent *>(packet.localDescriptorSet)->getActor();
+        actorPacket.drawInfo = packet.drawInfo;
+    }
+
+    ENQUEUE_MESSAGE_5(
+        _messageQueue, CommandBufferDrawPackets,
+        actor, getActor(),
+        packets, actorPackets,
+        count, count,
+        materialSet, materialSet,
+        localSet, localSet,
+        {
+            actor->drawPackets(packets, count, materialSet, localSet);
+        });
+}
+
 void CommandBufferAgent::updateBuffer(Buffer *buff, const void *data, uint32_t size) {
     auto *bufferAgent = static_cast<BufferAgent *>(buff);
 

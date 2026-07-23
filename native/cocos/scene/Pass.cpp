@@ -522,6 +522,34 @@ gfx::Shader *Pass::getShaderVariant(const ccstd::vector<IMacroPatch> &patches) {
     return shader;
 }
 
+gfx::Shader *Pass::getShaderVariantWithOverrides(const ccstd::vector<IMacroPatch> &patches,
+                                                 const MacroRecord &defineOverrides) const {
+    if (!_root || !_root->getPipeline()) {
+        return nullptr;
+    }
+
+    MacroRecord defines = _defines;
+    for (const auto &patch : patches) {
+        defines[patch.name] = patch.value;
+    }
+    for (const auto &overrideValue : defineOverrides) {
+        defines[overrideValue.first] = overrideValue.second;
+    }
+    for (const auto &target : _blendState.targets) {
+        if (target.blend) {
+            defines["CC_IS_TRANSPARENCY_PASS"] = MacroValue(true);
+            break;
+        }
+    }
+
+    if (auto *programLib = render::getProgramLibrary()) {
+        const auto *program = programLib->getProgramVariant(_device, _phaseID, _programName, defines);
+        return program ? program->getShader() : nullptr;
+    }
+    return ProgramLib::getInstance()->getGFXShader(
+        _device, _programName, defines, _root->getPipeline());
+}
+
 bool Pass::isBlend() {
     bool isBlend = false;
     for (const auto target : _blendState.targets) {

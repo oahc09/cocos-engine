@@ -151,6 +151,9 @@ void ForwardStage::render(scene::Camera *camera) {
     pipeline->getPipelineUBO()->updateShadowUBO(camera);
 
     _instancedQueue->uploadBuffers(cmdBuff);
+    for (auto *queue : _renderQueues) {
+        queue->prepareAutoInstancing(_device, cmdBuff);
+    }
     _additiveLightQueue->gatherLightPasses(camera, cmdBuff);
     _planarShadowQueue->gatherShadowPasses(camera, cmdBuff);
     auto forwardSetup = [&](framegraph::PassNodeBuilder &builder, RenderData &data) {

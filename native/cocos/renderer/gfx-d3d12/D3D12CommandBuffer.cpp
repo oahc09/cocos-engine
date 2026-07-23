@@ -23,6 +23,7 @@
 ****************************************************************************/
 
 #include "D3D12CommandBuffer.h"
+
 #include "D3D12Buffer.h"
 #include "D3D12DescriptorSet.h"
 #include "D3D12DescriptorSetLayout.h"
@@ -772,27 +773,24 @@ struct CCD3D12CommandBuffer::Impl {
     bool localDescriptorSetOnlyDirty{false};
     ID3D12DescriptorHeap *boundCbvSrvUavHeap{nullptr};
     ID3D12DescriptorHeap *boundSamplerHeap{nullptr};
-    struct LocalRootCbvIndirectDraw {
-        uint64_t rootCbvGpuAddress{0};
-        D3D12_DRAW_ARGUMENTS arguments{};
-    };
-    struct LocalRootCbvIndexedIndirectDraw {
-        uint64_t rootCbvGpuAddress{0};
-        D3D12_DRAW_INDEXED_ARGUMENTS arguments{};
-        uint32_t padding{0};
-    };
-    static_assert(sizeof(LocalRootCbvIndirectDraw) == 24, "Unexpected D3D12 indirect draw stride");
-    static_assert(sizeof(LocalRootCbvIndexedIndirectDraw) == 32, "Unexpected D3D12 indexed indirect draw stride");
     bool localRootCbvBatchActive{false};
     bool localRootCbvBatchReady{false};
     bool localRootCbvBatchIndexed{false};
-    uint32_t localRootCbvBatchRootParameterIndex{0};
+    uint32_t localRootCbvBatchRootParameterIndices[D3D12_MAX_LOCAL_ROOT_CBVS]{};
+    uint32_t localRootCbvBatchRootParameterCount{0};
     ID3D12RootSignature *localRootCbvBatchRootSignature{nullptr};
     CCD3D12DescriptorSet *localRootCbvBatchDescriptorSet{nullptr};
     uint64_t localRootCbvBatchStaticSignature{0};
+    uint64_t localRootCbvBatchSamplerSignature{0};
+    uint64_t localRootCbvBatchInputAssemblerSignature{0};
     ccstd::vector<uint32_t> localRootCbvBatchSamplerKey;
-    ccstd::vector<LocalRootCbvIndirectDraw> localRootCbvBatchDraws;
-    ccstd::vector<LocalRootCbvIndexedIndirectDraw> localRootCbvBatchIndexedDraws;
+    InputAssembler *localRootCbvBatchInputAssembler{nullptr};
+    D3D12UploadAllocation localRootCbvBatchUpload;
+    ID3D12CommandSignature *localRootCbvBatchCommandSignature{nullptr};
+    uint32_t localRootCbvBatchCommandStride{0};
+    uint32_t localRootCbvBatchCommandCapacity{0};
+    uint32_t localRootCbvBatchCommandCount{0};
+    bool localRootCbvBatchUploadAttempted{false};
     float dynamicDepthBias{0.F};
     float dynamicDepthBiasClamp{0.F};
     float dynamicDepthBiasSlope{0.F};
@@ -1189,6 +1187,7 @@ void CCD3D12CommandBuffer::begin(RenderPass *renderPass, uint32_t subpass, Frame
     _impl->samplerTableCacheHeapIndex = std::numeric_limits<uint32_t>::max();
     _impl->boundCbvSrvUavHeap = nullptr;
     _impl->boundSamplerHeap = nullptr;
+    _impl->localRootCbvBatchInputAssembler = nullptr;
     invalidateGraphicsState();
     _impl->dynamicDepthBias = 0.F;
     _impl->dynamicDepthBiasClamp = 0.F;
@@ -1207,7 +1206,6 @@ void CCD3D12CommandBuffer::begin(RenderPass *renderPass, uint32_t subpass, Frame
 
 void CCD3D12CommandBuffer::end() {
     if (!_impl->commandList) return;
-
     if (_type == CommandBufferType::PRIMARY) {
         CCD3D12Device::getInstance()->flushPendingBufferUpdates(this);
     }
@@ -2048,10 +2046,15 @@ bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental() {
         }
 
         set->updateForLocalRootCbv(true);
-        uint32_t rootCbvDescriptorOffset = 0;
+        uint32_t rootCbvCount = 0;
         uint32_t staticCbvSrvUavCount = 0;
-        if (!set->getCbvSrvUavPartition(rootCbvDescriptorOffset, staticCbvSrvUavCount) ||
+        if (!set->getCbvSrvUavPartition(rootCbvCount, staticCbvSrvUavCount) ||
+            rootCbvCount != 1 ||
             !set->hasOnlyNullDynamicDescriptorSources()) {
+            return false;
+        }
+        uint32_t rootCbvDescriptorOffset = 0;
+        if (!set->getLocalRootCbvDescriptorOffset(0, rootCbvDescriptorOffset)) {
             return false;
         }
         const uint32_t dynamicDescriptorCount = set->getDynamicDescriptorSlotCount();
@@ -2179,17 +2182,19 @@ bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental() {
         uint32_t cbvCount{0};
         uint32_t dynamicCbvCount{0};
         uint32_t dynamicDescriptorCount{0};
-        uint32_t localRootCbvDescriptorOffset{0};
+        uint32_t localRootCbvCount{0};
+        uint32_t localRootCbvDescriptorOffsets[D3D12_MAX_LOCAL_ROOT_CBVS]{};
         uint32_t staticCbvSrvUavCount{0};
         uint32_t samplerCount{0};
         int32_t cbvRootIndex{-1};
         int32_t dynamicCbvRootIndex{-1};
-        int32_t localRootCbvRootIndex{-1};
+        int32_t localRootCbvRootIndices[D3D12_MAX_LOCAL_ROOT_CBVS]{
+            -1, -1, -1, -1, -1, -1, -1, -1};
         int32_t staticCbvSrvUavRootIndex{-1};
         int32_t samplerRootIndex{-1};
         bool splitLocalCbvSrvUav{false};
         bool useLocalRootCbv{false};
-        uint64_t localRootCbvGpuAddress{0};
+        uint64_t localRootCbvGpuAddresses[D3D12_MAX_LOCAL_ROOT_CBVS]{};
         PreparedRange cbvRange;
         PreparedRange dynamicCbvSrvUavRange;
         PreparedRange staticCbvSrvUavRange;
@@ -2228,20 +2233,29 @@ bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental() {
         binding.samplerCount = set->getSamplerDescriptorCount();
         binding.cbvRootIndex = boundLayout->getCbvSrvUavRootParameterIndex(pending.setIndex);
         binding.dynamicCbvRootIndex = boundLayout->getDynamicCbvSrvUavRootParameterIndex(pending.setIndex);
-        binding.localRootCbvRootIndex = boundLayout->getLocalRootCbvParameterIndex(pending.setIndex);
         binding.staticCbvSrvUavRootIndex = boundLayout->getStaticCbvSrvUavRootParameterIndex(pending.setIndex);
         binding.samplerRootIndex = boundLayout->getSamplerRootParameterIndex(pending.setIndex);
         const bool localCbvSrvUavPartition = set->getCbvSrvUavPartition(
-            binding.localRootCbvDescriptorOffset, binding.staticCbvSrvUavCount);
-        binding.dynamicCbvCount = localCbvSrvUavPartition ? 1U : 0U;
+            binding.localRootCbvCount, binding.staticCbvSrvUavCount);
+        for (uint32_t rootCbv = 0; rootCbv < binding.localRootCbvCount; ++rootCbv) {
+            set->getLocalRootCbvDescriptorOffset(
+                rootCbv, binding.localRootCbvDescriptorOffsets[rootCbv]);
+            binding.localRootCbvRootIndices[rootCbv] =
+                boundLayout->getLocalRootCbvParameterIndex(pending.setIndex);
+        }
+        binding.dynamicCbvCount = localCbvSrvUavPartition ? binding.localRootCbvCount : 0U;
         binding.splitLocalCbvSrvUav = pending.setIndex == D3D12_LOCAL_DESCRIPTOR_SET_INDEX &&
                                        localCbvSrvUavPartition &&
-                                       binding.localRootCbvRootIndex >= 0 &&
-                                       binding.dynamicCbvCount == 1 &&
+                                       binding.localRootCbvCount > 0 &&
+                                       binding.localRootCbvCount == 1 &&
                                        binding.staticCbvSrvUavRootIndex >= 0 &&
                                        (binding.dynamicDescriptorCount == 0 ||
                                         binding.dynamicCbvRootIndex >= 0);
         binding.useLocalRootCbv = binding.splitLocalCbvSrvUav;
+        for (uint32_t rootCbv = 0; rootCbv < binding.localRootCbvCount; ++rootCbv) {
+            binding.useLocalRootCbv = binding.useLocalRootCbv &&
+                                      binding.localRootCbvRootIndices[rootCbv] >= 0;
+        }
     }
 
 
@@ -2364,9 +2378,9 @@ bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental() {
     auto copyLocalStaticCbvTable = [&](SetBindingInfo &binding,
                                         const D3D12DescriptorHeapPool::Allocation &allocation,
                                         uint32_t descriptorOffset) {
-        const uint32_t rootCbvOffset = binding.localRootCbvDescriptorOffset;
-        if (rootCbvOffset >= binding.cbvCount ||
-            binding.staticCbvSrvUavCount + binding.dynamicDescriptorCount + 1U != binding.cbvCount) {
+        if (binding.localRootCbvCount == 0 ||
+            binding.staticCbvSrvUavCount + binding.dynamicDescriptorCount +
+                    binding.localRootCbvCount != binding.cbvCount) {
             return false;
         }
         uint32_t destinationOffset = descriptorOffset;
@@ -2383,7 +2397,11 @@ bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental() {
             return copied;
         };
         for (uint32_t sourceOffset = 0; sourceOffset < binding.cbvCount; ++sourceOffset) {
-            bool excluded = sourceOffset == rootCbvOffset;
+            bool excluded = false;
+            for (uint32_t rootCbv = 0; rootCbv < binding.localRootCbvCount; ++rootCbv) {
+                excluded = excluded ||
+                           sourceOffset == binding.localRootCbvDescriptorOffsets[rootCbv];
+            }
             for (uint32_t dynamicIndex = 0;
                  !excluded && dynamicIndex < binding.dynamicDescriptorCount;
                  ++dynamicIndex) {
@@ -2556,27 +2574,13 @@ bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental() {
         }
 
         if (binding.useLocalRootCbv) {
-            const uint32_t rootCbvDescriptorOffset = binding.localRootCbvDescriptorOffset;
-            uint32_t cbvSize = 0;
-            bool rootCbvFound = false;
-            const uint32_t uniformSlotCount = binding.set->getUniformDescriptorSlotCount();
-            for (uint32_t slotIndex = 0; slotIndex < uniformSlotCount; ++slotIndex) {
-                uint32_t descriptorOffset = 0;
-                if (binding.set->getUniformDescriptorSignature(slotIndex, descriptorOffset,
-                                                               binding.localRootCbvGpuAddress, cbvSize) &&
-                    descriptorOffset == rootCbvDescriptorOffset) {
-                    rootCbvFound = true;
-                    break;
-                }
-            }
-            if (!rootCbvFound || binding.localRootCbvGpuAddress == 0 || cbvSize < 256U) {
-                auto *dummyBuffer = device->getDummyBuffer();
-                binding.localRootCbvGpuAddress = dummyBuffer
-                                                    ? dummyBuffer->getD3D12GPUVirtualAddress()
-                                                    : 0;
-            }
-            if (binding.localRootCbvGpuAddress == 0) {
+            D3D12LocalRootCbvBatchData rootData;
+            if (!binding.set->getLocalRootCbvBatchFastData(rootData) ||
+                rootData.rootCbvCount != binding.localRootCbvCount) {
                 return false;
+            }
+            for (uint32_t rootCbv = 0; rootCbv < binding.localRootCbvCount; ++rootCbv) {
+                binding.localRootCbvGpuAddresses[rootCbv] = rootData.gpuAddresses[rootCbv];
             }
 
             uint32_t dynamicCbvDescriptors = 0;
@@ -3058,8 +3062,14 @@ bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental() {
 
     for (uint32_t i = 0; i < bindingCount; ++i) {
         const auto &binding = bindings[i];
+        bool localRootCbvsReady = true;
+        for (uint32_t rootCbv = 0; rootCbv < binding.localRootCbvCount; ++rootCbv) {
+            localRootCbvsReady = localRootCbvsReady &&
+                                 binding.localRootCbvGpuAddresses[rootCbv] != 0 &&
+                                 binding.localRootCbvRootIndices[rootCbv] >= 0;
+        }
         if ((binding.splitLocalCbvSrvUav &&
-             ((binding.useLocalRootCbv && binding.localRootCbvGpuAddress == 0) ||
+             ((binding.useLocalRootCbv && !localRootCbvsReady) ||
               (binding.useLocalRootCbv && binding.dynamicDescriptorCount > 0 &&
                !bindRootTable(binding.dynamicCbvRootIndex, binding.dynamicCbvSrvUavRange)) ||
               (!binding.useLocalRootCbv &&
@@ -3070,8 +3080,11 @@ bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental() {
             return false;
         }
         if (binding.useLocalRootCbv) {
-            _impl->commandList->SetGraphicsRootConstantBufferView(
-                static_cast<UINT>(binding.localRootCbvRootIndex), binding.localRootCbvGpuAddress);
+            for (uint32_t rootCbv = 0; rootCbv < binding.localRootCbvCount; ++rootCbv) {
+                _impl->commandList->SetGraphicsRootConstantBufferView(
+                    static_cast<UINT>(binding.localRootCbvRootIndices[rootCbv]),
+                    binding.localRootCbvGpuAddresses[rootCbv]);
+            }
         }
     }
 
@@ -3282,16 +3295,13 @@ void CCD3D12CommandBuffer::flushDescriptorSets() {
     }
 }
 
-bool CCD3D12CommandBuffer::captureLocalRootCbvBatchBinding(uint64_t &gpuAddress,
-                                                            uint32_t &rootParameterIndex,
+bool CCD3D12CommandBuffer::captureLocalRootCbvBatchBinding(D3D12LocalRootCbvBatchData &batchData,
+                                                            uint32_t *rootParameterIndices,
                                                             CCD3D12DescriptorSet *&descriptorSet,
-                                                            uint64_t &staticSignature,
                                                             CCD3D12DescriptorSet *directDescriptorSet) {
-    gpuAddress = 0;
-    rootParameterIndex = 0;
+    batchData = {};
     descriptorSet = nullptr;
-    staticSignature = 0;
-    if (!_impl || !_impl->boundPipelineLayout) {
+    if (!_impl || !_impl->boundPipelineLayout || !rootParameterIndices) {
         return false;
     }
 
@@ -3312,50 +3322,155 @@ bool CCD3D12CommandBuffer::captureLocalRootCbvBatchBinding(uint64_t &gpuAddress,
         set = static_cast<CCD3D12DescriptorSet *>(localPending->set);
     }
 
-    const int32_t rootCbvIndex = boundLayout->getLocalRootCbvParameterIndex(D3D12_LOCAL_DESCRIPTOR_SET_INDEX);
-    if (!set || rootCbvIndex < 0 || !_impl->boundRootSignature) {
+    const int32_t localRootCbvIndex =
+        boundLayout->getLocalRootCbvParameterIndex(D3D12_LOCAL_DESCRIPTOR_SET_INDEX);
+    const uint32_t rootCbvCount = localRootCbvIndex >= 0 ? 1U : 0U;
+    if (!set || rootCbvCount == 0 || rootCbvCount > D3D12_MAX_LOCAL_ROOT_CBVS ||
+        !_impl->boundRootSignature) {
         return false;
     }
 
-    set->updateForLocalRootCbv(true);
-    uint32_t rootCbvDescriptorOffset = 0;
-    uint32_t staticCbvSrvUavCount = 0;
-    if (!set->getCbvSrvUavPartition(rootCbvDescriptorOffset, staticCbvSrvUavCount) ||
-        !set->hasOnlyNullDynamicDescriptorSources()) {
+    if (!set->getLocalRootCbvBatchData(batchData) || batchData.rootCbvCount != rootCbvCount) {
+        return false;
+    }
+    for (uint32_t i = 0; i < rootCbvCount; ++i) {
+        const int32_t rootCbvIndex = localRootCbvIndex;
+        if (rootCbvIndex < 0 || batchData.gpuAddresses[i] == 0 || batchData.sizes[i] < 256U) {
+            return false;
+        }
+        rootParameterIndices[i] = static_cast<uint32_t>(rootCbvIndex);
+    }
+
+    descriptorSet = set;
+    return true;
+}
+
+bool CCD3D12CommandBuffer::tryAppendCompatibleLocalRootCbvDraw(InputAssembler *inputAssembler,
+                                                                CCD3D12DescriptorSet *descriptorSet,
+                                                                const DrawInfo &info) {
+    if (!_impl || !_impl->localRootCbvBatchActive || !_impl->localRootCbvBatchReady ||
+        !inputAssembler || !descriptorSet) {
         return false;
     }
 
-    uint32_t dynamicCbvDescriptors = 0;
-    uint32_t staticTextureDescriptors = 0;
-    uint32_t staticCbvSrvUavDescriptors = 0;
-    set->getStaticDescriptorAnalysis(dynamicCbvDescriptors, staticTextureDescriptors,
-                                     staticCbvSrvUavDescriptors, staticSignature);
-    if (dynamicCbvDescriptors != 1 || staticSignature == 0 ||
-        staticCbvSrvUavDescriptors != staticCbvSrvUavCount ||
-        !set->canReuseStaticCbvSrvUavResources()) {
+    auto *d3d12IA = static_cast<CCD3D12InputAssembler *>(inputAssembler);
+    const uint64_t inputAssemblerSignature = d3d12IA->getD3D12ViewSignature();
+    if (inputAssemblerSignature == 0 ||
+        inputAssemblerSignature != _impl->localRootCbvBatchInputAssemblerSignature) {
         return false;
     }
 
-    uint32_t rootCbvSize = 0;
-    const uint32_t uniformSlotCount = set->getUniformDescriptorSlotCount();
-    for (uint32_t slotIndex = 0; slotIndex < uniformSlotCount; ++slotIndex) {
-        uint32_t descriptorOffset = 0;
-        if (set->getUniformDescriptorSignature(slotIndex, descriptorOffset, gpuAddress, rootCbvSize) &&
-            descriptorOffset == rootCbvDescriptorOffset) {
-            break;
+    const auto *preparedPacket = descriptorSet->getLocalRootCbvPreparedPacket();
+    const uint64_t gpuAddress = preparedPacket && preparedPacket->gpuAddressStorage
+                                    ? *preparedPacket->gpuAddressStorage
+                                    : 0;
+    if (!preparedPacket || gpuAddress == 0 ||
+        _impl->localRootCbvBatchRootParameterCount != 1 ||
+        preparedPacket->staticSignature != _impl->localRootCbvBatchStaticSignature ||
+        preparedPacket->samplerSignature != _impl->localRootCbvBatchSamplerSignature) {
+        return false;
+    }
+
+    const bool indexed = info.indexCount > 0;
+    if (indexed != _impl->localRootCbvBatchIndexed) {
+        return false;
+    }
+
+    if (!appendLocalRootCbvBatchCommand(info, &gpuAddress, 1U)) {
+        return false;
+    }
+
+    _impl->boundIA = inputAssembler;
+    _impl->descriptorSetsDirty = false;
+    _impl->localDescriptorSetOnlyDirty = false;
+    return true;
+}
+
+bool CCD3D12CommandBuffer::appendLocalRootCbvBatchCommand(
+    const DrawInfo &info, const uint64_t *gpuAddresses, uint32_t rootCbvCount) {
+    if (!_impl || !_impl->localRootCbvBatchActive || !_impl->localRootCbvBatchReady ||
+        !_impl->commandList || !gpuAddresses || rootCbvCount == 0 ||
+        rootCbvCount != _impl->localRootCbvBatchRootParameterCount) {
+        return false;
+    }
+
+    if (_impl->localRootCbvBatchUploadAttempted &&
+        _impl->localRootCbvBatchUpload.isValid &&
+        _impl->localRootCbvBatchCommandCount >= _impl->localRootCbvBatchCommandCapacity) {
+        flushLocalRootCbvBatch();
+        return false;
+    }
+
+    const uint32_t rootAddressBytes = rootCbvCount * sizeof(uint64_t);
+    if (!_impl->localRootCbvBatchUploadAttempted) {
+        const uint32_t packedPayloadBytes = _impl->localRootCbvBatchIndexed
+                                                ? rootAddressBytes + sizeof(D3D12_DRAW_INDEXED_ARGUMENTS)
+                                                : rootAddressBytes + sizeof(D3D12_DRAW_ARGUMENTS);
+        _impl->localRootCbvBatchCommandStride =
+            (packedPayloadBytes + sizeof(uint64_t) - 1U) & ~(sizeof(uint64_t) - 1U);
+        constexpr uint32_t COMMAND_CAPACITY = 4096U;
+        _impl->localRootCbvBatchCommandCapacity = COMMAND_CAPACITY;
+
+        auto *device = CCD3D12Device::getInstance();
+        _impl->localRootCbvBatchCommandSignature = static_cast<ID3D12CommandSignature *>(
+            device ? device->getOrCreateLocalRootCbvIndirectSignature(
+                         _impl->localRootCbvBatchRootSignature,
+                         _impl->localRootCbvBatchRootParameterIndices,
+                         _impl->localRootCbvBatchRootParameterCount,
+                         _impl->localRootCbvBatchIndexed,
+                         _impl->localRootCbvBatchCommandStride)
+                   : nullptr);
+        const uint64_t byteCount = static_cast<uint64_t>(_impl->localRootCbvBatchCommandStride) *
+                                   COMMAND_CAPACITY;
+        _impl->localRootCbvBatchUpload =
+            _impl->localRootCbvBatchCommandSignature && device
+                ? device->allocateUploadBuffer(byteCount, sizeof(uint64_t))
+                : D3D12UploadAllocation{};
+        _impl->localRootCbvBatchUploadAttempted = true;
+        if (_impl->localRootCbvBatchUpload.isValid && _impl->localRootCbvBatchUpload.resource) {
+            retainCommandListResource(
+                _impl->pendingUploadResources, _impl->pendingUploadResourceSet,
+                static_cast<ID3D12Resource *>(_impl->localRootCbvBatchUpload.resource));
         }
     }
-    if (gpuAddress == 0 || rootCbvSize < 256U) {
-        auto *device = CCD3D12Device::getInstance();
-        auto *dummyBuffer = device ? device->getDummyBuffer() : nullptr;
-        gpuAddress = dummyBuffer ? dummyBuffer->getD3D12GPUVirtualAddress() : 0;
-    }
-    if (gpuAddress == 0) {
-        return false;
+
+    const uint32_t instanceCount = std::max<uint32_t>(info.instanceCount, 1U);
+    if (_impl->localRootCbvBatchCommandSignature &&
+        _impl->localRootCbvBatchUpload.isValid &&
+        _impl->localRootCbvBatchUpload.mappedData) {
+        auto *destination = static_cast<uint8_t *>(_impl->localRootCbvBatchUpload.mappedData) +
+                            static_cast<uint64_t>(_impl->localRootCbvBatchCommandCount) *
+                                _impl->localRootCbvBatchCommandStride;
+        std::memcpy(destination, gpuAddresses, rootAddressBytes);
+        if (_impl->localRootCbvBatchIndexed) {
+            const D3D12_DRAW_INDEXED_ARGUMENTS arguments{
+                info.indexCount, instanceCount, info.firstIndex, info.vertexOffset, info.firstInstance};
+            std::memcpy(destination + rootAddressBytes, &arguments, sizeof(arguments));
+        } else {
+            const D3D12_DRAW_ARGUMENTS arguments{
+                info.vertexCount, instanceCount, info.firstVertex, info.firstInstance};
+            std::memcpy(destination + rootAddressBytes, &arguments, sizeof(arguments));
+        }
+        ++_impl->localRootCbvBatchCommandCount;
+    } else {
+        for (uint32_t rootCbv = 0; rootCbv < rootCbvCount; ++rootCbv) {
+            _impl->commandList->SetGraphicsRootConstantBufferView(
+                _impl->localRootCbvBatchRootParameterIndices[rootCbv],
+                gpuAddresses[rootCbv]);
+        }
+        if (_impl->localRootCbvBatchIndexed) {
+            _impl->commandList->DrawIndexedInstanced(
+                info.indexCount, instanceCount, info.firstIndex, info.vertexOffset, info.firstInstance);
+        } else {
+            _impl->commandList->DrawInstanced(
+                info.vertexCount, instanceCount, info.firstVertex, info.firstInstance);
+        }
     }
 
-    rootParameterIndex = static_cast<uint32_t>(rootCbvIndex);
-    descriptorSet = set;
+    ++_numDrawCalls;
+    _numInstances += instanceCount;
+    const uint32_t elementCount = _impl->localRootCbvBatchIndexed ? info.indexCount : info.vertexCount;
+    _numTriangles += (elementCount / 3U) * instanceCount;
     return true;
 }
 
@@ -3364,80 +3479,33 @@ void CCD3D12CommandBuffer::flushLocalRootCbvBatch() {
         return;
     }
 
-    const bool indexed = _impl->localRootCbvBatchIndexed;
-    const uint32_t commandCount = indexed
-                                      ? static_cast<uint32_t>(_impl->localRootCbvBatchIndexedDraws.size())
-                                      : static_cast<uint32_t>(_impl->localRootCbvBatchDraws.size());
-    if (commandCount == 0) {
-        _impl->localRootCbvBatchReady = false;
-        _impl->localRootCbvBatchDescriptorSet = nullptr;
-        _impl->localRootCbvBatchStaticSignature = 0;
-        _impl->localRootCbvBatchSamplerKey.clear();
-        return;
+    if (_impl->localRootCbvBatchCommandCount > 0 &&
+        _impl->localRootCbvBatchCommandSignature &&
+        _impl->localRootCbvBatchUpload.isValid &&
+        _impl->localRootCbvBatchUpload.resource) {
+        _impl->commandList->ExecuteIndirect(
+            _impl->localRootCbvBatchCommandSignature,
+            _impl->localRootCbvBatchCommandCount,
+            static_cast<ID3D12Resource *>(_impl->localRootCbvBatchUpload.resource),
+            _impl->localRootCbvBatchUpload.offset,
+            nullptr,
+            0);
     }
 
-    auto *device = CCD3D12Device::getInstance();
-    auto *signature = static_cast<ID3D12CommandSignature *>(
-        device ? device->getOrCreateLocalRootCbvIndirectSignature(
-                     _impl->localRootCbvBatchRootSignature,
-                     _impl->localRootCbvBatchRootParameterIndex, indexed)
-               : nullptr);
-    const uint64_t stride = indexed ? sizeof(Impl::LocalRootCbvIndexedIndirectDraw)
-                                    : sizeof(Impl::LocalRootCbvIndirectDraw);
-    const uint64_t byteCount = stride * commandCount;
-    const auto upload = signature && device
-                            ? device->allocateUploadBuffer(byteCount, sizeof(uint64_t))
-                            : D3D12UploadAllocation{};
-
-    if (signature && upload.isValid && upload.resource && upload.mappedData) {
-        const void *commands = indexed
-                                   ? static_cast<const void *>(_impl->localRootCbvBatchIndexedDraws.data())
-                                   : static_cast<const void *>(_impl->localRootCbvBatchDraws.data());
-        std::memcpy(upload.mappedData, commands, static_cast<size_t>(byteCount));
-        auto *resource = static_cast<ID3D12Resource *>(upload.resource);
-        retainCommandListResource(_impl->pendingUploadResources, _impl->pendingUploadResourceSet, resource);
-        _impl->commandList->ExecuteIndirect(signature, commandCount, resource, upload.offset, nullptr, 0);
-    } else {
-        // Allocation/signature failures are intentionally non-fatal: preserve
-        // the original Root-CBV plus Draw sequence for this batch.
-        if (indexed) {
-            for (const auto &command : _impl->localRootCbvBatchIndexedDraws) {
-                _impl->commandList->SetGraphicsRootConstantBufferView(
-                    _impl->localRootCbvBatchRootParameterIndex, command.rootCbvGpuAddress);
-                _impl->commandList->DrawIndexedInstanced(
-                    command.arguments.IndexCountPerInstance, command.arguments.InstanceCount,
-                    command.arguments.StartIndexLocation, command.arguments.BaseVertexLocation,
-                    command.arguments.StartInstanceLocation);
-            }
-        } else {
-            for (const auto &command : _impl->localRootCbvBatchDraws) {
-                _impl->commandList->SetGraphicsRootConstantBufferView(
-                    _impl->localRootCbvBatchRootParameterIndex, command.rootCbvGpuAddress);
-                _impl->commandList->DrawInstanced(
-                    command.arguments.VertexCountPerInstance, command.arguments.InstanceCount,
-                    command.arguments.StartVertexLocation, command.arguments.StartInstanceLocation);
-            }
-        }
-    }
-
-    _numDrawCalls += commandCount;
-    if (indexed) {
-        for (const auto &command : _impl->localRootCbvBatchIndexedDraws) {
-            _numInstances += command.arguments.InstanceCount;
-            _numTriangles += (command.arguments.IndexCountPerInstance / 3U) * command.arguments.InstanceCount;
-        }
-        _impl->localRootCbvBatchIndexedDraws.clear();
-    } else {
-        for (const auto &command : _impl->localRootCbvBatchDraws) {
-            _numInstances += command.arguments.InstanceCount;
-            _numTriangles += (command.arguments.VertexCountPerInstance / 3U) * command.arguments.InstanceCount;
-        }
-        _impl->localRootCbvBatchDraws.clear();
-    }
     _impl->localRootCbvBatchReady = false;
     _impl->localRootCbvBatchDescriptorSet = nullptr;
+    _impl->localRootCbvBatchRootParameterCount = 0;
     _impl->localRootCbvBatchStaticSignature = 0;
+    _impl->localRootCbvBatchSamplerSignature = 0;
+    _impl->localRootCbvBatchInputAssemblerSignature = 0;
     _impl->localRootCbvBatchSamplerKey.clear();
+    _impl->localRootCbvBatchInputAssembler = nullptr;
+    _impl->localRootCbvBatchUpload = {};
+    _impl->localRootCbvBatchCommandSignature = nullptr;
+    _impl->localRootCbvBatchCommandStride = 0;
+    _impl->localRootCbvBatchCommandCapacity = 0;
+    _impl->localRootCbvBatchCommandCount = 0;
+    _impl->localRootCbvBatchUploadAttempted = false;
 }
 
 void CCD3D12CommandBuffer::bindInputAssembler(InputAssembler *ia) {
@@ -3446,8 +3514,11 @@ void CCD3D12CommandBuffer::bindInputAssembler(InputAssembler *ia) {
     auto *const previousInputAssembler = _impl->boundIA;
     const bool sameLogicalInputAssembler = previousInputAssembler == ia;
     auto *d3d12IA = static_cast<CCD3D12InputAssembler *>(ia);
-    d3d12IA->refreshBufferViews();
+    const bool bufferViewsChanged = d3d12IA->refreshBufferViews();
     _impl->boundIA = ia;
+    if (sameLogicalInputAssembler && !bufferViewsChanged) {
+        return;
+    }
     // refreshBufferViews() may observe a backing-resource version change even
     // when the IA views themselves are identical. Only an emitted IA view
     // change must split a deferred local Root-CBV indirect batch.
@@ -3698,46 +3769,49 @@ void CCD3D12CommandBuffer::drawWithInputAssemblerAndDescriptorSet(InputAssembler
                                                                    uint32_t set,
                                                                    DescriptorSet *descriptorSet,
                                                                    const DrawInfo &info) {
-    bindInputAssembler(inputAssembler);
     if (!_impl->commandList || set != D3D12_LOCAL_DESCRIPTOR_SET_INDEX || !descriptorSet ||
         !_impl->localRootCbvBatchActive || _type != CommandBufferType::PRIMARY) {
+        bindInputAssembler(inputAssembler);
         bindDescriptorSet(set, descriptorSet, 0, nullptr);
         draw(info);
         return;
     }
 
     auto *d3d12Set = static_cast<CCD3D12DescriptorSet *>(descriptorSet);
-    uint32_t rootCbvDescriptorOffset = 0;
-    uint32_t staticCbvSrvUavCount = 0;
-    uint32_t dynamicCbvDescriptors = 0;
-    uint32_t staticTextureDescriptors = 0;
-    uint32_t staticCbvSrvUavDescriptors = 0;
-    uint64_t staticSignature = 0;
-    const bool directBatchEligible =
-        d3d12Set->getCbvSrvUavPartition(rootCbvDescriptorOffset, staticCbvSrvUavCount) &&
-        d3d12Set->hasOnlyNullDynamicDescriptorSources() &&
-        d3d12Set->canReuseStaticCbvSrvUavResources();
-    if (directBatchEligible) {
-        d3d12Set->getStaticDescriptorAnalysis(dynamicCbvDescriptors, staticTextureDescriptors,
-                                               staticCbvSrvUavDescriptors, staticSignature);
+    if (tryAppendCompatibleLocalRootCbvDraw(inputAssembler, d3d12Set, info)) {
+        return;
     }
-    const bool hasExpectedLocalPartition = directBatchEligible && dynamicCbvDescriptors == 1 &&
-                                           staticSignature != 0 &&
-                                           staticCbvSrvUavDescriptors == staticCbvSrvUavCount;
-    const bool localStaticStateChanged =
-        !_impl->localRootCbvBatchReady || !hasExpectedLocalPartition ||
-        staticSignature != _impl->localRootCbvBatchStaticSignature ||
-        !_impl->localRootCbvBatchDescriptorSet ||
-        !d3d12Set->hasMatchingStaticCbvSrvUavResources(*_impl->localRootCbvBatchDescriptorSet) ||
-        d3d12Set->getSamplerTableKey() != _impl->localRootCbvBatchSamplerKey;
-    if (localStaticStateChanged) {
-        flushLocalRootCbvBatch();
-        // The first command of a compatible run still establishes all static
-        // root tables through the normal path. Later commands only encode b0.
-        bindDescriptorSet(set, descriptorSet, 0, nullptr);
+    bindInputAssembler(inputAssembler);
+    drawLocalRootCbvBatchInternal(info, d3d12Set);
+}
+
+void CCD3D12CommandBuffer::drawPackets(const DrawPacket *packets, uint32_t count,
+                                      uint32_t materialSet, uint32_t localSet) {
+    if (!packets || !count) {
+        return;
+    }
+    if (!_impl->commandList || !_impl->localRootCbvBatchActive ||
+        _type != CommandBufferType::PRIMARY) {
+        CommandBuffer::drawPackets(packets, count, materialSet, localSet);
+        return;
     }
 
-    drawLocalRootCbvBatchInternal(info, d3d12Set);
+    PipelineState *lastPipelineState = nullptr;
+    DescriptorSet *lastMaterialDescriptorSet = nullptr;
+    for (uint32_t i = 0; i < count; ++i) {
+        const DrawPacket &packet = packets[i];
+        if (packet.pipelineState != lastPipelineState) {
+            bindPipelineState(packet.pipelineState);
+            lastPipelineState = packet.pipelineState;
+            lastMaterialDescriptorSet = nullptr;
+        }
+        if (packet.materialDescriptorSet != lastMaterialDescriptorSet) {
+            bindDescriptorSet(materialSet, packet.materialDescriptorSet, 0, nullptr);
+            lastMaterialDescriptorSet = packet.materialDescriptorSet;
+        }
+        drawWithInputAssemblerAndDescriptorSet(packet.inputAssembler, localSet,
+                                               packet.localDescriptorSet, packet.drawInfo);
+    }
 }
 
 void CCD3D12CommandBuffer::drawLocalRootCbvBatchInternal(const DrawInfo &info,
@@ -3760,19 +3834,11 @@ void CCD3D12CommandBuffer::drawLocalRootCbvBatchInternal(const DrawInfo &info,
         flushLocalRootCbvBatch();
     }
 
-    if (!_impl->localRootCbvBatchReady) {
-        // The first draw of each compatible run establishes the static
-        // descriptor tables. Subsequent draws only append their local b0
-        // address to the indirect argument stream.
-        flushDescriptorSets();
-    }
-
-    uint64_t rootCbvGpuAddress = 0;
-    uint32_t rootParameterIndex = 0;
+    D3D12LocalRootCbvBatchData rootData;
+    uint32_t rootParameterIndices[D3D12_MAX_LOCAL_ROOT_CBVS]{};
     CCD3D12DescriptorSet *descriptorSet = nullptr;
-    uint64_t staticSignature = 0;
-    if (!captureLocalRootCbvBatchBinding(rootCbvGpuAddress, rootParameterIndex,
-                                         descriptorSet, staticSignature, directDescriptorSet)) {
+    if (!captureLocalRootCbvBatchBinding(rootData, rootParameterIndices,
+                                         descriptorSet, directDescriptorSet)) {
         flushLocalRootCbvBatch();
         if (directDescriptorSet) {
             bindDescriptorSet(D3D12_LOCAL_DESCRIPTOR_SET_INDEX, directDescriptorSet, 0, nullptr);
@@ -3780,46 +3846,45 @@ void CCD3D12CommandBuffer::drawLocalRootCbvBatchInternal(const DrawInfo &info,
         draw(info);
         return;
     }
-
     if (_impl->localRootCbvBatchReady) {
-        if (rootParameterIndex != _impl->localRootCbvBatchRootParameterIndex ||
+        if (rootData.rootCbvCount != _impl->localRootCbvBatchRootParameterCount ||
+            std::memcmp(rootParameterIndices, _impl->localRootCbvBatchRootParameterIndices,
+                        rootData.rootCbvCount * sizeof(uint32_t)) != 0 ||
             _impl->boundRootSignature != _impl->localRootCbvBatchRootSignature ||
-            staticSignature != _impl->localRootCbvBatchStaticSignature ||
+            rootData.staticSignature != _impl->localRootCbvBatchStaticSignature ||
             !descriptorSet || !_impl->localRootCbvBatchDescriptorSet ||
             !descriptorSet->hasMatchingStaticCbvSrvUavResources(*_impl->localRootCbvBatchDescriptorSet) ||
             descriptorSet->getSamplerTableKey() != _impl->localRootCbvBatchSamplerKey) {
             flushLocalRootCbvBatch();
-            if (directDescriptorSet) {
-                bindDescriptorSet(D3D12_LOCAL_DESCRIPTOR_SET_INDEX, directDescriptorSet, 0, nullptr);
-            }
-            drawLocalRootCbvBatchInternal(info, directDescriptorSet);
-            return;
         }
-    } else {
+    }
+
+    if (!_impl->localRootCbvBatchReady) {
+        // The first draw of each compatible run establishes the static tables.
+        // Later draws only append their already-prepared root-CBV address.
+        if (directDescriptorSet) {
+            bindDescriptorSet(D3D12_LOCAL_DESCRIPTOR_SET_INDEX, directDescriptorSet, 0, nullptr);
+        }
+        flushDescriptorSets();
         _impl->localRootCbvBatchReady = true;
         _impl->localRootCbvBatchIndexed = indexed;
-        _impl->localRootCbvBatchRootParameterIndex = rootParameterIndex;
+        _impl->localRootCbvBatchRootParameterCount = rootData.rootCbvCount;
+        std::memcpy(_impl->localRootCbvBatchRootParameterIndices, rootParameterIndices,
+                    rootData.rootCbvCount * sizeof(uint32_t));
         _impl->localRootCbvBatchRootSignature = _impl->boundRootSignature;
         _impl->localRootCbvBatchDescriptorSet = descriptorSet;
-        _impl->localRootCbvBatchStaticSignature = staticSignature;
+        _impl->localRootCbvBatchInputAssembler = _impl->boundIA;
+        _impl->localRootCbvBatchStaticSignature = rootData.staticSignature;
+        _impl->localRootCbvBatchSamplerSignature = descriptorSet->getSamplerSignature();
+        _impl->localRootCbvBatchInputAssemblerSignature = ia->getD3D12ViewSignature();
         _impl->localRootCbvBatchSamplerKey = descriptorSet->getSamplerTableKey();
     }
 
-    if (indexed) {
-        auto &command = _impl->localRootCbvBatchIndexedDraws.emplace_back();
-        command.rootCbvGpuAddress = rootCbvGpuAddress;
-        command.arguments.IndexCountPerInstance = info.indexCount;
-        command.arguments.InstanceCount = std::max<uint32_t>(info.instanceCount, 1U);
-        command.arguments.StartIndexLocation = info.firstIndex;
-        command.arguments.BaseVertexLocation = info.vertexOffset;
-        command.arguments.StartInstanceLocation = info.firstInstance;
-    } else {
-        auto &command = _impl->localRootCbvBatchDraws.emplace_back();
-        command.rootCbvGpuAddress = rootCbvGpuAddress;
-        command.arguments.VertexCountPerInstance = info.vertexCount;
-        command.arguments.InstanceCount = std::max<uint32_t>(info.instanceCount, 1U);
-        command.arguments.StartVertexLocation = info.firstVertex;
-        command.arguments.StartInstanceLocation = info.firstInstance;
+    if (!appendLocalRootCbvBatchCommand(info, rootData.gpuAddresses, rootData.rootCbvCount)) {
+        // A full upload segment was submitted above. Re-enter once to establish
+        // the next compatible segment and preserve this draw.
+        drawLocalRootCbvBatchInternal(info, directDescriptorSet);
+        return;
     }
 
     // The root-CBV address is encoded in the pending indirect command, so a

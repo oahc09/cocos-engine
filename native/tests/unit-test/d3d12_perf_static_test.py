@@ -281,7 +281,7 @@ def test_local_b0_root_cbv_moves_only_the_changing_uniform_out_of_the_static_tab
     assert "D3D12_ROOT_PARAMETER_TYPE_CBV" in layout
     assert "getLocalRootCbvParameterIndex" in layout_header
     assert "binding.binding == 0" in layout
-    assert "binding.count == 1" in layout
+    assert "binding.count > 0" in layout
     assert "staticDescriptorChanged" in descriptor_set
     assert "SetGraphicsRootConstantBufferView" in flush
     assert "localRootCbvGpuAddress" in flush
@@ -298,7 +298,7 @@ def test_local_root_cbv_writes_all_local_cbvs_only_to_the_shader_visible_heap() 
 
     assert "updateForLocalRootCbv" in descriptor_header
     assert "void CCD3D12DescriptorSet::updateForLocalRootCbv" in descriptor_set
-    assert "slot.cbvSrvUavOffset == _impl->staticDescriptorMetadata.rootCbvDescriptorOffset" in descriptor_set
+    assert "metadata.rootCbvDescriptorOffsets[i] == offset" in descriptor_set
     assert "skipStaticCbvStaging" in descriptor_set
     assert "set->updateForLocalRootCbv(true);" in flush
     assert "copyLocalStaticCbvRange" in flush
@@ -316,12 +316,13 @@ def test_local_root_cbv_split_accepts_b0_at_an_arbitrary_descriptor_offset() -> 
         "bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental",
     )
 
-    assert "rootCbvDescriptorOffset" in descriptor_header
+    assert "rootCbvDescriptorOffsets" in descriptor_set
+    assert "getLocalRootCbvDescriptorOffset" in descriptor_header
     assert "staticCbvSrvUavTableCount" in descriptor_set
     assert "copyLocalStaticCbvTable" in flush
     # The static table is compacted by walking every source slot and excluding
     # the root-CBV offset; it must not rely on b0 being the first descriptor.
-    assert "sourceOffset == rootCbvOffset" in flush
+    assert "sourceOffset == binding.localRootCbvDescriptorOffsets[rootCbv]" in flush
     assert "destinationOffset == descriptorOffset + binding.staticCbvSrvUavCount" in flush
     assert "if (!localRootCbvPrefixSeen ||" not in layout
 
@@ -368,7 +369,7 @@ def test_local_root_cbv_fast_validation_skips_staging_heap_work() -> None:
     )
 
     assert update.index("if (skipStaticCbvStaging)") < update.index("_impl->ensureStagingAllocations(device)")
-    assert "slot.cbvSrvUavOffset == _impl->staticDescriptorMetadata.rootCbvDescriptorOffset" in update
+    assert "isLocalRootCbvOffset(slot.cbvSrvUavOffset)" in update
     assert "if (_isDirty) {\n            forceUpdate();\n        }\n        return;" in update
 
 
@@ -857,12 +858,14 @@ def test_executed_bundle_lifetime_follows_primary_submission_fence() -> None:
 
 def test_render_queue_skips_only_redundant_pipeline_and_material_bind_calls() -> None:
     queue = read("../pipeline/RenderQueue.cpp")
+    queue_header = read("../pipeline/RenderQueue.h")
 
-    assert "lastPipelineState" in queue
-    assert "lastMaterialDescriptorSet" in queue
-    assert "if (!useDrawBatch || pso != lastPipelineState)" in queue
-    assert "lastMaterialDescriptorSet = nullptr" in queue
-    assert "if (!useDrawBatch || descriptorSet != lastMaterialDescriptorSet)" in queue
+    assert "gfx::DrawPacketList _drawPackets" in queue_header
+    assert "_drawPackets.clear()" in queue
+    assert "_drawPackets.reserve(_queue.size())" in queue
+    assert "_drawPackets.push_back" in queue
+    assert "cmdBuff->drawPackets(_drawPackets.data()," in queue
+    assert "cmdBuff->drawWithInputAssemblerAndDescriptorSet(" in queue
 
 
 def test_d3d12_owns_draw_batch_input_assembler_compatibility() -> None:
@@ -871,7 +874,7 @@ def test_d3d12_owns_draw_batch_input_assembler_compatibility() -> None:
 
     assert "hasSameBatchableInputAssemblyState" not in queue
     assert "lastBatchInputAssembler" not in queue
-    assert "cmdBuff->drawWithInputAssemblerAndDescriptorSet(" in queue
+    assert "cmdBuff->drawPackets(" in queue
     assert "bindInputAssembler(inputAssembler);" in command_buffer
     assert "std::memcmp(_impl->boundVertexBufferViews, vbViews" in command_buffer
     assert "std::memcmp(&_impl->boundIndexBufferView, &ibView" in command_buffer
@@ -888,7 +891,7 @@ def test_local_root_cbv_batch_fuses_local_set_selection_with_draw_encoding() -> 
     fused_signature = "drawWithInputAssemblerAndDescriptorSet(InputAssembler *inputAssembler,"
     assert fused_signature in command_validator
     assert fused_signature in command_d3d12
-    assert "cmdBuff->drawWithInputAssemblerAndDescriptorSet(" in queue
+    assert "cmdBuff->drawPackets(" in queue
     assert "drawLocalRootCbvBatchInternal(info, d3d12Set)" in command_d3d12
     assert "hasMatchingStaticCbvSrvUavResources" in command_d3d12
 
@@ -902,13 +905,14 @@ def test_local_root_cbv_batch_is_scoped_and_preserves_immediate_fallback() -> No
     assert "cmdBuff->supportsDrawBatch()" in queue
     assert "cmdBuff->beginDrawBatch()" in queue
     assert "cmdBuff->endDrawBatch()" in queue
-    assert "cmdBuff->drawWithInputAssemblerAndDescriptorSet(" in queue
+    assert "cmdBuff->drawPackets(" in queue
     assert "const bool useDrawBatch = !enableOcclusionQuery && cmdBuff->supportsDrawBatch()" in queue
     assert "captureLocalRootCbvBatchBinding" in command_header
     assert "flushLocalRootCbvBatch" in command_buffer
     assert "hasMatchingStaticCbvSrvUavResources" in command_buffer
     assert "getSamplerTableKey() != _impl->localRootCbvBatchSamplerKey" in command_buffer
-    assert "ExecuteIndirect(signature, commandCount" in command_buffer
+    assert "_impl->commandList->ExecuteIndirect(" in command_buffer
+    assert "_impl->localRootCbvBatchCommandSignature" in command_buffer
     assert "DrawIndexedInstanced" in command_buffer
     assert "DrawInstanced" in command_buffer
     assert "getOrCreateLocalRootCbvIndirectSignature" in device
@@ -937,6 +941,94 @@ def test_draw_batch_contract_is_backend_neutral_and_forwarded() -> None:
     assert "return _actor->supportsDrawBatch();" in command_validator
     assert "supportsDrawBatch" not in vulkan_header
     assert "supportsDrawBatch" not in gles3_header
+
+
+def test_contiguous_draw_packet_contract_has_order_preserving_fallback() -> None:
+    definitions = read("../gfx-base/GFXDef-common.h")
+    command_base = read("../gfx-base/GFXCommandBuffer.h")
+    fallback = function_body(command_base, "virtual void drawPackets")
+
+    assert "struct DrawPacket" in definitions
+    assert "PipelineState *pipelineState" in definitions
+    assert "DescriptorSet *materialDescriptorSet" in definitions
+    assert "InputAssembler *inputAssembler" in definitions
+    assert "DescriptorSet *localDescriptorSet" in definitions
+    assert "DrawInfo drawInfo" in definitions
+    assert "virtual void drawPackets(const DrawPacket *packets, uint32_t count," in command_base
+    assert "for (uint32_t i = 0; i < count; ++i)" in fallback
+    assert "packet.pipelineState != lastPipelineState" in fallback
+    assert "lastMaterialDescriptorSet = nullptr" in fallback
+    assert "packet.materialDescriptorSet != lastMaterialDescriptorSet" in fallback
+    assert "drawWithInputAssemblerAndDescriptorSet(packet.inputAssembler, localSet," in fallback
+
+
+def test_draw_packet_array_crosses_validator_and_agent_once() -> None:
+    validator_header = read("../gfx-validator/CommandBufferValidator.h")
+    validator_source = read("../gfx-validator/CommandBufferValidator.cpp")
+    agent_header = read("../gfx-agent/CommandBufferAgent.h")
+    agent_source = read("../gfx-agent/CommandBufferAgent.cpp")
+    validator_batch = function_body(validator_source, "void CommandBufferValidator::drawPackets")
+    agent_batch = function_body(agent_source, "void CommandBufferAgent::drawPackets")
+
+    assert "void drawPackets(const DrawPacket *packets, uint32_t count," in validator_header
+    assert "ccstd::vector<DrawPacket> _actorDrawPackets" in validator_header
+    assert "_actorDrawPackets.resize(count)" in validator_batch
+    assert "static_cast<PipelineStateValidator *>(packet.pipelineState)->getActor()" in validator_batch
+    assert "static_cast<DescriptorSetValidator *>(packet.materialDescriptorSet)->getActor()" in validator_batch
+    assert "static_cast<InputAssemblerValidator *>(packet.inputAssembler)->getActor()" in validator_batch
+    assert "_actor->drawPackets(_actorDrawPackets.data(), count, materialSet, localSet)" in validator_batch
+    assert "_actor->drawWithInputAssemblerAndDescriptorSet" not in validator_batch
+
+    assert "void drawPackets(const DrawPacket *packets, uint32_t count," in agent_header
+    assert "_messageQueue->allocate<DrawPacket>(count)" in agent_batch
+    assert "static_cast<PipelineStateAgent *>(packet.pipelineState)->getActor()" in agent_batch
+    assert "static_cast<DescriptorSetAgent *>(packet.localDescriptorSet)->getActor()" in agent_batch
+    assert "actor->drawPackets(packets, count, materialSet, localSet)" in agent_batch
+
+
+def test_d3d12_consumes_draw_packet_array_inside_one_backend_call() -> None:
+    command_header = read("D3D12CommandBuffer.h")
+    command_source = read("D3D12CommandBuffer.cpp")
+    batch = function_body(command_source, "void CCD3D12CommandBuffer::drawPackets")
+
+    assert "void drawPackets(const DrawPacket *packets, uint32_t count," in command_header
+    assert "for (uint32_t i = 0; i < count; ++i)" in batch
+    assert "packet.pipelineState != lastPipelineState" in batch
+    assert "lastMaterialDescriptorSet = nullptr" in batch
+    assert "packet.materialDescriptorSet != lastMaterialDescriptorSet" in batch
+    assert "drawWithInputAssemblerAndDescriptorSet(packet.inputAssembler, localSet," in batch
+    assert "CommandBuffer::drawPackets" in batch
+
+
+def test_controlled_auto_instancing_is_count_agnostic_and_fail_closed() -> None:
+    instance_header = read("../pipeline/InstancedBuffer.h")
+    instance_source = read("../pipeline/InstancedBuffer.cpp")
+    queue_header = read("../pipeline/RenderQueue.h")
+    queue_source = read("../pipeline/RenderQueue.cpp")
+    forward_stage = read("../pipeline/forward/ForwardStage.cpp")
+    pass_header = read("../../scene/Pass.h")
+    pass_source = read("../../scene/Pass.cpp")
+
+    assert "getControlledBatchCount" in instance_header
+    assert "(instanceCount + MAX_CAPACITY - 1) / MAX_CAPACITY" in instance_header
+    for count, expected in ((1023, 1), (1024, 1), (1025, 2), (2500, 3),
+                            (3000, 3), (4095, 4), (4096, 4), (4097, 5)):
+        assert (count + 1024 - 1) // 1024 == expected
+
+    assert "mergeWorldMatrix" in instance_header
+    assert "getPendingInstanceCount" in instance_header
+    assert "instance.drawInfo.instanceCount >= MAX_CAPACITY" in instance_source
+    assert "struct AutoInstancedRun" in queue_header
+    assert "bool ready{false}" in queue_header
+    assert "pendingInstanceCount == run.count" in queue_source
+    assert "if (!run.ready)" in queue_source
+    assert "flushDrawPackets" in queue_source
+    assert "prepareAutoInstancing" in queue_source
+    assert "prepareAutoInstancing" in forward_stage
+    assert 'program.find("legacy/standard|") == 0' in queue_source
+    assert "getShaderVariantWithOverrides" in pass_header
+    assert "MacroRecord defines = _defines" in pass_source
+    assert "2500" not in instance_header + instance_source + queue_header + queue_source
 
 
 def test_d3d12_runtime_selection_is_explicit_and_precedes_vulkan() -> None:
@@ -1032,6 +1124,10 @@ if __name__ == "__main__":
         test_local_root_cbv_batch_fuses_local_set_selection_with_draw_encoding,
         test_local_root_cbv_batch_is_scoped_and_preserves_immediate_fallback,
         test_draw_batch_contract_is_backend_neutral_and_forwarded,
+        test_contiguous_draw_packet_contract_has_order_preserving_fallback,
+        test_draw_packet_array_crosses_validator_and_agent_once,
+        test_d3d12_consumes_draw_packet_array_inside_one_backend_call,
+        test_controlled_auto_instancing_is_count_agnostic_and_fail_closed,
         test_d3d12_runtime_selection_is_explicit_and_precedes_vulkan,
         test_win32_platform_is_the_only_windows_frame_pacer,
         test_frame_slot_reuse_keeps_the_cbv_srv_uav_heap_object_stable,
