@@ -4,7 +4,9 @@
 
 当前连续 `DrawPacket[]` 已把目标场景从约 45 FPS 提升到 50.20 FPS，但稳态分段计时仍显示每帧约 2.8～2.9 ms 消耗在 2500 个逻辑对象的 RenderQueue 组包、Validator 解包和 D3D12 packet 消费。GPU fence 等待接近 0，D3D12 后端也已经用 `ExecuteIndirect` 合并原生提交，因此继续微调描述符或哈希无法消除 CPU 的 O(N) 对象遍历。
 
-本设计在不要求业务显式设置 `USE_INSTANCING` 的情况下，将严格兼容的连续 opaque draw run 转换为硬件实例化绘制。目标场景的 2500 个相同方块应被压缩为至多 `ceil(2500 / 1024) = 3` 个实例化 draw；任何无法证明兼容的对象继续使用现有 DrawPacket 路径。
+本设计在不要求业务显式设置 `USE_INSTANCING` 的情况下，将严格兼容的连续 opaque draw run 转换为硬件实例化绘制。对象数量记为运行时值 `N`，不得假设或硬编码为 2500。任意兼容 run 应按 `MAX_CAPACITY` 分块为 `ceil(N / MAX_CAPACITY)` 个实例化 draw；任何无法证明兼容的对象继续使用现有 DrawPacket 路径。
+
+当前程序从 2500 运行时增量调整到 3000 后仍能完整渲染，说明 3000 不是 D3D12 稳态 draw 上限。用户报告的“以 3000 运行时无内容”必须作为冷启动/一次性初始化边界问题单独防护：自动实例化不能依赖首次观察到的目标数量，也不能用固定长度数组、单块上传或单个 `InstancedItem` 表示整个 run。
 
 性能验收沿用既定规则：可见前台运行，丢弃前 60 条 FPS 日志，取后续 30 条平均值，目标 `>=59 FPS`。
 
@@ -41,7 +43,7 @@ RenderQueue 使用它请求 `USE_INSTANCING=true` variant。若编译失败或 v
 - pass 的原 batching scheme 是 `NONE`，program 是内置 `standard`；
 - model 类型是 `DEFAULT`，排除 skinning、baked skinning、morph、粒子及 JS 自定义 model；
 - defines/patches 未启用 lightmap、light probe、reflection probe、skinning、morph 或其他需要逐对象 local 数据的功能；
-- 临时 shader 的 instanced attributes 恰好是 `a_matWorld0/1/2` 三个 `RGBA32F` 输入，不接受额外实例属性；
+- 临时 shader 的 instanced attributes 必须是 `a_matWorld0/1/2` 三个 `RGBA32F` 世界矩阵输入，并可额外包含 `CC_RECEIVE_SHADOW` 所需的 `a_localShadowBiasAndProbeId`；不接受 lightmap、reflection probe、light probe、skinning、morph 或自定义实例属性；
 - 连续对象具有相同 Pass、原 shader、材质 DescriptorSet、primitive、attributes hash、DrawInfo、VB/IB 资源序列；
 - 除 `UBOLocal` 世界矩阵来源外，local DescriptorSet 中的 buffer、texture、sampler 资源完全一致；
 - shadow bias、normal bias、receive-shadow 和 directional-light 等影响 local 数据的 Model 状态完全一致；
@@ -51,9 +53,11 @@ RenderQueue 使用它请求 `USE_INSTANCING=true` variant。若编译失败或 v
 
 ### 3. 实例数据与缓冲生命周期
 
-扩展 `InstancedBuffer`，增加只接收 world matrix 的受控 merge 入口。它直接生成 48 字节的三行 `vec4` 实例数据，不修改 `SubModel::InstancedAttributeBlock`，因此不会让 Model 停止更新其他非实例化 pass 的 local UBO。
+扩展 `InstancedBuffer`，增加受控 merge 入口。基础布局直接生成 48 字节的三行 `vec4` 世界矩阵；若 variant 含 `a_localShadowBiasAndProbeId`，则追加 16 字节由 Model shadow bias、normal bias 和 probe id 组成的数据。不修改 `SubModel::InstancedAttributeBlock`，因此不会让 Model 停止更新其他非实例化 pass 的 local UBO。
 
-沿用现有 `INITIAL_CAPACITY=32`、`MAX_CAPACITY=1024`、DEVICE vertex buffer 和 `updateBuffer()` 上传机制。实例缓冲在 render pass 之前上传，仍由现有 command buffer/fence 资源路径管理。
+沿用现有 `INITIAL_CAPACITY=32`、`MAX_CAPACITY=1024`、DEVICE vertex buffer 和 `updateBuffer()` 上传机制。每个 run 持有零到多个 `InstancedItem`，每项的 `instanceCount` 必须在 `[1, MAX_CAPACITY]`；run 的所有项都必须上传并绘制，且其计数总和必须严格等于原 run 长度。实例缓冲在 render pass 之前上传，仍由现有 command buffer/fence 资源路径管理。
+
+分块过程仅使用运行时 run 长度计算，不设置全局对象上限。若任一块的 CPU 内存、VB、IA、shader variant 或上传准备失败，则该 run 在开始跳过原 draw 之前整体回退到 DrawPacket；禁止出现“已跳过原对象但实例 draw 未准备完整”的半提交状态。
 
 ### 4. RenderQueue 数据流与顺序
 
@@ -61,12 +65,12 @@ RenderQueue 使用它请求 `USE_INSTANCING=true` variant。若编译失败或 v
 
 1. 清理上一帧 run 计数但保留缓冲容量；
 2. 扫描排序后的 `_queue`，只合并连续且兼容的 run；
-3. 对长度达到阈值的 run 建立 `AutoInstancedRun {first, count, buffer}`；
-4. 将 run 的实例数据上传；
-5. `recordCommandBuffer()` 遍历原队列时，在 `first` 位置绘制实例 run，并跳过其余成员；
+3. 对长度达到阈值的 run 建立 `AutoInstancedRun {first, count, buffer, ready}`，并按容量循环生成全部块；
+4. 校验各块实例数总和等于 `count` 后，将 run 的全部实例数据上传并置 `ready=true`；
+5. `recordCommandBuffer()` 遍历原队列时，只对 `ready` run 在 `first` 位置绘制全部实例块，并跳过其余成员；
 6. 非实例化项继续写入连续 DrawPacket 数组。
 
-实例 draw 保留在原排序位置，不把所有实例对象提前或延后，从而保持 opaque 队列的状态/深度顺序。一个超过 1024 个实例的 run 由 `InstancedBuffer` 自动拆成多个 draw。
+实例 draw 保留在原排序位置，不把所有实例对象提前或延后，从而保持 opaque 队列的状态/深度顺序。一个超过 1024 个实例的 run 由 `InstancedBuffer` 自动拆成多个 draw，数量没有 2500 特例。例如 3000 必须拆为 `1024 + 1024 + 952`，而不是分配单个 3000 实例块或截断尾部。
 
 ### 5. 回退与失效
 
@@ -90,8 +94,11 @@ Pass、shader、geometry、descriptor 或 model 状态每帧重新参与严格�
 
 - shader variant overrides 不修改 Pass 原 defines；
 - 自动路径必须受 D3D12、opaque、batching NONE 和 standard 白名单保护；
-- layout 只接受三个 world-matrix instanced attributes；
+- layout 只接受三个 world-matrix instanced attributes，以及可选的 receive-shadow 数据；
 - run 阈值和连续性明确；
+- 数量计算不含 2500 常量，分块总数使用 `ceil(N / MAX_CAPACITY)`；
+- 对 `N=1023/1024/1025/2500/3000/4095/4096/4097` 验证块计数和实例总数完全一致；
+- 任一块准备失败时整个 run 回退，原 DrawPacket 一个不少，不能留下空帧；
 - instanced run 在原位置提交，其余对象仍进入 DrawPacket；
 - ForwardStage 在 render pass 前触发实例 buffer 上传；
 - Vulkan/GLES 路径不会进入自动实例化。
@@ -101,7 +108,7 @@ Pass、shader、geometry、descriptor 或 model 状态每帧重新参与严格�
 ### 构建与运行
 
 1. 构建 `D:\Work\CocosProjects\cocos-test-projects\build\windows\proj\test-cases.sln`，Debug|x64。
-2. 开启 D3D12 Debug Layer 前台运行，确认 2500 Boxes/Batched 画面正确；扫描 D3D12/device/HRESULT/resource-state/descriptor 错误为 0。
+2. 开启 D3D12 Debug Layer 前台运行，分别冷启动并确认 2500、3000 Boxes/Batched 画面正确；再运行时跨过 1024 分块边界，扫描 D3D12/device/HRESULT/resource-state/descriptor 错误为 0。
 3. 关闭 Debug Layer重新前台运行，丢弃 60 条、统计后续 30 条平均 FPS。
 4. 只有平均值 `>=59` 才达到性能目标；否则保留正确性改造并继续依据分段数据优化，不扩大 eligibility 猜测范围。
 
