@@ -463,6 +463,7 @@ void Root::frameMove(float deltaTime, int32_t totalFrames) { // NOLINT
         _fps = _frameCount;
         _frameCount = 0;
         _fpsTime = 0.0;
+        CC_LOG_INFO("Root::frameMove frame[%d] fps:%d", totalFrames, _fps);
     }
 
     if (_xr) {
