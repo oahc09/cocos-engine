@@ -1,1022 +1,501 @@
-# Error Log
+## [ERR-20260729-002] stale-native-cmake-cache-mixed-module-roots
 
-## [ERR-20260606-001] concurrent-header-edit-during-build
-
-**Logged**: 2026-06-06T00:00:00+08:00
-**Priority**: low
-**Status**: resolved
+**Logged**: 2026-07-29
+**Priority**: medium
+**Status**: unresolved
 **Area**: build
 
 ### Summary
-A Release build briefly failed while an unrelated untracked header was being edited concurrently.
+`cmake --build native/build --config Debug --target cocos_engine` could not reconfigure because the existing cache points at CMake 3.30 modules while the active CMake is 4.3.
 
-### Details
-`Engine.cpp` included `CocosTracer.h`; the compiler observed an older `scene/Node.h` include, while the file read immediately afterward already contained the valid `core/scene-graph/Node.h` path. Re-running the same build succeeded.
+### Error
+```
+CMake Error: File D:/Program Files/CMake/share/cmake-3.30/Modules/CMakeSystem.cmake.in does not exist.
+include could not find requested file:
+  D:/Program Files/CMake/share/cmake-3.30/Modules/CMakeDetermineCompiler.cmake
+```
 
-### Suggested Action
-When a build error references a concurrently edited untracked file, re-read the file and retry before attributing the failure to the current backend changes.
+### Context
+- The build tree was regenerated automatically because its stamp was out of date.
+- Reconfiguring or deleting the shared build directory was intentionally avoided during a read-only code review.
+- Use the authoritative test-project solution or a fresh isolated build directory for later integration verification.
+
+### Suggested Fix
+Reconfigure an isolated build directory with one CMake installation, or build the known integration solution without forcing this stale cache to regenerate.
 
 ### Metadata
-- Source: command_failure
-- Related Files: native/cocos/engine/CocosTracer.h
-- Tags: cmake, concurrent-edit, transient
+- Reproducible: yes
+- Related Files: native/build/CMakeCache.txt
 
 ---
 
-## [ERR-20260712-005] oversized-apply-patch-context-mismatch
+## [ERR-20260717-001] powershell_rg_glob
 
-**Logged**: 2026-07-12T13:10:00+08:00
+**Logged**: 2026-07-17T22:51:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+PowerShell did not expand `D3D12*.cpp` globs passed directly to `rg`.
+
+### Error
+```
+rg: native/cocos/renderer/gfx-d3d12/D3D12*.cpp: 文件名、目录名或卷标语法不正确。 (os error 123)
+```
+
+### Context
+The failed read-only search attempted to find D3D12 timestamp instrumentation.
+
+### Resolution
+Search the `gfx-d3d12` directory directly (or pass explicit files) instead of
+using a PowerShell glob as an `rg` path argument.
+
+### Metadata
+- Reproducible: yes
+- Related Files: native/cocos/renderer/gfx-d3d12
+- Recurrence-Count: 6
+- Last-Seen: 2026-07-29
+- See Also: ERR-20260718-008, ERR-20260719-020
+
+---
+
+## [ERR-20260717-004] powershell_multiple_match
+
+**Logged**: 2026-07-17T23:13:30+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: config
+
+### Summary
+PowerShell `Select-String` returned multiple CMake match line numbers.
+
+### Error
+```
+System.Object[] does not contain a method named 'op_Subtraction'
+```
+
+### Resolution
+Select the first matching line number explicitly before arithmetic.
+
+### Metadata
+- Reproducible: yes
+- Related Files: native/CMakeLists.txt
+
+---
+
+## [ERR-20260718-005] wpr_cpu_policy_denied
+
+**Logged**: 2026-07-18T00:41:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+Windows Performance Recorder CPU sampling is disabled by local system policy.
+
+### Error
+```
+Failed to enable the policy to profile system performance.
+Profile Id: CPU.Light.File
+Error code: 0xc5585011
+```
+
+### Context
+Attempted a read-only CPU sampling trace for `test-cases.exe` after the
+renderer's own detailed timers proved intrusive.
+
+### Resolution
+Do not retry WPR CPU sampling in this environment. Use the existing
+default-off renderer counters or obtain an explicitly authorized machine
+policy change before relying on ETW CPU stacks.
+
+### Metadata
+- Reproducible: yes
+- Related Files: d3d12_perf_records/round-71
+
+---
+
+## [ERR-20260717-003] apply_patch_context_drift
+
+**Logged**: 2026-07-17T23:13:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: config
+
+### Summary
+The CMake insertion patch used an incomplete end-of-block context.
+
+### Error
+```
+apply_patch verification failed: Failed to find expected lines
+```
+
+### Context
+Adding a source-local Debug O2 list for the measured SceneCulling candidate.
+
+### Resolution
+Read the exact `RENDER_QUEUE_DEBUG_OPTIMIZED_SOURCES` neighborhood and insert
+the independent block before its real enclosing `endif()`.
+
+### Metadata
+- Reproducible: no
+- Related Files: native/CMakeLists.txt
+
+---
+
+## [ERR-20260717-002] pipeline_stage_path_assumption
+
+**Logged**: 2026-07-17T23:02:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+Assumed forward-stage source paths that do not exist in this engine layout.
+
+### Error
+```
+native/cocos/renderer/pipeline/ForwardStage.cpp: 系统找不到指定的文件。
+```
+
+### Context
+Read-only source exploration before considering a new top-level frame timer.
+
+### Resolution
+Use `rg --files native/cocos/renderer` to establish actual source locations
+before requesting function bodies.
+
+### Metadata
+- Reproducible: yes
+- Related Files: native/cocos/renderer
+
+---
+
+## [ERR-20260718-001] d3d12_definition_header_path_assumption
+
+**Logged**: 2026-07-18T00:00:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+A combined D3D12 diagnostics search included a nonexistent header path.
+
+### Error
+```
+rg: native/cocos/renderer/gfx-d3d12/D3D12Def.h: 系统找不到指定的文件。
+```
+
+### Context
+Read-only exploration of the compile-time performance-counter definition and
+descriptor submission implementation.
+
+### Resolution
+Search only confirmed source files, or first enumerate an unfamiliar D3D12
+directory with `rg --files` before adding a header path to a multi-file query.
+
+### Metadata
+- Reproducible: yes
+- Related Files: native/cocos/renderer/gfx-d3d12/D3D12Device.h
+
+---
+
+## [ERR-20260718-002] pending_buffer_fast_path_patch_context
+
+**Logged**: 2026-07-18T06:30:00+08:00
 **Priority**: low
 **Status**: resolved
 **Area**: backend
 
 ### Summary
-One oversized patch mixing a helper insertion with many repeated descriptor-handle replacements failed context verification.
+A multi-file fast-path patch used an incomplete command-buffer call-site context.
 
 ### Error
 ```
-apply_patch verification failed: Failed to find expected lines in D3D12DescriptorSet.cpp
+apply_patch verification failed: Failed to find expected lines in D3D12CommandBuffer.cpp
 ```
 
 ### Context
-- Operation: add D3D12 descriptor staging-heap recovery and replace all cached handle uses.
-- The patch was rejected atomically, so the production file remained unchanged.
-
-### Suggested Fix
-Split structural insertions from repetitive mechanical replacements and verify each step independently.
-
-### Metadata
-- Reproducible: yes
-- Related Files: native/cocos/renderer/gfx-d3d12/D3D12DescriptorSet.cpp
+Adding a device-owned pending-buffer flag after a diagnostic confirmed repeated
+empty queue-drain calls in the D3D12 draw loop.
 
 ### Resolution
-- **Resolved**: 2026-07-12T13:10:00+08:00
-- **Notes**: Continued with small atomic patches.
+No files were changed by the failed atomic patch. Re-read every exact call
+site and apply the header, device, and command-buffer edits as separate small
+patches.
+
+### Metadata
+- Reproducible: no
+- Related Files: native/cocos/renderer/gfx-d3d12/D3D12CommandBuffer.cpp
 
 ---
 
-## [ERR-20260712-004] recursive-msbuild-discovery-timeout
+## [ERR-20260718-003] github_raw_stream_timeout
 
-**Logged**: 2026-07-12T11:15:00+08:00
+**Logged**: 2026-07-18T07:00:00+08:00
 **Priority**: low
 **Status**: resolved
-**Area**: infra
+**Area**: docs
 
 ### Summary
-Recursively scanning the complete Visual Studio installation tree for `MSBuild.exe` exceeded the command timeout.
+Streaming several GitHub raw source files through the shell did not return.
 
 ### Error
 ```
-Exit code: 124
-command timed out after 20030 milliseconds
+curl.exe raw.githubusercontent.com request produced no output for 70 seconds
+and was terminated.
 ```
 
 ### Context
-- Operation: locate MSBuild for the D3D12 unit-test build.
-
-### Suggested Fix
-Use `vswhere.exe -find MSBuild\\**\\Bin\\MSBuild.exe` or check known Visual Studio edition paths directly.
-
-### Metadata
-- Reproducible: yes
-- Related Files: build/unit-test-d3d12/src/CocosTest.vcxproj
+Read-only comparison of DiligentCore's D3D12 descriptor and command-context
+implementation with the local renderer.
 
 ### Resolution
-- **Resolved**: 2026-07-12T11:15:00+08:00
-- **Notes**: Switched to fixed-path and vswhere discovery.
+Use the GitHub file pages and browser source retrieval for individual files;
+do not batch raw-host requests through a single shell pipeline.
+
+### Metadata
+- Reproducible: unknown
+- Related Files: external DiligentCore GraphicsEngineD3D12 sources
 
 ---
 
-## [ERR-20260712-003] rg-no-match-nonzero
+## [ERR-20260718-004] round78_measurement_path_assumption
 
-**Logged**: 2026-07-12T11:10:00+08:00
+**Logged**: 2026-07-18T07:10:00+08:00
 **Priority**: low
 **Status**: resolved
-**Area**: infra
+**Area**: tests
 
 ### Summary
-An exploratory `rg` command with no matches returned exit code 1 and made an otherwise successful compound read appear failed.
+An inspection assumed an old nested measurement-file path that does not exist.
 
 ### Error
 ```
-Exit code: 1
+Get-Content failed because round-78 stores measurement files directly in the
+round directory with label-prefixed filenames.
 ```
 
 ### Context
-- Operation: search for existing `d3d12sdklayers` usage after successfully locating `waitForGpu`.
-- For ripgrep, exit code 1 means no matches rather than an execution error.
+Read-only comparison of the script FPS result with a RenderDoc-observed rate.
 
-### Suggested Fix
-For optional searches, handle `$LASTEXITCODE -eq 1` explicitly or append a PowerShell fallback that returns success.
+### Resolution
+List the round directory and select the label-prefixed measurement file before
+reading historical performance samples.
 
 ### Metadata
 - Reproducible: yes
-- Related Files: native/tests/unit-test/src/d3d12_render_pass_test.cpp
-
-### Resolution
-- **Resolved**: 2026-07-12T11:10:00+08:00
-- **Notes**: Subsequent optional searches allow the no-match status.
+- Related Files: d3d12_perf_records/round-78
 
 ---
 
-## [ERR-20260712-002] rg-windows-glob-literal-path
+## [ERR-20260718-005] static_test_not_registered
 
-**Logged**: 2026-07-12T11:00:00+08:00
+**Logged**: 2026-07-18T07:20:00+08:00
 **Priority**: low
 **Status**: resolved
-**Area**: infra
+**Area**: tests
 
 ### Summary
-Passing a Windows wildcard path directly to `rg` produced an invalid-path error.
+A new static test was defined but not registered in the script's explicit test list.
 
 ### Error
 ```
-rg: native/cocos/renderer/gfx-d3d12/D3D12Framebuffer.*: 文件名、目录名或卷标语法不正确。 (os error 123)
+python native\\tests\\unit-test\\d3d12_perf_static_test.py passed without
+running test_local_descriptor_diagnostic_separates_dynamic_cbvs_from_static_signatures.
 ```
 
 ### Context
-- Operation: inspect D3D12 framebuffer and render-target clear paths.
-- PowerShell did not expand the wildcard into file arguments before `rg` processed it.
+Test-first implementation of the local descriptor composition diagnostic.
 
-### Suggested Fix
-Use `rg -g 'D3D12Framebuffer.*' <directory>` or pass explicit file paths on Windows.
+### Resolution
+Whenever this file receives a test function, add it to the `tests` list before
+using the script as RED/GREEN evidence.
 
 ### Metadata
 - Reproducible: yes
-- Related Files: native/cocos/renderer/gfx-d3d12/D3D12Framebuffer.cpp
-
-### Resolution
-- **Resolved**: 2026-07-12T11:00:00+08:00
-- **Notes**: Continued with explicit paths and directory-scoped glob filters.
+- Related Files: native/tests/unit-test/d3d12_perf_static_test.py
 
 ---
 
-## [ERR-20260711-006] oversized-diff-and-regex-quoting
+## [ERR-20260718-006] msbuild_wrapper_timeout_kept_children_alive
 
-**Logged**: 2026-07-11T21:00:00+08:00
-**Priority**: low
-**Status**: resolved
-**Area**: infra
-
-### Summary
-A combined repository-inspection command produced an oversized truncated diff and a later `rg` expression lost its quoted string under PowerShell parsing.
-
-### Error
-```
-Warning: truncated output
-rg: regex parse error: unclosed group
-```
-
-### Context
-- Operation: inspect the D3D12 shader cache migration implementation and tests.
-- Multiple high-volume commands were grouped into one tool call, and a regex containing escaped quotes crossed JavaScript, PowerShell, and ripgrep parsing layers.
-
-### Suggested Fix
-Query narrow line ranges separately and prefer fixed-string searches (`rg -F`) for C++ string literals.
-
-### Metadata
-- Reproducible: yes
-- Related Files: native/cocos/renderer/gfx-d3d12/D3D12Shader.cpp
-
-### Resolution
-- **Resolved**: 2026-07-11T21:00:00+08:00
-- **Notes**: Switched to bounded `Get-Content` ranges and separate fixed-string queries.
-
----
-
-## [ERR-20260711-007] recursive-msbuild-search-timeout
-
-**Logged**: 2026-07-11T21:10:00+08:00
-**Priority**: low
-**Status**: resolved
-**Area**: build
-
-### Summary
-Recursively scanning the complete Visual Studio installation for `MSBuild.exe` exceeded the command timeout.
-
-### Error
-```
-command timed out after 20024 milliseconds
-```
-
-### Context
-- Operation: locate MSBuild for direct project compilation after the generated CMake tree could not regenerate.
-
-### Suggested Fix
-Use Visual Studio Installer's `vswhere.exe -find MSBuild\\**\\Bin\\MSBuild.exe` instead of filesystem recursion.
-
-### Metadata
-- Reproducible: yes
-- Related Files: build/unit-test-d3d12/cocos_engine.vcxproj
-
-### Resolution
-- **Resolved**: 2026-07-11T21:10:00+08:00
-- **Notes**: Switched to the Visual Studio `vswhere` query.
-
----
-
-## [ERR-20260711-008] unsupported-gtest-brief-false-green
-
-**Logged**: 2026-07-11T21:24:00+08:00
+**Logged**: 2026-07-18T07:24:00+08:00
 **Priority**: medium
 **Status**: resolved
 **Area**: tests
 
 ### Summary
-The vendored GoogleTest does not support `--gtest_brief`; it printed help and exited zero without running the requested repeated tests.
+The shell wrapper timed out while the launched MSBuild child process tree kept compiling.
 
 ### Error
 ```
-GoogleTest help output; no [ RUN ] or [ PASSED ] records; exit code 0
+command timed out after 64056 milliseconds
 ```
 
 ### Context
-- Operation: repeat the D3D12 cache persistence concurrency tests 50 times.
-- A zero exit code was insufficient because argument parsing treated the unknown flag as a help request.
+Building the required Debug|x64 test-cases.sln after adding a D3D12 diagnostic.
 
-### Suggested Fix
-Use only flags listed by the vendored GoogleTest, capture output in PowerShell, return its tail, and preserve `$LASTEXITCODE`.
+### Resolution
+After a timed-out build command, inspect MSBuild and cl.exe before retrying;
+monitor the existing build instead of starting another build.
 
 ### Metadata
 - Reproducible: yes
-- Related Files: build/unit-test-d3d12/src/Debug/CocosTest.exe
-
-### Resolution
-- **Resolved**: 2026-07-11T21:24:00+08:00
-- **Notes**: Removed `--gtest_brief` and required explicit test-run/pass markers.
+- Related Files: D:/Work/CocosProjects/cocos-test-projects/build/windows/proj/test-cases.sln
 
 ---
 
-## [ERR-20260711-009] release-clcompile-time-budget
+## [ERR-20260718-007] static_test_wrong_workdir
 
-**Logged**: 2026-07-11T21:35:00+08:00
+**Logged**: 2026-07-18T10:54:00+08:00
 **Priority**: low
 **Status**: resolved
-**Area**: build
+**Area**: tests
 
 ### Summary
-The first Release `ClCompile` pass exceeded the 120-second command timeout without emitting a compiler error.
+The static test was invoked from the build directory with a repository-relative path.
 
 ### Error
 ```
-command timed out after 124054 milliseconds
+python.exe: can't open file '...build\\windows\\proj\\native\\tests\\unit-test\\d3d12_perf_static_test.py'
+```
+
+### Resolution
+Run repository-relative tests from the engine root, and run MSBuild separately
+from the project build directory.
+
+---
+### ERR-20260718-008: PowerShell command-side wildcard is not expanded for rg input
+
+- Symptom: `rg` reported invalid filenames for `D3D12DescriptorSet.*` and `D3D12PipelineLayout.*`.
+- Cause: PowerShell passed the wildcard literally to `rg`; this was a diagnostic command failure, not source failure.
+- Prevention: pass explicit file paths or let `rg` discover files from a directory.
+### ERR-20260718-009: Parallel Debug build contended on cocos_engine.pdb
+
+- Symptom: solution build with `/m` failed with C1041 for `Debug\\cocos_engine.pdb` across many translation units.
+- Cause: parallel MSVC workers attempted concurrent PDB writes; no source diagnostic was emitted.
+- Prevention: rerun the Debug verification build with `/m:1` before attributing a failure to the code change.
+### ERR-20260718-010: Debug solution link was blocked by a missing unrelated object
+
+- Symptom: serial solution build reached link and failed with LNK1104 for `cocos_engine.dir\\Debug\\ForwardStage.obj`.
+- Cause: the target's incremental object set is incomplete after the preceding interrupted build; changed D3D12 sources had no compile diagnostic.
+- Prevention: verify the changed source set with the `ClCompile` target before deciding whether a controlled full rebuild is needed.
+### ERR-20260718-011: Project tracking logs are held by another build process
+
+- Symptom: serial `cocos_engine` rebuild failed in `TrackedVCToolTask` because `cl.read.1.tlog` is held by another process.
+- Cause: a concurrent IDE or build task owns the same Debug project state; no C++ compile diagnostic was emitted.
+- Prevention: do not retry destructive rebuilds until the owner exits; use read-only process inspection and preserve the user's running session.
+### ERR-20260718-012: Temporary compile command had invalid PowerShell quote interpolation
+
+- Symptom: the isolated compiler verification script stopped with a PowerShell parser error before invoking `cl.exe`.
+- Cause: escaped quotes were used inside an interpolated replacement expression.
+- Prevention: construct quoted compiler paths with PowerShell format strings, then invoke the controlled command through `cmd.exe /d /c`.
+### ERR-20260718-013: Isolated cl.exe invocation lacked the Visual C++ environment
+
+- Symptom: temporary source compilation stopped at standard header `functional` not found.
+- Cause: the raw compiler process did not inherit INCLUDE/LIB from the Visual Studio developer environment.
+- Prevention: call `VsDevCmd.bat -arch=x64 -host_arch=x64` in the same `cmd.exe` process before isolated compilation.
+### ERR-20260718-014: Required Debug solution build exceeded the 120-second command window
+
+- Symptom: the non-clean serial `test-cases.sln` build ran without diagnostics but exceeded the shell command timeout.
+- Cause: the earlier failed rebuild had invalidated a large Debug object set; the build now needs a longer monitored invocation.
+- Prevention: launch the user-authorized build as a hidden child process with redirected logs, then poll completion instead of truncating it at the interactive command timeout.
+### ERR-20260718-015: Static runner test used the native subtree as the repository root
+
+- Symptom: the new foreground-runner contract errored because it looked for `native/d3d12_perf_records/run_round.ps1`.
+- Cause: the static test's `ROOT` intentionally points at `native`, not the repository root.
+- Prevention: reference repository-level artifacts through `ROOT.parent` in this test file.
+
+### ERR-20260718-016: WPR CPU sampling is blocked by the local performance policy
+
+- Symptom: `wpr -start CPU.verbose -filemode` failed before launching `test-cases.exe` with `0xc5585011` ("Failed to enable the policy to profile system performance").
+- Cause: the Windows performance-recording policy on this machine denies CPU profiling for the current session; this is unrelated to the D3D12 executable or source changes.
+- Prevention: check `wpr -status` first, attempt the profiler once, then use RenderDoc timing and opt-in engine diagnostics if the policy blocks ETW. Do not retry or infer a code failure from this HRESULT.
+
+### ERR-20260719-017: PowerShell did not expand ProgramFiles(x86) inside a single-quoted path
+
+- Symptom: invoking `vswhere.exe` failed because PowerShell treated `${env:ProgramFiles(x86)}` as literal text.
+- Cause: the executable path was constructed in a single-quoted string, which disables variable expansion.
+- Prevention: read `${env:ProgramFiles(x86)}` into a variable first or use `[Environment]::GetEnvironmentVariable('ProgramFiles(x86)')`, then join the remaining path.
+
+### ERR-20260719-018: MSBuild is not registered in the non-developer PowerShell PATH
+
+- Symptom: invoking `msbuild` returned "The term 'msbuild' is not recognized" before compilation.
+- Cause: the Codex PowerShell process is not a Visual Studio Developer shell.
+- Prevention: invoke `C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe` explicitly for this workspace.
+
+### ERR-20260719-019: apply_patch absolute-path write failed transiently
+
+- Symptom: an otherwise valid patch reported `Failed to write file` for an absolute workspace path.
+- Cause: unknown tool-side absolute-path handling failure; the file was not modified.
+- Prevention: retry the identical patch using a repository-relative path before changing patch content.
+
+### ERR-20260719-020: PowerShell did not expand a wildcard passed to rg
+
+- Symptom: `rg` rejected `LinearAllocator*` with Windows error 123 while inspecting reference source.
+- Cause: PowerShell passed the wildcard as a literal path argument; `rg` does not expand it itself on Windows.
+- Prevention: pass the two explicit filenames or search the containing directory with a glob filter.
+
+### ERR-20260720-021: Computer Use sky application-list API changed
+
+- Symptom: the foreground sampling loop failed immediately with `sky.list_applications is not a function`.
+- Cause: the current Computer Use SDK exposed a different application-discovery surface than the earlier persistent session summary described.
+- Prevention: inspect the live `sky` object or current Computer Use documentation before reusing application-discovery method names; keep the launched test process alive so slow scene loading still contributes to warmup.
+
+### ERR-20260720-022: Diagnostic rg command mixed a missing path and fragile regex quoting
+
+- Symptom: one search returned exit 1 for a nonexistent `D3D12Std.h`; a later cleanup search produced an unclosed-group regex error.
+- Cause: the diagnostic command included an assumed filename and used a PowerShell-quoted alternation containing escaped parentheses.
+- Prevention: search only confirmed files/directories and use `rg -F -e pattern` for cleanup marker checks.
+
+### ERR-20260720-023: nodeRepl.emitImage rejected a screenshot descriptor object
+
+- Symptom: after a completed 50-second foreground wait, `nodeRepl.emitImage(state.screenshots[0])` reported an unsupported value.
+- Cause: this SDK version requires the screenshot data URL, not the surrounding screenshot descriptor.
+- Prevention: pass `state.screenshots[0].url` to `nodeRepl.emitImage`; the preceding wait remains valid when only image emission fails.
+## ERR-20260720-024 — MSBuild launched with an execution timeout that was too short
+
+- **Observed:** The incremental `test-cases.sln` build was terminated with exit code 124 after about five seconds.
+- **Cause:** `shell_command` was given `timeout_ms=1000`; this tool kills the process instead of yielding a resumable cell.
+- **Correction:** Launch builds with a normal 60-second window and use the yielded cell/wait path only when the orchestration layer explicitly returns a cell id.
+## ERR-20260720-025 — WPR CPU profile requires unavailable system policy
+
+- **Observed:** `wpr.exe -start CPU -filemode` failed with `0xc5585011`, “Failed to enable the policy to profile system performance.”
+- **Cause:** The current non-elevated session lacks the Windows system-profile privilege.
+- **Correction:** Do not change system policy or request elevation for this task; use low-frequency in-process phase closure or a user-mode profiler instead.
+## [ERR-20260729-001] functions-exec-parallel-shell-wrapper
+
+**Logged**: 2026-07-29T00:00:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: infra
+
+### Summary
+The JavaScript orchestration wrapper failed without exposing which parallel shell command caused the failure.
+
+### Error
+```
+Script failed
+Script error:
+Exit code: 1
 ```
 
 ### Context
-- Operation: direct MSBuild Release verification of the D3D12 engine project.
-- Debug incremental compilation had already succeeded; Release configuration required a larger first-pass budget.
+- Attempted to run four independent repository-read commands through `functions.exec` and `Promise.all`.
+- The wrapper returned no child output, so the failing command could not be identified.
+- Re-running the reads directly exposed useful output; one `rg` search simply had no matches.
 
 ### Suggested Fix
-Use a longer total timeout and poll the yielded command in short intervals so progress communication remains responsive.
+For review baselining where a no-match `rg` is acceptable, run direct shell reads or make each child return its exit code and captured output instead of allowing one rejection to discard all results.
 
 ### Metadata
 - Reproducible: unknown
-- Related Files: build/unit-test-d3d12/cocos_engine.vcxproj
+- Related Files: .learnings/ERRORS.md
 
 ### Resolution
-- **Resolved**: 2026-07-11T21:35:00+08:00
-- **Notes**: Retried with a larger total budget and short polling intervals.
-
----
-
-## [ERR-20260711-010] direct-clcompile-skips-object-directory-setup
-
-**Logged**: 2026-07-11T21:37:00+08:00
-**Priority**: low
-**Status**: resolved
-**Area**: build
-
-### Summary
-Directly invoking the Release `ClCompile` target in a unit-test tree that had never prepared Release directories failed before compiling the changed D3D12 files.
-
-### Error
-```
-error C1083: cannot open compiler generated .obj file: No such file or directory
-```
-
-### Context
-- `ClCompile` intentionally bypassed CMake regeneration, but also bypassed the directory-preparation targets required by a fresh configuration.
-
-### Suggested Fix
-Use an already prepared Release generation tree for source verification, or run the complete preparation target chain when regeneration is available.
-
-### Metadata
-- Reproducible: yes
-- Related Files: build/unit-test-d3d12/cocos_engine.vcxproj
-
-### Resolution
-- **Resolved**: 2026-07-11T21:37:00+08:00
-- **Notes**: Switched Release verification to the main generated engine project with existing object directories.
-
----
-
-## [ERR-20260712-001] javascript-template-powershell-backtick
-
-**Logged**: 2026-07-12T07:55:00+08:00
-**Priority**: low
-**Status**: resolved
-**Area**: infra
-
-### Summary
-A PowerShell tab escape using a backtick terminated the surrounding JavaScript template literal before the command could run.
-
-### Error
-```
-SyntaxError: Invalid or unexpected token
-```
-
-### Context
-- Operation: stream first/last timestamps from the large D3D12 performance log.
-- The command crossed JavaScript-template and PowerShell parsing layers.
-
-### Suggested Fix
-Avoid PowerShell backtick escapes inside JavaScript template literals; extract timestamps with a regular expression instead.
-
-### Metadata
-- Reproducible: yes
-- Related Files: C:/Users/caosh/Desktop/preflog.txt
-
-### Resolution
-- **Resolved**: 2026-07-12T07:55:00+08:00
-- **Notes**: Replaced tab splitting with regex timestamp extraction.
-
----
-
-## [ERR-20260711-003] cpp-helper-declaration-order
-
-**Logged**: 2026-07-11T19:46:00+08:00
-**Priority**: low
-**Status**: resolved
-**Area**: backend
-
-### Summary
-A new DXBC canonicalization helper called a container-inspection function before that function was declared.
-
-### Error
-```
-D3D12Shader.cpp: error C3861: 'inspectDXBCContainer': identifier not found
-```
-
-### Context
-- Operation: compile the D3D12 Shader scheduling and cache fix.
-- The helper implementation was correct but placed earlier in the anonymous namespace than its dependency.
-
-### Suggested Fix
-Add a forward declaration or order anonymous-namespace helpers by dependency before the first compile.
-
-### Metadata
-- Reproducible: yes
-- Related Files: native/cocos/renderer/gfx-d3d12/D3D12Shader.cpp
-
-### Resolution
-- **Resolved**: 2026-07-11T19:47:00+08:00
-- **Notes**: Added the missing forward declaration and reran compilation.
-
----
-
-## [ERR-20260711-004] unit-test-cmake-regeneration-incompatible
-
-**Logged**: 2026-07-11T19:56:00+08:00
-**Priority**: low
-**Status**: resolved
-**Area**: build
-
-### Summary
-Building the existing D3D12 unit-test solution through the aggregate `Build` target forced a CMake 4.3 regeneration that rejected the vendored googletest minimum-version declaration.
-
-### Error
-```
-CMake Error: Compatibility with CMake < 3.5 has been removed
-```
-
-### Context
-- The engine object compilation had already succeeded; only the generated test solution's regeneration step failed.
-- The test executable initially remained linked to a stale `cocos_engine.lib`, which made the DXBC determinism test exercise the old implementation.
-
-### Suggested Fix
-For source-only verification in an existing generated Visual Studio tree, invoke MSBuild `_Lib` on `cocos_engine.vcxproj` and `_Link` on `CocosTest.vcxproj` with project references disabled. Regenerate only after updating the vendored CMake compatibility declarations.
-
-### Metadata
-- Reproducible: yes
-- Related Files: build/unit-test-d3d12/cocos_engine.vcxproj, build/unit-test-d3d12/src/CocosTest.vcxproj
-
-### Resolution
-- **Resolved**: 2026-07-11T19:58:00+08:00
-- **Notes**: Rebuilt the updated static library with `_Lib`, relinked with `_Link`, then passed all D3D12 tests.
-
----
-
-## [ERR-20260523-001] brv-query-unavailable
-
-**Logged**: 2026-05-23T19:30:56+08:00
-**Priority**: medium
-**Status**: pending
-**Area**: tooling
-
-### Summary
-ByteRover query could not be used in this workspace session.
-
-### Details
-Running `brv query ...` failed because `brv` was not on PATH. Running the npm shim at `%APPDATA%\npm\brv.cmd` first failed with access denied inside the sandbox, then succeeded outside the sandbox but reported no provider connected. Attempting `brv providers connect byterover` reported that authentication is required.
-
-### Suggested Action
-Authenticate ByteRover with `brv login` or ensure a provider is connected before relying on `brv-query` project context.
-
-### Metadata
-- Source: command_failure
-- Related Files: AGENTS.md
-- Tags: byterover, tooling, context
-
----
-
-## [ERR-20260605-001] debug-build-timeout-retry
-
-**Logged**: 2026-06-05T00:00:00+08:00
-**Priority**: low
-**Status**: resolved
-**Area**: build
-
-### Summary
-`cmake --build build --config Debug --target cocos_engine` may exceed a 120s command timeout even when the build is healthy.
-
-### Details
-The first Debug build attempt timed out after 124s without returning compiler diagnostics. Re-running the same command with a 300s timeout completed successfully in the warmed build and produced `build\Debug\cocos_engine.lib`.
-
-### Suggested Action
-Use a longer timeout for Debug engine builds in this workspace before treating a timeout as a build failure.
-
-### Metadata
-- Source: command_failure
-- Related Files: native/cocos/renderer/gfx-d3d12/D3D12Device.cpp
-- Tags: cmake, debug-build, timeout
-
----
-
-## [ERR-20260524-006] msbuild-cl-task-output-pipe-oom
-
-**Logged**: 2026-05-24T16:30:00+08:00
-**Priority**: medium
-**Status**: pending
-**Area**: build
-
-### Summary
-`cmake --build build --config Debug --target cocos_engine` reached compilation but failed inside the MSBuild `CL` task output pipe with `System.OutOfMemoryException`.
-
-### Details
-The failure did not report a C++ compile error. MSBuild crashed while processing compiler output: `TrackedVCToolTask.SarifToolOutputPipe.ProcessHeader/ProcessMessage`.
-
-### Suggested Action
-Retry large Visual Studio builds with lower parallelism, or build only the touched translation unit/target when possible before treating this as a source regression.
-
-### Metadata
-- Source: command_failure
-- Related Files: native/cocos/renderer/pipeline/PipelineUBO.cpp
-- Tags: msbuild, cl, oom, d3d12-shadow
-
----
-
-## [ERR-20260524-006] powershell-rg-regex-quote
-
-**Logged**: 2026-05-24T14:30:00+08:00
-**Priority**: low
-**Status**: resolved
-**Area**: tooling
-
-### Summary
-PowerShell treated part of an `rg` regex as a command because the pattern used escaped double quotes inside a double-quoted string.
-
-### Details
-`rg -n "chunkIndex=\"(62[0-8]|...)\"|..."` failed with `62[0-8]` not recognized. Re-running with a single-quoted PowerShell string fixed the search.
-
-### Suggested Action
-Use single quotes for `rg` patterns containing regex alternation and embedded double quotes in PowerShell.
-
-### Metadata
-- Source: command_failure
-- Related Files: AI/analysics/d3d12-shadow.xml
-- Tags: powershell, rg, quoting
-
----
-
-## [ERR-20260523-003] powershell-regex-quote-pipeline
-
-**Logged**: 2026-05-23T21:20:00+08:00
-**Priority**: low
-**Status**: pending
-**Area**: tooling
-
-### Summary
-PowerShell treated part of a regex as a command when filtering XML chunks after an `rg` pipeline.
-
-### Details
-The command used nested double quotes around `chunkIndex=\"(...)\"` inside a PowerShell string. The quoting broke before `Select-String`, and PowerShell attempted to execute `138[0-9]` as a command.
-
-### Suggested Action
-For XML chunk filtering in PowerShell, prefer single-quoted patterns or avoid the extra pipe and use `Get-Content | Select-String -Pattern 'chunkIndex="(138[0-9]|...)'`.
-
-### Metadata
-- Source: command_failure
-- Related Files: AI/analysics/d3d12-shadow.xml
-- Tags: powershell, regex, renderdoc
-
----
-
-## [ERR-20260523-002] diff-check-crlf-noise
-
-**Logged**: 2026-05-23T19:43:00+08:00
-**Priority**: low
-**Status**: pending
-**Area**: tooling
-
-### Summary
-`git diff --check` reports CRLF endings in `D3D12Framebuffer.cpp` as trailing whitespace.
-
-### Details
-The file already participates in a CRLF-style diff against `HEAD`. Normalizing the whole file to LF makes the whitespace check pass but creates broad line-ending churn. For targeted D3D12 fixes, keep the local file style and validate with build output plus `git diff --ignore-space-at-eol` for semantic review.
-
-### Suggested Action
-Handle `D3D12Framebuffer.cpp` line endings in a separate cleanup if the repository wants `git diff --check` to pass for that file.
-
-### Metadata
-- Source: command_failure
-- Related Files: native/cocos/renderer/gfx-d3d12/D3D12Framebuffer.cpp
-- Tags: git, line-endings, d3d12
-
----
-
-## [ERR-20260524-001] cmake-build-timeout
-
-**Logged**: 2026-05-24T00:00:00+08:00
-**Priority**: low
-**Status**: pending
-**Area**: tooling
-
-### Summary
-`cmake --build build --config Debug --target cocos_engine --parallel 1` exceeded the default 120s tool timeout.
-
-### Details
-The build command timed out before returning success or failure, so it should be rerun with a longer timeout before drawing conclusions about the patch.
-
-### Suggested Action
-Use a longer command timeout for `cocos_engine` verification builds in this workspace, especially after touching renderer files.
-
-### Metadata
-- Source: command_failure
-- Related Files: native/cocos/renderer/pipeline/shadow/ShadowFlow.cpp
-- Tags: cmake, build, timeout
-
----
-
-## [ERR-20260524-002] d3d12-shader-regex-include
-
-**Logged**: 2026-05-24T12:55:00+08:00
-**Priority**: low
-**Status**: resolved
-**Area**: build
-
-### Summary
-Removing D3D12 shadow-depth regex fixups also removed `<regex>`, but `D3D12Shader.cpp` still uses `std::regex` for entry point candidate scanning.
-
-### Details
-`cmake --build build/d3d12-poc --config Release` failed with `std::regex` and `std::sregex_iterator` not found at `D3D12Shader.cpp:104`. Restoring `<regex>` fixed the build.
-
-### Suggested Action
-When deleting a regex-based helper, search the whole file for `std::regex` before removing the header.
-
-### Metadata
-- Source: command_failure
-- Related Files: native/cocos/renderer/gfx-d3d12/D3D12Shader.cpp
-- Tags: cmake, d3d12, include
-
----
-
-## [ERR-20260524-003] root-getpipeline-runtime-type
-
-**Logged**: 2026-05-24T13:20:00+08:00
-**Priority**: low
-**Status**: resolved
-**Area**: build
-
-### Summary
-`Root::getPipeline()` returns `render::PipelineRuntime *`, not `pipeline::RenderPipeline *`.
-
-### Details
-`cmake --build build/d3d12-poc --config Release` failed after adding scene macro helpers with parameter type `pipeline::RenderPipeline *`. Changing the helper parameter to `render::PipelineRuntime *` fixed the build.
-
-### Suggested Action
-When editing native scene code that uses `Root::getPipeline()`, type helpers against `render::PipelineRuntime *` unless the call site already has a concrete `pipeline::RenderPipeline *`.
-
-### Metadata
-- Source: command_failure
-- Related Files: native/cocos/scene/Shadow.cpp, native/cocos/scene/DirectionalLight.cpp
-- Tags: cmake, pipeline, type
-
----
-
-## [ERR-20260524-004] brv-query-command-unavailable
-
-**Logged**: 2026-05-24T00:00:00+08:00
-**Priority**: low
-**Status**: pending
-**Area**: tooling
-
-### Summary
-ByteRover context lookup could not run from this PowerShell session.
-
-### Details
-`brv query "cocos-engine shadowmap RenderDoc rdc depth write gles3"` failed because `brv` was not recognized. Retrying via `$env:APPDATA\npm\brv.cmd` failed with `ResourceUnavailable` / `拒绝访问`.
-
-### Suggested Action
-Use the approved ByteRover command path only after the local npm shim permissions are fixed, or query through another configured MCP surface if available.
-
-### Metadata
-- Source: command_failure
-- Related Files: AGENTS.md
-- Tags: brv, byterover, powershell, permissions
-
----
-
-## [ERR-20260524-005] brv-query-provider-not-connected
-
-**Logged**: 2026-05-24T14:00:00+08:00
-**Priority**: low
-**Status**: pending
-**Area**: tooling
-
-### Summary
-ByteRover query can start through the npm shim when run outside the sandbox, but no provider is connected.
-
-### Details
-`& "$env:APPDATA\npm\brv.cmd" query "D3D12 backend gfx-d3d12 setup notes implementation known issues"` returned `No provider connected. Run "brv providers connect byterover" to use the free built-in provider, or connect another provider.`
-
-### Suggested Action
-Connect the ByteRover provider before relying on `brv query` for project context.
-
-### Metadata
-- Source: command_failure
-- Related Files: AGENTS.md
-- Tags: brv, byterover, provider
-
----
-[ERR-20260606-002] multi-file-cleanup-patch-context-mismatch
-
-**Logged**: 2026-06-06
-**Context**: D3D12 backend cleanup
-**Error**: A multi-file apply_patch failed because the expected D3D12CommandBuffer.cpp context no longer matched.
-**Resolution**: Re-read the exact local snippets and apply smaller per-file patches. The failed patch was atomic and changed no files.
-[ERR-20260606-003] ripgrep-windows-wildcard
-
-**Logged**: 2026-06-06
-**Context**: D3D12 static implementation scan
-**Error**: `rg ... native/cocos/renderer/gfx-d3d12/*.cpp` failed because PowerShell/Windows did not expand the path wildcard for ripgrep.
-**Resolution**: Use `rg -g "*.cpp" ... native/cocos/renderer/gfx-d3d12`.
-[ERR-20260606-004] d3d12-format-mapper-ambiguous
-
-**Logged**: 2026-06-06
-**Context**: Release build after sharing the texture format mapper with D3D12Device
-**Error**: `toD3D12Format` was still defined in an anonymous namespace while a public namespace declaration was added, making calls in D3D12Texture.cpp ambiguous.
-**Resolution**: Rename the anonymous implementation and expose a namespace-level forwarding function.
-[ERR-20260606-005] renderdoc-capture-discovery-restrictions
-
-**Logged**: 2026-06-06
-**Context**: Inspecting an opened RenderDoc capture
-**Error**: Win32_Process command-line inspection was denied, a recursive D-drive RDC search timed out, and the sandboxed Codex executable could not query MCP configuration.
-**Resolution**: Inspect RenderDoc process ports and search only likely capture directories; use the local RenderDoc Python/API tooling when the capture path is found.
-[ERR-20260606-006] renderdoc-mcp-parallel-request-race
-
-**Logged**: 2026-06-06
-**Context**: RenderDoc EID inspection through the file-based MCP bridge
-**Error**: Parallel bridge calls raced on the single shared request/response JSON files, causing missing response files.
-**Resolution**: Send RenderDoc bridge calls strictly sequentially.
-[ERR-20260606-007] renderdoc-mcp-pillow-unavailable
-
-**Logged**: 2026-06-06
-**Context**: Exporting RenderDoc texture data for visual inspection
-**Error**: The renderdoc-mcp virtual environment does not include Pillow.
-**Resolution**: Export raw RGBA bytes with the bridge environment and render them using the available Node image tooling.
-[ERR-20260606-008] node-repl-windows-sandbox-exit
-
-**Logged**: 2026-06-06
-**Context**: Rendering exported RenderDoc RGBA data
-**Error**: The Node REPL kernel exited during Windows sandbox setup refresh.
-**Resolution**: Use the bundled workspace Python runtime and image libraries for diagnostic image conversion.
-[ERR-20260606-009] renderdoc-convert-argument-order
-
-**Logged**: 2026-06-06
-**Context**: Converting the current RDC to XML
-**Error**: Used `-f` as an output format flag, but RenderDoc defines it as the input filename.
-**Resolution**: Use `-f <capture> -c xml -o <output>`.
-
-[ERR-20260606-010] renderdoc-bridge-generic-call
-
-**Logged**: 2026-06-06
-**Context**: Inspecting texture mip contents through the RenderDoc MCP bridge
-**Error**: Assumed capture operations were direct `RenderDocBridge` methods, but the client exposes only `call(method, params)`.
-**Resolution**: Inspect `RenderDocBridge.call` and dispatch extension methods through that generic API.
-
-[ERR-20260606-011] renderdoc-bridge-timeout-constructor
-
-**Logged**: 2026-06-06
-**Context**: Reopening a capture through the RenderDoc MCP bridge
-**Error**: Passed `timeout` to `RenderDocBridge.__init__`, which only accepts compatibility host and port parameters.
-**Resolution**: Construct with no arguments and assign `bridge.timeout` when a custom timeout is needed.
-
-[ERR-20260606-012] renderdoc-open-capture-parameter
-
-**Logged**: 2026-06-06
-**Context**: Reopening a capture through the RenderDoc MCP bridge
-**Error**: Used `filename` for `open_capture`; the extension requires `capture_path`.
-**Resolution**: Read the extension method schema before dispatching bridge calls and pass `capture_path`.
-
-[ERR-20260606-013] release-build-compiler-heap
-
-**Logged**: 2026-06-06
-**Context**: Release verification after the D3D12 sampler fix
-**Error**: The default parallel MSBuild exhausted compiler heap space with C1060 errors in unrelated translation units.
-**Resolution**: Re-run the Release target with `/m:1` to limit MSBuild concurrency.
-
-[ERR-20260606-014] qrenderdoc-not-on-path
-
-**Logged**: 2026-06-06
-**Context**: Launching an isolated RenderDoc UI Python pixel-debug session
-**Error**: `Get-Command qrenderdoc.exe` failed because the RenderDoc install directory is not on PATH.
-**Resolution**: Reuse the executable path from the running process: `D:\Program Files\RenderDoc\qrenderdoc.exe`.
-
-[ERR-20260606-015] powershell-select-string-byte-encoding
-
-**Logged**: 2026-06-06
-**Context**: Searching the RenderDoc executable for command-line option strings
-**Error**: PowerShell 7 `Select-String` does not accept `-Encoding Byte`.
-**Resolution**: Use a binary strings utility or inspect RenderDoc's documented/GUI script entry points instead of treating the executable as byte-encoded text.
-
-[ERR-20260606-016] broad-user-directory-recursion-timeout
-
-**Logged**: 2026-06-06
-**Context**: Locating the previously used RenderDoc MCP bridge
-**Error**: Recursively enumerating all directories under the Windows user profile exceeded the command timeout.
-**Resolution**: Search only likely tool roots such as `.codex`, `.agents`, and temporary tool directories with `rg --files`.
-
-[ERR-20260606-017] renderdoc-runtime-injection-no-capture
-
-**Logged**: 2026-06-06
-**Context**: Capturing the already running D3D12 test scene after mip diagnostics
-**Error**: `renderdoccmd inject` reported success, but neither scripted F12 input path produced a capture.
-**Resolution**: Launch the executable through `renderdoccmd capture` from process start and trigger capture after the target scene has loaded.
-
-[ERR-20260607-001] renderdoc-bridge-open-timeout
-
-**Logged**: 2026-06-07
-**Context**: Inspecting MSAA state in the latest D3D12 capture
-**Error**: The RenderDoc MCP bridge timed out while opening `C:\Users\caosh\Desktop\d3d12.rdc`; no qrenderdoc process was available to service the file-based request.
-**Resolution**: Check the qrenderdoc process before using the bridge, and use RenderDoc's headless Python replay API when the UI bridge is unavailable.
-
-[ERR-20260607-002] powershell-rg-wildcard-path
-
-**Logged**: 2026-06-07
-**Context**: Searching D3D12 pipeline state files from PowerShell
-**Error**: Passed wildcard file paths such as `GFXPipelineState.*` directly to `rg`; Windows treated them as invalid paths.
-**Resolution**: Search the containing directories and constrain matches with `-g` when using `rg` from PowerShell.
-
-[ERR-20260607-003] d3d12-unit-test-full-build-timeout
-
-**Logged**: 2026-06-07
-**Context**: Establishing the RED phase for the D3D12 render-pass regression test
-**Error**: The first complete `CocosTest` build exceeded the two-minute command timeout while compiling the engine dependency.
-**Resolution**: Compile the unit-test project's `ClCompile` target first for fast test-source feedback, then use the warmed incremental build for final verification.
-
-[ERR-20260607-004] powershell-get-childitem-multiple-filters
-
-**Logged**: 2026-06-07
-**Context**: Detecting the repository package-manager lock file
-**Error**: Passed an array to PowerShell `Get-ChildItem -Filter`, which only accepts one string pattern.
-**Resolution**: Enumerate files once and filter names with `Where-Object` when matching multiple exact filenames.
-
-[ERR-20260607-005] computer-use-readonly-spinbox
-
-**Logged**: 2026-06-07
-**Context**: Selecting a particle instance in RenderDoc's Mesh Viewer through Computer Use
-**Error**: `set_value` failed because the RenderDoc instance spinbox exposed a read-only UI Automation value.
-**Resolution**: Use the spinbox's visible increment/decrement buttons through coordinate clicks, then verify the displayed instance and table values.
-
-[ERR-20260607-006] computer-use-stale-renderdoc-coordinate
-
-**Logged**: 2026-06-07
-**Context**: Horizontally scrolling RenderDoc's Mesh Viewer after the event list layout changed
-**Error**: Reusing an old scrollbar coordinate selected a different draw event instead of moving the table.
-**Resolution**: Refresh the window screenshot immediately before coordinate drags in RenderDoc and verify the selected EID after each layout-changing action.
-
-[ERR-20260607-007] renderdoc-bridge-ui-buffer-id
-
-**Logged**: 2026-06-07
-**Context**: Reading EID 1322's instance buffer through the RenderDoc MCP bridge
-**Error**: `get_buffer_contents` rejected both `ResourceId::5762` and `5762`, although the RenderDoc UI displayed Buffer 5762 in the input assembler.
-**Resolution**: Do not assume the UI resource number is accepted by this bridge method; obtain the bridge-side buffer identifier from an API that enumerates vertex buffers, or inspect the data through Mesh Viewer.
-
-[ERR-20260607-008] windows-perl-not-on-path
-
-**Logged**: 2026-06-07
-**Context**: Normalizing line endings after patching native PSO manager files
-**Error**: `perl -0777 -pi ...` failed because Perl was not installed or not on PATH in the Windows workspace.
-**Resolution**: Use PowerShell/.NET text normalization or repo-provided formatting tools instead of assuming Unix text utilities are available on Windows.
-
-[ERR-20260607-009] node-repl-top-level-const-redeclare
-
-**Logged**: 2026-06-07
-**Context**: Reading RenderDoc Mesh Viewer state through Computer Use
-**Error**: A reused top-level `const tree` declaration failed with `Identifier 'tree' has already been declared`.
-**Resolution**: Wrap one-off Node REPL inspection code in a local `{ ... }` block or store reusable values on `globalThis`.
-
-[ERR-20260607-010] powershell-select-object-range
-
-**Logged**: 2026-06-07
-**Context**: Reading a line slice from `cocos/particle/enum.ts`
-**Error**: `Select-Object -Index 55..80` failed because PowerShell did not convert the unparenthesized range expression to an integer array for the parameter.
-**Resolution**: Use `(Get-Content $path)[55..80]` or `Select-Object -Index (55..80)` for line slices.
-
-[ERR-20260607-011] rg-invalid-extra-path
-
-**Logged**: 2026-06-07
-**Context**: Searching native renderer sources for shader attribute filtering
-**Error**: Included a nonexistent path `native/cocos/rendering`, causing `rg` to exit with an error even though other matches were found.
-**Resolution**: Verify directory names with `rg --files` or omit speculative extra paths when broad-searching repository modules.
-
-[ERR-20260607-012] apply-patch-stale-context
-
-**Logged**: 2026-06-07
-**Context**: Adding D3D12 vertex-input reflection to `D3D12PipelineState.cpp`
-**Error**: The first patch used an approximate helper-function signature and failed because the file used `mode` rather than the expected parameter name.
-**Resolution**: Read the exact surrounding function headers before large patches, then split helper insertion and logic replacement into smaller patches.
-
-[ERR-20260607-013] rg-windows-glob-path
-
-**Logged**: 2026-06-07
-**Context**: Searching D3D12 renderer logs on Windows
-**Error**: `rg ... native/cocos/renderer/gfx-d3d12/D3D12*.cpp` failed because the glob-like path was passed as a literal invalid Windows path.
-**Resolution**: Search the directory and filter by pattern, or use `rg -g "D3D12*.cpp" ... native/cocos/renderer/gfx-d3d12`.
-
-[ERR-20260608-001] rg-powershell-file-glob-argument
-
-**Logged**: 2026-06-08
-**Context**: Verifying D3D12 buffer and command-buffer regression patterns on Windows
-**Error**: `rg ... native/cocos/renderer/gfx-d3d12/D3D12Buffer.* ...` failed because PowerShell passed the wildcard-like file path as an invalid literal path.
-**Resolution**: Use explicit file paths or search the directory with `--glob "D3D12Buffer.*"` when constraining ripgrep matches on Windows.
-
-## [ERR-20260710-001] d3d12-build-timeout-too-short
-
-**Logged**: 2026-07-10T00:00:00+08:00
-**Priority**: low
-**Status**: resolved
-**Area**: infra
-
-### Summary
-The D3D12 incremental build was launched with a one-second timeout and was terminated before compiler output was returned.
-
-### Error
-```
-command timed out after 5040 milliseconds
-```
-
-### Context
-- Command: `cmake --build build/d3d12-poc --config Release --target cocos_engine --parallel 8`
-- The timeout was a tool-call configuration mistake, not evidence of a compile failure.
-
-### Suggested Fix
-Use a long-running build call with an appropriate timeout, or resume a yielded build session when available.
-
-### Metadata
-- Reproducible: yes
-- Related Files: build/d3d12-poc/CMakeCache.txt
-
-### Resolution
-- **Resolved**: 2026-07-10T00:00:00+08:00
-- **Notes**: Re-run the existing incremental build with a sufficient timeout.
-
----
-
-## [ERR-20260711-001] summarize-cli-not-installed
-
-**Logged**: 2026-07-11T18:50:00+08:00
-**Priority**: low
-**Status**: resolved
-**Area**: infra
-
-### Summary
-The optional summarize skill could not process the D3D12 performance log because its CLI dependency is not installed.
-
-### Error
-```
-summarize CLI is not installed
-```
-
-### Context
-- Input file: `C:/Users/caosh/Desktop/preflog.txt`
-- Exact keyword aggregation does not require the external summarizer.
-
-### Suggested Fix
-Use local PowerShell parsing for structured renderer logs, or install the summarize CLI when semantic file summaries are needed.
-
-### Metadata
-- Reproducible: yes
-- Related Files: C:/Users/caosh/Desktop/preflog.txt
-
-### Resolution
-- **Resolved**: 2026-07-11T18:50:00+08:00
-- **Notes**: Continued with local keyword and numeric aggregation.
-
----
-
-## [ERR-20260711-002] powershell-helper-alias-collision
-
-**Logged**: 2026-07-11T18:52:00+08:00
-**Priority**: low
-**Status**: resolved
-**Area**: infra
-
-### Summary
-A one-letter PowerShell helper named `H` collided with the built-in `Get-History` alias while parsing renderer logs.
-
-### Error
-```
-Get-History: Cannot bind parameter 'Count'. Cannot convert value "stage" to type "System.Int32".
-```
-
-### Context
-- Operation: parse structured key-value fields from the D3D12 performance log.
-
-### Suggested Fix
-Use descriptive helper names that cannot collide with PowerShell aliases, and parenthesize helper calls inside hashtable literals.
-
-### Metadata
-- Reproducible: yes
-- Related Files: C:/Users/caosh/Desktop/preflog.txt
-
-### Resolution
-- **Resolved**: 2026-07-11T18:52:00+08:00
-- **Notes**: Replaced one-letter helpers with `GetNumField`, `GetTextField`, and `GetQuotedField`.
-
----
-
-## [ERR-20260711-005] nested-powershell-stdin-produced-no-output
-
-**Logged**: 2026-07-11T20:46:00+08:00
-**Priority**: low
-**Status**: resolved
-**Area**: infra
-
-### Summary
-A multiline aggregation script piped through a nested `powershell -Command -` process exited successfully but returned no statistics.
-
-### Error
-```
-Exit code: 0
-Output: empty
-```
-
-### Context
-- Operation: stream and aggregate selected D3D12 performance-log events without loading the complete log into model context.
-- The active shell was already PowerShell, so the nested stdin wrapper added unnecessary quoting and encoding risk.
-
-### Suggested Fix
-Execute the aggregation directly in the active PowerShell process, or save a reusable parser script with `apply_patch` when the command becomes large.
-
-### Metadata
-- Reproducible: unknown
-- Related Files: C:/Users/caosh/Desktop/preflog.txt
-
-### Resolution
-- **Resolved**: 2026-07-11T20:47:00+08:00
-- **Notes**: Re-ran the parser directly in the active shell.
-
----
-## [ERR-20260713-001] repeated-rg-windows-glob-literal-path
-
-**Logged**: 2026-07-13T22:40:00+08:00
-**Priority**: low
-**Status**: resolved
-**Area**: infra
-
-### Summary
-Repeated a known Windows `rg` wildcard-path mistake while inspecting D3D12 descriptor files.
-
-### Error
-```
-rg: native/cocos/renderer/gfx-d3d12/D3D12DescriptorSet.*: 文件名、目录名或卷标语法不正确。 (os error 123)
-```
-
-### Context
-- PowerShell did not expand the wildcard path before passing it to `rg`.
-- The preceding source inspection completed; only the secondary search failed.
-
-### Suggested Fix
-Use explicit paths or `rg -g 'D3D12DescriptorSet.*' native/cocos/renderer/gfx-d3d12` on Windows.
-
-### Metadata
-- Reproducible: yes
-- Related Files: native/cocos/renderer/gfx-d3d12/D3D12DescriptorSet.cpp
-- See Also: ERR-20260712-002
-
-### Resolution
-- **Resolved**: 2026-07-13T22:40:00+08:00
-- **Notes**: Switched to explicit paths.
+- **Resolved**: 2026-07-29T00:00:00+08:00
+- **Notes**: Split the wrapper into directly observable commands.
 
 ---

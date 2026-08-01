@@ -151,7 +151,7 @@ void RenderWindow::resize(uint32_t width, uint32_t height) {
     generateFrameBuffer();
 
     for (Camera *camera : _cameras) {
-        camera->resize(width, height);
+        camera->resize(_width, _height);
     }
 
     _isResized = true;
