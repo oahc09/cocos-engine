@@ -279,42 +279,6 @@ bool storeFileCachedPSO(const ccstd::string &cacheKey, ID3D12PipelineState *pipe
     return true;
 }
 
-ID3D12RootSignature *getOrCreateEmptyRootSignature(ID3D12Device *device) {
-    static Microsoft::WRL::ComPtr<ID3D12RootSignature> s_emptyRootSig;
-    if (s_emptyRootSig || !device) {
-        return s_emptyRootSig.Get();
-    }
-
-    D3D12_ROOT_SIGNATURE_DESC emptyRootSigDesc{};
-    emptyRootSigDesc.NumParameters = 0;
-    emptyRootSigDesc.pParameters = nullptr;
-    emptyRootSigDesc.NumStaticSamplers = 0;
-    emptyRootSigDesc.pStaticSamplers = nullptr;
-    emptyRootSigDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
-
-    Microsoft::WRL::ComPtr<ID3DBlob> sigBlob;
-    Microsoft::WRL::ComPtr<ID3DBlob> errBlob;
-    HRESULT serHR = D3D12SerializeRootSignature(&emptyRootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1,
-                                                &sigBlob, &errBlob);
-    if (FAILED(serHR)) {
-        CC_LOG_WARNING("D3D12PipelineState: failed to serialize empty root signature. HRESULT=0x%08x",
-                       static_cast<unsigned>(serHR));
-        return nullptr;
-    }
-
-    HRESULT createHR = device->CreateRootSignature(0, sigBlob->GetBufferPointer(),
-                                                   sigBlob->GetBufferSize(),
-                                                   IID_PPV_ARGS(&s_emptyRootSig));
-    if (FAILED(createHR)) {
-        CC_LOG_WARNING("D3D12PipelineState: failed to create empty root signature. HRESULT=0x%08x",
-                       static_cast<unsigned>(createHR));
-        return nullptr;
-    }
-
-    CC_LOG_INFO("D3D12PipelineState: created empty root signature.");
-    return s_emptyRootSig.Get();
-}
-
 D3D12_PRIMITIVE_TOPOLOGY_TYPE toD3D12PrimitiveTopologyType(PrimitiveMode mode) {
     switch (mode) {
         case PrimitiveMode::POINT_LIST:                  return D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT;
@@ -424,11 +388,11 @@ D3D12_STENCIL_OP toD3D12StencilOp(StencilOp op) {
         case StencilOp::ZERO:       return D3D12_STENCIL_OP_ZERO;
         case StencilOp::KEEP:       return D3D12_STENCIL_OP_KEEP;
         case StencilOp::REPLACE:    return D3D12_STENCIL_OP_REPLACE;
-        case StencilOp::INCR:       return D3D12_STENCIL_OP_INCR;
-        case StencilOp::DECR:       return D3D12_STENCIL_OP_DECR;
+        case StencilOp::INCR:       return D3D12_STENCIL_OP_INCR_SAT;
+        case StencilOp::DECR:       return D3D12_STENCIL_OP_DECR_SAT;
         case StencilOp::INVERT:     return D3D12_STENCIL_OP_INVERT;
-        case StencilOp::INCR_WRAP:  return D3D12_STENCIL_OP_INCR_SAT;
-        case StencilOp::DECR_WRAP:  return D3D12_STENCIL_OP_DECR_SAT;
+        case StencilOp::INCR_WRAP:  return D3D12_STENCIL_OP_INCR;
+        case StencilOp::DECR_WRAP:  return D3D12_STENCIL_OP_DECR;
         default:                    return D3D12_STENCIL_OP_KEEP;
     }
 }
@@ -455,29 +419,6 @@ D3D12_RENDER_TARGET_BLEND_DESC makeDefaultRenderTargetBlendDesc() {
     desc.LogicOp = D3D12_LOGIC_OP_NOOP;
     desc.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
     return desc;
-}
-
-DXGI_FORMAT toD3D12VertexFormat(Format fmt) {
-    switch (fmt) {
-        case Format::RGB32F:    return DXGI_FORMAT_R32G32B32_FLOAT;
-        case Format::RG32F:     return DXGI_FORMAT_R32G32_FLOAT;
-        case Format::R32F:      return DXGI_FORMAT_R32_FLOAT;
-        case Format::RGBA32F:   return DXGI_FORMAT_R32G32B32A32_FLOAT;
-        case Format::RGBA8:     return DXGI_FORMAT_R8G8B8A8_UNORM;
-        case Format::RGBA8SN:   return DXGI_FORMAT_R8G8B8A8_SNORM;
-        case Format::RG16F:     return DXGI_FORMAT_R16G16_FLOAT;
-        case Format::RGBA16F:   return DXGI_FORMAT_R16G16B16A16_FLOAT;
-        case Format::RG32I:     return DXGI_FORMAT_R32G32_SINT;
-        case Format::R32I:      return DXGI_FORMAT_R32_SINT;
-        case Format::R32UI:     return DXGI_FORMAT_R32_UINT;
-        case Format::RG8:       return DXGI_FORMAT_R8G8_UNORM;
-        case Format::R16F:      return DXGI_FORMAT_R16_FLOAT;
-        case Format::RGBA16UI:  return DXGI_FORMAT_R16G16B16A16_UINT;
-        case Format::RGB8:      return DXGI_FORMAT_R8G8B8A8_UNORM; // D3D12 has no 24-bit vertex format
-        case Format::BGRA8:     return DXGI_FORMAT_B8G8R8A8_UNORM;
-        case Format::RGB10A2:   return DXGI_FORMAT_R10G10B10A2_UNORM;
-        default:                return DXGI_FORMAT_R32G32B32_FLOAT; // safe default
-    }
 }
 
 struct AttributeSemantic {
@@ -577,7 +518,6 @@ CCD3D12PipelineState::~CCD3D12PipelineState() {
 }
 
 void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
-    (void)info;
     const auto initStart = D3D12PerfClock::now();
     if (!_impl) return;
 
@@ -587,6 +527,11 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
     _impl->baseDesc = {};
     _impl->inputElements.clear();
     _impl->dynamicPipelineStates.clear();
+
+    if (info.bindPoint == PipelineBindPoint::COMPUTE) {
+        CC_LOG_ERROR("D3D12PipelineState: compute pipelines are not supported by this backend.");
+        return;
+    }
 
     auto *device = CCD3D12Device::getInstance();
     auto *d3dDevice = static_cast<ID3D12Device *>(device ? device->getD3D12DeviceHandle() : nullptr);
@@ -606,8 +551,9 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
     }
 
     auto vsBlob = d3d12Shader->getVertexBytecode();
-    auto psBlob = d3d12Shader->getFragmentBytecode();
     auto gsBlob = d3d12Shader->getGeometryBytecode();
+    auto psBlob = gsBlob.data ? d3d12Shader->getFragmentBytecode()
+                              : d3d12Shader->getFragmentBytecodeForVertexLinkage();
 
     if (!vsBlob.data || vsBlob.size == 0) {
         CC_LOG_ERROR("D3D12PipelineState: vertex shader bytecode is empty.");
@@ -627,7 +573,8 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
 
     // If no root signature from PipelineLayout, create an empty one
     if (!psoDesc.pRootSignature) {
-        psoDesc.pRootSignature = getOrCreateEmptyRootSignature(d3dDevice);
+        psoDesc.pRootSignature =
+            static_cast<ID3D12RootSignature *>(device->getOrCreateEmptyRootSignature());
         _impl->usesPipelineLayoutRootSignature = false;
     }
 
@@ -789,6 +736,11 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
                 elem.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
                 elem.InstanceDataStepRate = 0;
             }
+            if (elem.Format == DXGI_FORMAT_UNKNOWN) {
+                CC_LOG_ERROR("D3D12PipelineState: unsupported vertex format for semantic %s%u; PSO creation rejected.",
+                             elem.SemanticName, elem.SemanticIndex);
+                return;
+            }
             inputElements.push_back(elem);
         }
 
@@ -837,6 +789,11 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
                 elem.AlignedByteOffset = 0;
                 elem.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
                 elem.InstanceDataStepRate = 0;
+            }
+            if (elem.Format == DXGI_FORMAT_UNKNOWN) {
+                CC_LOG_ERROR("D3D12PipelineState: unsupported vertex format for attribute '%s'; PSO creation rejected.",
+                             shaderAttr.name.c_str());
+                return;
             }
             inputElements.push_back(elem);
         }
@@ -1009,7 +966,7 @@ void *CCD3D12PipelineState::getDynamicID3D12PipelineState(float depthBias, float
     if (FAILED(hr)) {
         CC_LOG_ERROR("D3D12PipelineState: dynamic PSO variant creation failed. HRESULT=0x%08x",
                      static_cast<unsigned>(hr));
-        return _impl->pipelineState.Get();
+        return nullptr;
     }
 
     auto *result = variant.Get();

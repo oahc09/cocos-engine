@@ -352,6 +352,10 @@ void DeviceValidator::frameSync() {
     _actor->frameSync();
 }
 
+bool DeviceValidator::waitIdle() {
+    return _actor->waitIdle();
+}
+
 SampleCount DeviceValidator::getMaxSampleCount(Format format, TextureUsage usage, TextureFlags flags) const {
     return _actor->getMaxSampleCount(format, usage, flags);
 }

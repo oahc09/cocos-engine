@@ -37,6 +37,7 @@
 #include "platform/FileUtils.h"
 #include "renderer/GFXDeviceManager.h"
 #include "renderer/core/ProgramLib.h"
+#include "renderer/frame-graph/FrameGraph.h"
 #include "renderer/pipeline/RenderPipeline.h"
 #include "renderer/pipeline/custom/RenderingModule.h"
 
@@ -338,7 +339,11 @@ void Engine::tick() {
 }
 
 void Engine::doRestart() {
+    if (_gfxDevice && !_gfxDevice->waitIdle()) {
+        CC_LOG_ERROR("GPU waitIdle failed before restart teardown; continuing controlled teardown.");
+    }
     events::RestartVM::broadcast();
+    framegraph::FrameGraph::gc(0);
     destroy();
     CC_CURRENT_APPLICATION()->init();
 }

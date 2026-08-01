@@ -46,7 +46,10 @@
 #endif
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstring>
+#include <iterator>
+#include <limits>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -63,6 +66,7 @@ D3D12TransientUniformFrameState CCD3D12Device::activeTransientUniformFrameState{
 
 namespace {
 constexpr uint32_t TRANSIENT_UNIFORM_SLOT_COUNT = 4096U;
+std::atomic<uint64_t> NEXT_D3D12_DEVICE_EPOCH{1};
 
 constexpr float D3D12_POC_CLEAR_COLOR[4] = {0.1F, 0.2F, 0.8F, 1.0F};
 constexpr uint32_t D3D12_GPU_DESCRIPTORS_PER_FRAME = 65536;
@@ -88,17 +92,6 @@ constexpr GUID D3D12_COCOS_DXBC_SHADER_CACHE_GUID = {
     0x9f4e1b8d, 0x932a, 0x4a64, {0xa8, 0x4e, 0x31, 0x79, 0x50, 0x8f, 0xb8, 0xd2}};
 constexpr uint64_t D3D12_COCOS_DXBC_SHADER_CACHE_VERSION = 1;
 #endif
-
-D3D12_RESOURCE_BARRIER textureTransition(ID3D12Resource *resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
-    D3D12_RESOURCE_BARRIER barrier{};
-    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-    barrier.Transition.pResource = resource;
-    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    barrier.Transition.StateBefore = before;
-    barrier.Transition.StateAfter = after;
-    return barrier;
-}
 
 void copyReadbackToBuffer(const uint8_t *mappedData, const D3D12_PLACED_SUBRESOURCE_FOOTPRINT &footprint, uint32_t footprintRowCount,
                           uint8_t *buffer, const BufferTextureCopy &region, Format format) {
@@ -140,6 +133,7 @@ struct CCD3D12Device::Impl {
     Microsoft::WRL::ComPtr<ID3D12Fence> lastSubmittedFence;
     uint64_t lastSubmittedFenceValue{0};
     uint64_t bufferStateEpoch{1};
+    uint64_t deviceEpoch{0};
     uint64_t transientUniformUploadGeneration{1};
 
     struct UploadPage {
@@ -208,6 +202,10 @@ struct CCD3D12Device::Impl {
     };
     ccstd::vector<LocalRootCbvIndirectSignature> localRootCbvIndirectSignatures;
 
+    std::mutex nativePipelineCacheMutex;
+    std::unordered_map<uint32_t, std::shared_ptr<void>> blitPipelineCache;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> emptyRootSignature;
+
 #if defined(__ID3D12Device9_INTERFACE_DEFINED__) && defined(__ID3D12ShaderCacheSession_INTERFACE_DEFINED__)
     Microsoft::WRL::ComPtr<ID3D12ShaderCacheSession> shaderCacheSession;
     std::mutex shaderCacheMutex;
@@ -221,6 +219,7 @@ CCD3D12Device *CCD3D12Device::getInstance() {
 
 CCD3D12Device::CCD3D12Device()
 : _impl(std::make_unique<Impl>()) {
+    _impl->deviceEpoch = NEXT_D3D12_DEVICE_EPOCH.fetch_add(1, std::memory_order_relaxed);
     CCD3D12Device::instance = this;
     _api = API::D3D12;
     _deviceName = "D3D12";
@@ -283,7 +282,7 @@ bool CCD3D12Device::doInit(const DeviceInfo &info) {
     _features[toNumber(Feature::INSTANCED_ARRAYS)] = true;
     _features[toNumber(Feature::MULTIPLE_RENDER_TARGETS)] = true;
     _features[toNumber(Feature::BLEND_MINMAX)] = true;
-    _features[toNumber(Feature::COMPUTE_SHADER)] = true;
+    _features[toNumber(Feature::COMPUTE_SHADER)] = false;
     _features[toNumber(Feature::INPUT_ATTACHMENT_BENEFIT)] = false;
     _features[toNumber(Feature::SUBPASS_COLOR_INPUT)] = false;
     _features[toNumber(Feature::SUBPASS_DEPTH_STENCIL_INPUT)] = false;
@@ -363,10 +362,24 @@ void CCD3D12Device::doDestroy() {
     if (_impl) {
         _impl->deferredCubeUploads.clear();
     }
-    waitForGpu();
+    if (!waitIdle()) {
+        CC_LOG_WARNING("D3D12 device teardown is continuing after waitIdle failed.");
+    }
     _impl->pendingBufferUpdates.clear();
     _impl->pendingUploadCommandContexts.clear();
     _impl->deferredCubeUploads.clear();
+
+    // Release objects that may retain command allocators, command lists, and
+    // resources while the native device and queue are still available.
+    CC_SAFE_DESTROY_AND_DELETE(_cmdBuff);
+    CC_SAFE_DESTROY_AND_DELETE(_queryPool);
+    CC_SAFE_DESTROY_AND_DELETE(_queue);
+
+    {
+        std::lock_guard<std::mutex> lock(_impl->nativePipelineCacheMutex);
+        _impl->blitPipelineCache.clear();
+        _impl->emptyRootSignature.Reset();
+    }
 
     // Release dummy resources
     _impl->dummyTexture = nullptr;
@@ -411,10 +424,6 @@ void CCD3D12Device::doDestroy() {
 #endif
     _impl->d3dDevice.Reset();
     _impl->dxgiFactory.Reset();
-
-    CC_SAFE_DESTROY_AND_DELETE(_cmdBuff);
-    CC_SAFE_DESTROY_AND_DELETE(_queryPool);
-    CC_SAFE_DESTROY_AND_DELETE(_queue);
 }
 
 void CCD3D12Device::initializeShaderCacheSession() {
@@ -523,13 +532,36 @@ void CCD3D12Device::acquire(Swapchain *const *swapchains, uint32_t count) {
     auto &frameResources = _impl->frameResources[nextFrameResource];
     if (frameResources.fence && frameResources.fenceValue != 0 &&
         frameResources.fence->GetCompletedValue() < frameResources.fenceValue) {
+        bool frameResourceReady = false;
         const HRESULT hr = frameResources.fence->SetEventOnCompletion(
             frameResources.fenceValue, _impl->fenceEvent);
         if (FAILED(hr)) {
             CC_LOG_ERROR("D3D12 device failed to wait for frame-resource reuse. HRESULT=0x%08x",
                          static_cast<unsigned>(hr));
         } else {
-            WaitForSingleObject(_impl->fenceEvent, INFINITE);
+            const DWORD waitResult = WaitForSingleObject(_impl->fenceEvent, INFINITE);
+            if (waitResult != WAIT_OBJECT_0) {
+                CC_LOG_ERROR("D3D12 frame-resource wait failed. result=%lu",
+                             static_cast<unsigned long>(waitResult));
+            } else {
+                const uint64_t completedValue = frameResources.fence->GetCompletedValue();
+                frameResourceReady =
+                    completedValue != std::numeric_limits<UINT64>::max() &&
+                    completedValue >= frameResources.fenceValue;
+                if (!frameResourceReady) {
+                    CC_LOG_ERROR(
+                        "D3D12 frame-resource completion is unresolved. completed=%llu expected=%llu",
+                        static_cast<unsigned long long>(completedValue),
+                        static_cast<unsigned long long>(frameResources.fenceValue));
+                }
+            }
+        }
+        if (!frameResourceReady) {
+            if (!waitIdle()) {
+                CC_LOG_ERROR(
+                    "D3D12 acquire refused to reuse unresolved frame resources.");
+                return;
+            }
         }
     }
 
@@ -542,7 +574,6 @@ void CCD3D12Device::acquire(Swapchain *const *swapchains, uint32_t count) {
         frameResources.samplerDescriptorHeapPool->reset();
     }
     if (!frameResources.uploadPages.empty()) {
-        notifyTransientUniformUpload();
         for (auto &page : frameResources.uploadPages) {
             page.offset = 0;
         }
@@ -560,6 +591,10 @@ void CCD3D12Device::acquire(Swapchain *const *swapchains, uint32_t count) {
             activeArena.resource->GetGPUVirtualAddress();
         activeTransientUniformFrameState.isValid = true;
     }
+    // Ordinary uniform descriptors may reference a frame-local upload page or
+    // stable slot. Switching frame resources invalidates those GPU addresses
+    // even when the CPU-side uniform value itself did not change.
+    notifyTransientUniformUpload();
 
     // The DeviceAgent and DeviceValidator layers unwrap their wrappers before
     // passing swapchains down to us, so the pointers here are raw CCD3D12Swapchain*.
@@ -586,6 +621,10 @@ CCD3D12Buffer *CCD3D12Device::getDummyBuffer() const {
 
 uint64_t CCD3D12Device::getBufferStateEpoch() const {
     return _impl ? _impl->bufferStateEpoch : 0;
+}
+
+uint64_t CCD3D12Device::getDeviceEpoch() const {
+    return _impl ? _impl->deviceEpoch : 0;
 }
 
 uint32_t CCD3D12Device::getActiveFrameResourceIndex() const {
@@ -1256,11 +1295,15 @@ void CCD3D12Device::copyBuffersToTextureImmediate(const uint8_t *const *buffers,
 
     auto *d3d12Texture = static_cast<CCD3D12Texture *>(dst);
     auto *textureResource = static_cast<ID3D12Resource *>(d3d12Texture->getD3D12ResourceHandle());
-    if (!textureResource) {
+    const auto backing = d3d12Texture->getD3D12ResourceBacking();
+    if (!textureResource || !backing) {
         return;
     }
 
     const auto &textureInfo = dst->getInfo();
+    const auto &textureView = dst->getViewInfo();
+    const uint32_t baseMip = dst->isTextureView() ? textureView.baseLevel : 0;
+    const uint32_t baseLayer = dst->isTextureView() ? textureView.baseLayer : 0;
     if (formatSize(textureInfo.format, 1, 1, 1) == 0) {
         CC_LOG_WARNING("D3D12 texture upload skipped for unsupported texel size.");
         return;
@@ -1298,11 +1341,23 @@ void CCD3D12Device::copyBuffersToTextureImmediate(const uint8_t *const *buffers,
         return;
     }
 
-    const D3D12_RESOURCE_STATES previousState = d3d12Texture->getCurrentState();
-    if (previousState != D3D12_RESOURCE_STATE_COPY_DEST) {
-        auto toCopyDest = textureTransition(textureResource, previousState, D3D12_RESOURCE_STATE_COPY_DEST);
-        uploadCommandList->ResourceBarrier(1, &toCopyDest);
-        d3d12Texture->setCurrentState(D3D12_RESOURCE_STATE_COPY_DEST);
+    ccstd::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> uploadSourceResources;
+    std::unordered_set<ID3D12Resource *> retainedUploadResources;
+    ccstd::vector<D3D12_RESOURCE_STATES> previousStates(backing->subresourceCount());
+    ccstd::vector<D3D12_RESOURCE_BARRIER> stateBarriers;
+    stateBarriers.reserve(backing->subresourceCount());
+    for (uint32_t subresource = 0; subresource < backing->subresourceCount(); ++subresource) {
+        previousStates[subresource] = backing->states.get(subresource);
+        D3D12_RESOURCE_BARRIER barrier{};
+        if (makeD3D12TransitionBarrier(
+                *backing, textureResource, subresource,
+                D3D12_RESOURCE_STATE_COPY_DEST, barrier)) {
+            stateBarriers.push_back(barrier);
+        }
+    }
+    if (!stateBarriers.empty()) {
+        uploadCommandList->ResourceBarrier(
+            static_cast<UINT>(stateBarriers.size()), stateBarriers.data());
     }
 
     for (uint32_t regionIndex = 0; regionIndex < count; ++regionIndex) {
@@ -1311,9 +1366,11 @@ void CCD3D12Device::copyBuffersToTextureImmediate(const uint8_t *const *buffers,
         }
 
         const auto &region = regions[regionIndex];
-        const uint32_t mipLevel = region.texSubres.mipLevel;
-        const uint32_t arrayLayer = textureInfo.type == TextureType::TEX3D ? 0 : region.texSubres.baseArrayLayer;
-        const uint32_t subresource = mipLevel + arrayLayer * textureInfo.levelCount;
+        const uint32_t mipLevel = baseMip + region.texSubres.mipLevel;
+        const uint32_t arrayLayer = textureInfo.type == TextureType::TEX3D
+                                        ? 0
+                                        : baseLayer + region.texSubres.baseArrayLayer;
+        const uint32_t subresource = backing->subresourceIndex(mipLevel, arrayLayer, 0);
         if (diagnoseMipUpload) {
             CC_LOG_INFO("[D3D12-MIP-DIAG] region=%u mip=%u layer=%u extent=%ux%ux%u offset=%d,%d,%d",
                         regionIndex, mipLevel, arrayLayer,
@@ -1326,8 +1383,9 @@ void CCD3D12Device::copyBuffersToTextureImmediate(const uint8_t *const *buffers,
         UINT64 rowSizeInBytes = 0;
         UINT64 uploadSize = 0;
         D3D12_RESOURCE_DESC textureDesc = textureResource->GetDesc();
-        _impl->d3dDevice->GetCopyableFootprints(&textureDesc, subresource, 1, 0, &footprint, &rowCount, &rowSizeInBytes, &uploadSize);
-        if (uploadSize == 0 || rowCount == 0) {
+        if (!getD3D12TextureUploadFootprint(
+                _impl->d3dDevice.Get(), textureDesc, region,
+                footprint, rowCount, rowSizeInBytes, uploadSize)) {
             continue;
         }
 
@@ -1336,6 +1394,10 @@ void CCD3D12Device::copyBuffersToTextureImmediate(const uint8_t *const *buffers,
             CC_LOG_ERROR("D3D12 texture upload allocation failed. size=%llu",
                          static_cast<unsigned long long>(uploadSize + footprint.Offset));
             continue;
+        }
+        auto *uploadResource = static_cast<ID3D12Resource *>(upload.resource);
+        if (retainedUploadResources.emplace(uploadResource).second) {
+            uploadSourceResources.emplace_back(uploadResource);
         }
 
         const uint32_t sourceRowTexels = region.buffStride > 0 ? region.buffStride : region.texExtent.width;
@@ -1387,16 +1449,16 @@ void CCD3D12Device::copyBuffersToTextureImmediate(const uint8_t *const *buffers,
             &srcBox);
 
         d3d12Texture->markBaseMipLayerUploaded(
-            mipLevel,
-            arrayLayer,
+            region.texSubres.mipLevel,
+            region.texSubres.baseArrayLayer,
             textureInfo.type == TextureType::TEX3D ? 1 : region.texSubres.layerCount);
     }
 
     ccstd::vector<Microsoft::WRL::ComPtr<ID3D12DescriptorHeap>> mipDescriptorHeaps;
     const bool shouldGenerateMipmaps = d3d12Texture->shouldGenerateMipmapsAfterUpload();
     const bool generatedMipmaps =
-        shouldGenerateMipmaps &&
-        generateD3D12Mipmaps(_impl->d3dDevice.Get(), uploadCommandList.Get(), textureResource,
+        !dst->isTextureView() && shouldGenerateMipmaps &&
+        generateD3D12Mipmaps(_impl->d3dDevice.Get(), uploadCommandList.Get(), textureResource, backing,
                              textureInfo, mipDescriptorHeaps);
     if (generatedMipmaps) {
         d3d12Texture->markMipmapsGenerated();
@@ -1407,16 +1469,19 @@ void CCD3D12Device::copyBuffersToTextureImmediate(const uint8_t *const *buffers,
                     shouldGenerateMipmaps ? (generatedMipmaps ? "success" : "failed") : "deferred",
                     mipDescriptorHeaps.size());
     }
-    const D3D12_RESOURCE_STATES postUploadState =
-        generatedMipmaps ? D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE : D3D12_RESOURCE_STATE_COPY_DEST;
-    if (postUploadState != previousState) {
-        auto restoreState = textureTransition(
-        textureResource,
-            postUploadState,
-            previousState);
-        uploadCommandList->ResourceBarrier(1, &restoreState);
+    stateBarriers.clear();
+    for (uint32_t subresource = 0; subresource < backing->subresourceCount(); ++subresource) {
+        D3D12_RESOURCE_BARRIER barrier{};
+        if (makeD3D12TransitionBarrier(
+                *backing, textureResource, subresource,
+                previousStates[subresource], barrier)) {
+            stateBarriers.push_back(barrier);
+        }
     }
-    d3d12Texture->setCurrentState(previousState);
+    if (!stateBarriers.empty()) {
+        uploadCommandList->ResourceBarrier(
+            static_cast<UINT>(stateBarriers.size()), stateBarriers.data());
+    }
 
     hr = uploadCommandList->Close();
     if (FAILED(hr)) {
@@ -1427,20 +1492,34 @@ void CCD3D12Device::copyBuffersToTextureImmediate(const uint8_t *const *buffers,
     ID3D12CommandList *commandLists[] = {uploadCommandList.Get()};
     _impl->graphicsQueue->ExecuteCommandLists(1, commandLists);
 
-    ++_impl->fenceValue;
-    hr = _impl->graphicsQueue->Signal(_impl->frameFence.Get(), _impl->fenceValue);
-    if (FAILED(hr)) {
-        CC_LOG_ERROR("D3D12 upload fence signal failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
-        waitForGpu();
-        return;
-    }
-
     Impl::PendingUploadCommandContext pendingContext;
     pendingContext.commandAllocator = std::move(uploadCommandAllocator);
     pendingContext.commandList = std::move(uploadCommandList);
     pendingContext.referencedResources.emplace_back(textureResource);
+    pendingContext.referencedResources.insert(
+        pendingContext.referencedResources.end(),
+        std::make_move_iterator(uploadSourceResources.begin()),
+        std::make_move_iterator(uploadSourceResources.end()));
     pendingContext.descriptorHeaps = std::move(mipDescriptorHeaps);
+
+    ++_impl->fenceValue;
+    hr = _impl->graphicsQueue->Signal(_impl->frameFence.Get(), _impl->fenceValue);
+    if (FAILED(hr)) {
+        CC_LOG_ERROR("D3D12 upload fence signal failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+        if (!waitIdle()) {
+            pendingContext.fenceValue = std::numeric_limits<uint64_t>::max();
+            auto &frameResources = _impl->frameResources[_impl->activeFrameResource];
+            frameResources.fence = _impl->frameFence;
+            frameResources.fenceValue = pendingContext.fenceValue;
+            _impl->pendingUploadCommandContexts.emplace_back(std::move(pendingContext));
+        }
+        return;
+    }
+
     pendingContext.fenceValue = _impl->fenceValue;
+    auto &frameResources = _impl->frameResources[_impl->activeFrameResource];
+    frameResources.fence = _impl->frameFence;
+    frameResources.fenceValue = _impl->fenceValue;
     _impl->pendingUploadCommandContexts.emplace_back(std::move(pendingContext));
     if (diagnoseMipUpload) {
         CC_LOG_INFO("[D3D12-MIP-DIAG] upload submitted async resource=%p fence=%llu pendingContexts=%zu",
@@ -1457,17 +1536,23 @@ void CCD3D12Device::copyTextureToBuffers(Texture *src, uint8_t *const *buffers, 
 
     auto *d3d12Texture = static_cast<CCD3D12Texture *>(src);
     auto *textureResource = static_cast<ID3D12Resource *>(d3d12Texture->getD3D12ResourceHandle());
-    if (!textureResource) {
+    const auto backing = d3d12Texture->getD3D12ResourceBacking();
+    if (!textureResource || !backing) {
         return;
     }
 
     const auto &textureInfo = src->getInfo();
+    const auto &textureView = src->getViewInfo();
+    const uint32_t baseMip = src->isTextureView() ? textureView.baseLevel : 0;
+    const uint32_t baseLayer = src->isTextureView() ? textureView.baseLayer : 0;
     if (textureInfo.samples != SampleCount::X1) {
         CC_LOG_WARNING("D3D12 texture readback skipped for multisampled texture. Resolve before readback.");
         return;
     }
 
-    waitForGpu();
+    if (!waitForGpu()) {
+        return;
+    }
 
     HRESULT hr = _impl->commandAllocator->Reset();
     if (FAILED(hr)) {
@@ -1481,11 +1566,21 @@ void CCD3D12Device::copyTextureToBuffers(Texture *src, uint8_t *const *buffers, 
         return;
     }
 
-    const D3D12_RESOURCE_STATES previousState = d3d12Texture->getCurrentState();
-    if (previousState != D3D12_RESOURCE_STATE_COPY_SOURCE) {
-        auto toCopySource = textureTransition(textureResource, previousState, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        _impl->commandList->ResourceBarrier(1, &toCopySource);
-        d3d12Texture->setCurrentState(D3D12_RESOURCE_STATE_COPY_SOURCE);
+    ccstd::vector<D3D12_RESOURCE_STATES> previousStates(backing->subresourceCount());
+    ccstd::vector<D3D12_RESOURCE_BARRIER> stateBarriers;
+    stateBarriers.reserve(backing->subresourceCount());
+    for (uint32_t subresource = 0; subresource < backing->subresourceCount(); ++subresource) {
+        previousStates[subresource] = backing->states.get(subresource);
+        D3D12_RESOURCE_BARRIER barrier{};
+        if (makeD3D12TransitionBarrier(
+                *backing, textureResource, subresource,
+                D3D12_RESOURCE_STATE_COPY_SOURCE, barrier)) {
+            stateBarriers.push_back(barrier);
+        }
+    }
+    if (!stateBarriers.empty()) {
+        _impl->commandList->ResourceBarrier(
+            static_cast<UINT>(stateBarriers.size()), stateBarriers.data());
     }
 
     struct ReadbackRegion {
@@ -1505,9 +1600,11 @@ void CCD3D12Device::copyTextureToBuffers(Texture *src, uint8_t *const *buffers, 
         }
 
         const auto &copyRegion = regions[regionIndex];
-        const uint32_t mipLevel = copyRegion.texSubres.mipLevel;
-        const uint32_t arrayLayer = textureInfo.type == TextureType::TEX3D ? 0 : copyRegion.texSubres.baseArrayLayer;
-        const uint32_t subresource = mipLevel + arrayLayer * textureInfo.levelCount;
+        const uint32_t mipLevel = baseMip + copyRegion.texSubres.mipLevel;
+        const uint32_t arrayLayer = textureInfo.type == TextureType::TEX3D
+                                        ? 0
+                                        : baseLayer + copyRegion.texSubres.baseArrayLayer;
+        const uint32_t subresource = backing->subresourceIndex(mipLevel, arrayLayer, 0);
 
         D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
         UINT rowCount = 0;
@@ -1580,10 +1677,18 @@ void CCD3D12Device::copyTextureToBuffers(Texture *src, uint8_t *const *buffers, 
         readbackRegions.push_back(std::move(readbackRegion));
     }
 
-    if (previousState != D3D12_RESOURCE_STATE_COPY_SOURCE) {
-        auto restoreState = textureTransition(textureResource, D3D12_RESOURCE_STATE_COPY_SOURCE, previousState);
-        _impl->commandList->ResourceBarrier(1, &restoreState);
-        d3d12Texture->setCurrentState(previousState);
+    stateBarriers.clear();
+    for (uint32_t subresource = 0; subresource < backing->subresourceCount(); ++subresource) {
+        D3D12_RESOURCE_BARRIER barrier{};
+        if (makeD3D12TransitionBarrier(
+                *backing, textureResource, subresource,
+                previousStates[subresource], barrier)) {
+            stateBarriers.push_back(barrier);
+        }
+    }
+    if (!stateBarriers.empty()) {
+        _impl->commandList->ResourceBarrier(
+            static_cast<UINT>(stateBarriers.size()), stateBarriers.data());
     }
 
     hr = _impl->commandList->Close();
@@ -1595,7 +1700,9 @@ void CCD3D12Device::copyTextureToBuffers(Texture *src, uint8_t *const *buffers, 
     if (!readbackRegions.empty()) {
         ID3D12CommandList *commandLists[] = {_impl->commandList.Get()};
         _impl->graphicsQueue->ExecuteCommandLists(1, commandLists);
-        waitForGpu();
+        if (!waitForGpu()) {
+            return;
+        }
 
         for (const auto &readbackRegion : readbackRegions) {
             void *mappedData = nullptr;
@@ -1903,26 +2010,67 @@ bool CCD3D12Device::initializeD3D12Context() {
     return true;
 }
 
-void CCD3D12Device::waitForGpu() {
+bool CCD3D12Device::waitForGpu() {
+    return waitIdle();
+}
+
+bool CCD3D12Device::waitIdle() {
     if (!_impl->graphicsQueue || !_impl->frameFence || !_impl->fenceEvent) {
-        return;
+        CC_LOG_ERROR("D3D12 waitIdle failed: queue or fence synchronization object is unavailable.");
+        return false;
     }
+
+    auto logDeviceFailure = [this](const char *stage, HRESULT hr) {
+        const HRESULT removedReason = _impl->d3dDevice
+                                          ? _impl->d3dDevice->GetDeviceRemovedReason()
+                                          : E_POINTER;
+        CC_LOG_ERROR("D3D12 waitIdle %s failed. HRESULT=0x%08x DeviceRemovedReason=0x%08x",
+                     stage, static_cast<unsigned>(hr), static_cast<unsigned>(removedReason));
+    };
 
     ++_impl->fenceValue;
     HRESULT hr = _impl->graphicsQueue->Signal(_impl->frameFence.Get(), _impl->fenceValue);
     if (FAILED(hr)) {
-        CC_LOG_ERROR("waitForGpu signal failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
-        return;
+        logDeviceFailure("signal", hr);
+        return false;
     }
 
-    if (_impl->frameFence->GetCompletedValue() < _impl->fenceValue) {
+    constexpr UINT64 DEVICE_REMOVED_FENCE_VALUE = std::numeric_limits<UINT64>::max();
+    UINT64 completedValue = _impl->frameFence->GetCompletedValue();
+    if (completedValue == DEVICE_REMOVED_FENCE_VALUE) {
+        logDeviceFailure("completion query", DXGI_ERROR_DEVICE_REMOVED);
+        return false;
+    }
+    if (completedValue < _impl->fenceValue) {
         hr = _impl->frameFence->SetEventOnCompletion(_impl->fenceValue, _impl->fenceEvent);
         if (FAILED(hr)) {
-            CC_LOG_ERROR("waitForGpu SetEventOnCompletion failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
-            return;
+            logDeviceFailure("SetEventOnCompletion", hr);
+            return false;
         }
-        WaitForSingleObject(_impl->fenceEvent, INFINITE);
+        const DWORD waitResult = WaitForSingleObject(_impl->fenceEvent, INFINITE);
+        if (waitResult != WAIT_OBJECT_0) {
+            CC_LOG_ERROR("D3D12 waitIdle fence wait failed. result=%lu",
+                         static_cast<unsigned long>(waitResult));
+            logDeviceFailure(
+                "fence wait",
+                waitResult == WAIT_FAILED ? HRESULT_FROM_WIN32(GetLastError()) : E_FAIL);
+            return false;
+        }
+        completedValue = _impl->frameFence->GetCompletedValue();
+        if (completedValue == DEVICE_REMOVED_FENCE_VALUE ||
+            completedValue < _impl->fenceValue) {
+            logDeviceFailure("post-wait completion query",
+                             completedValue == DEVICE_REMOVED_FENCE_VALUE
+                                 ? DXGI_ERROR_DEVICE_REMOVED
+                                 : E_FAIL);
+            return false;
+        }
     }
+    if (_queue) {
+        static_cast<CCD3D12Queue *>(_queue)->retireSubmittedContexts(true);
+    }
+    retireFrameResources();
+    return true;
 }
 
 void *CCD3D12Device::getD3D12DeviceHandle() const {
@@ -1935,6 +2083,58 @@ void *CCD3D12Device::getGraphicsQueueHandle() const {
 
 void *CCD3D12Device::getDXGIFactoryHandle() const {
     return _impl ? _impl->dxgiFactory.Get() : nullptr;
+}
+
+std::shared_ptr<void> CCD3D12Device::getBlitPipelineCacheEntry(uint32_t key) const {
+    if (!_impl) {
+        return {};
+    }
+    std::lock_guard<std::mutex> lock(_impl->nativePipelineCacheMutex);
+    const auto iter = _impl->blitPipelineCache.find(key);
+    return iter == _impl->blitPipelineCache.end() ? std::shared_ptr<void>{} : iter->second;
+}
+
+std::shared_ptr<void> CCD3D12Device::cacheBlitPipeline(uint32_t key, std::shared_ptr<void> pipeline) {
+    if (!_impl || !pipeline) {
+        return {};
+    }
+    std::lock_guard<std::mutex> lock(_impl->nativePipelineCacheMutex);
+    const auto inserted = _impl->blitPipelineCache.emplace(key, std::move(pipeline));
+    return inserted.first->second;
+}
+
+void *CCD3D12Device::getOrCreateEmptyRootSignature() {
+    if (!_impl || !_impl->d3dDevice) {
+        return nullptr;
+    }
+
+    std::lock_guard<std::mutex> lock(_impl->nativePipelineCacheMutex);
+    if (_impl->emptyRootSignature) {
+        return _impl->emptyRootSignature.Get();
+    }
+
+    D3D12_ROOT_SIGNATURE_DESC desc{};
+    desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+    Microsoft::WRL::ComPtr<ID3DBlob> signatureBlob;
+    Microsoft::WRL::ComPtr<ID3DBlob> errorBlob;
+    HRESULT hr = D3D12SerializeRootSignature(
+        &desc, D3D_ROOT_SIGNATURE_VERSION_1, &signatureBlob, &errorBlob);
+    if (FAILED(hr)) {
+        CC_LOG_ERROR("D3D12 empty root signature serialization failed. HRESULT=0x%08x",
+                     static_cast<unsigned>(hr));
+        return nullptr;
+    }
+
+    hr = _impl->d3dDevice->CreateRootSignature(
+        0, signatureBlob->GetBufferPointer(), signatureBlob->GetBufferSize(),
+        IID_PPV_ARGS(&_impl->emptyRootSignature));
+    if (FAILED(hr)) {
+        CC_LOG_ERROR("D3D12 empty root signature creation failed. HRESULT=0x%08x",
+                     static_cast<unsigned>(hr));
+        return nullptr;
+    }
+    return _impl->emptyRootSignature.Get();
 }
 
 D3D12DescriptorHeapPool *CCD3D12Device::getGPUDescriptorHeapPool() const {

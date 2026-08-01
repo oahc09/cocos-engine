@@ -44,6 +44,7 @@
 #include <d3d12.h>
 #include <d3dcompiler.h>
 
+#include <algorithm>
 #include <chrono>
 #include <atomic>
 #include <cctype>
@@ -64,7 +65,7 @@ namespace gfx {
 namespace {
 using D3D12PerfClock = std::chrono::steady_clock;
 
-constexpr uint32_t CC_D3D12_DXBC_CACHE_VERSION = 4;
+constexpr uint32_t CC_D3D12_DXBC_CACHE_VERSION = 8;
 constexpr uint32_t CC_D3D12_MIGRATABLE_DXBC_CACHE_VERSION = 3;
 constexpr uint32_t CC_D3D12_BACKGROUND_SHADER_PRECOMPILE_WORKERS = 3;
 constexpr uint32_t CC_D3D12_MAX_CONCURRENT_SHADER_COMPILES =
@@ -532,6 +533,58 @@ struct D3D12ShaderSourceOptimization {
     bool changed{false};
 };
 
+uint32_t replaceD3D12ShaderSourceAll(ccstd::string &source,
+                                     const char *legacyExpression,
+                                     const char *d3d12Expression) {
+    uint32_t replacements = 0;
+    size_t position = 0;
+    const size_t legacyLength = std::strlen(legacyExpression);
+    const size_t replacementLength = std::strlen(d3d12Expression);
+    while ((position = source.find(legacyExpression, position)) != ccstd::string::npos) {
+        source.replace(position, legacyLength, d3d12Expression);
+        position += replacementLength;
+        ++replacements;
+    }
+    return replacements;
+}
+
+struct D3D12LegacyShadowSourceRewrite {
+    ccstd::string source;
+    uint32_t replacements{0};
+};
+
+D3D12LegacyShadowSourceRewrite rewriteD3D12LegacyShadowClipDepth(const ccstd::string &source) {
+    D3D12LegacyShadowSourceRewrite result{source};
+
+    // Effects compiled before D3D12 support baked OpenGL's [-1, 1] shadow Z
+    // conversion directly into GLSL. D3D12 matrices already produce [0, 1],
+    // so preserve the XY viewport transform while leaving Z untouched.
+    result.replacements += replaceD3D12ShaderSourceAll(
+        result.source,
+        "shadowNDCPos = shadowPosWithDepthBias.xyz / shadowPosWithDepthBias.w * 0.5 + 0.5;",
+        "shadowNDCPos = shadowPosWithDepthBias.xyz / shadowPosWithDepthBias.w;\n"
+        "  shadowNDCPos.xy = shadowNDCPos.xy * 0.5 + 0.5;");
+    result.replacements += replaceD3D12ShaderSourceAll(
+        result.source,
+        "vec3 clipPos = shadowPos.xyz / shadowPos.w * 0.5 + 0.5;",
+        "vec3 clipPos = shadowPos.xyz / shadowPos.w;\n"
+        "          clipPos.xy = clipPos.xy * 0.5 + 0.5;");
+    result.replacements += replaceD3D12ShaderSourceAll(
+        result.source,
+        "shadowPos.z = CCGetLinearDepth(worldPos, viewspaceDepthBias) * 2.0 - 1.0;",
+        "shadowPos.z = CCGetLinearDepth(worldPos, viewspaceDepthBias);");
+    result.replacements += replaceD3D12ShaderSourceAll(
+        result.source,
+        "highp float clipDepth = v_clip_depth.x / v_clip_depth.y * 0.5 + 0.5;",
+        "highp float clipDepth = v_clip_depth.x / v_clip_depth.y;");
+    result.replacements += replaceD3D12ShaderSourceAll(
+        result.source,
+        "v_clip_depth = clipPos.z / clipPos.w * 0.5 + 0.5;",
+        "v_clip_depth = clipPos.z / clipPos.w;");
+
+    return result;
+}
+
 D3D12ShaderSourceOptimization optimizeD3D12ShaderSource(ShaderStageFlagBit stage,
                                                          const ccstd::string &shaderName,
                                                          const ccstd::string &source,
@@ -592,6 +645,125 @@ D3D12ShaderSourceOptimization optimizeD3D12ShaderSource(ShaderStageFlagBit stage
                     static_cast<unsigned>(result.source.size()));
     }
     return result;
+}
+
+ccstd::string makeStageLinkageKey(const CCD3D12Shader::StageLinkageParameter &parameter) {
+    ccstd::string key = parameter.semanticName;
+    for (char &c : key) {
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+    key += std::to_string(parameter.semanticIndex);
+    return key;
+}
+
+ccstd::string makeStageLinkageCacheSalt(
+    const ccstd::vector<CCD3D12Shader::StageLinkageParameter> &linkage) {
+    ccstd::string salt = "\n// CC_D3D12_FRAGMENT_LINKAGE";
+    for (const auto &parameter : linkage) {
+        salt += " " + makeStageLinkageKey(parameter) + ":" +
+                std::to_string(parameter.registerIndex) + ":" +
+                std::to_string(parameter.componentMask) + ":" +
+                std::to_string(parameter.componentType);
+    }
+    return salt;
+}
+
+ccstd::string makeLinkageDummyType(const CCD3D12Shader::StageLinkageParameter &parameter) {
+    uint32_t componentCount = 0;
+    for (uint32_t mask = parameter.componentMask; mask != 0; mask >>= 1U) {
+        componentCount += mask & 1U;
+    }
+    componentCount = std::max(1U, componentCount);
+
+    ccstd::string type;
+    switch (static_cast<D3D_REGISTER_COMPONENT_TYPE>(parameter.componentType)) {
+        case D3D_REGISTER_COMPONENT_SINT32: type = "int"; break;
+        case D3D_REGISTER_COMPONENT_UINT32: type = "uint"; break;
+        default: type = "float"; break;
+    }
+    if (componentCount > 1) {
+        type += std::to_string(componentCount);
+    }
+    return type;
+}
+
+bool patchD3D12FragmentInputLinkage(
+    std::string &hlslSource,
+    const ccstd::vector<CCD3D12Shader::StageLinkageParameter> &fragmentLinkage) {
+    if (fragmentLinkage.empty()) {
+        return false;
+    }
+    const size_t inputStruct = hlslSource.find("struct SPIRV_Cross_Input");
+    if (inputStruct == std::string::npos) {
+        return false;
+    }
+    const size_t bodyBegin = hlslSource.find('{', inputStruct);
+    const size_t bodyEnd = bodyBegin == std::string::npos ? std::string::npos : hlslSource.find('}', bodyBegin);
+    if (bodyBegin == std::string::npos || bodyEnd == std::string::npos) {
+        return false;
+    }
+
+    struct InputField {
+        std::string declaration;
+        ccstd::string linkageKey;
+        bool consumed{false};
+    };
+    std::vector<InputField> fields;
+    const std::string inputBody = hlslSource.substr(bodyBegin + 1, bodyEnd - bodyBegin - 1);
+    const std::regex semanticRegex(R"(:\s*([A-Za-z_][A-Za-z0-9_]*?)([0-9]+)\s*;)");
+    size_t lineStart = 0;
+    while (lineStart < inputBody.size()) {
+        size_t lineEnd = inputBody.find('\n', lineStart);
+        if (lineEnd == std::string::npos) {
+            lineEnd = inputBody.size();
+        } else {
+            ++lineEnd;
+        }
+        std::string declaration = inputBody.substr(lineStart, lineEnd - lineStart);
+        std::smatch match;
+        ccstd::string linkageKey;
+        if (std::regex_search(declaration, match, semanticRegex)) {
+            linkageKey = match[1].str();
+            for (char &c : linkageKey) {
+                c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            }
+            linkageKey += match[2].str();
+        }
+        fields.push_back({std::move(declaration), std::move(linkageKey), false});
+        lineStart = lineEnd;
+    }
+
+    std::string rebuiltBody = "\n";
+    uint32_t dummyIndex = 0;
+    for (const auto &parameter : fragmentLinkage) {
+        const ccstd::string linkageKey = makeStageLinkageKey(parameter);
+        auto field = std::find_if(fields.begin(), fields.end(), [&linkageKey](const InputField &candidate) {
+            return !candidate.consumed && candidate.linkageKey == linkageKey;
+        });
+        if (field != fields.end()) {
+            rebuiltBody += field->declaration;
+            field->consumed = true;
+            continue;
+        }
+
+        const bool integerInput = parameter.componentType == D3D_REGISTER_COMPONENT_SINT32 ||
+                                  parameter.componentType == D3D_REGISTER_COMPONENT_UINT32;
+        rebuiltBody += "    ";
+        if (integerInput) {
+            rebuiltBody += "nointerpolation ";
+        }
+        rebuiltBody += makeLinkageDummyType(parameter) + " _cc_d3d12_linkage_" +
+                       std::to_string(dummyIndex++) + " : " + parameter.semanticName +
+                       std::to_string(parameter.semanticIndex) + ";\n";
+    }
+    for (const auto &field : fields) {
+        if (!field.consumed) {
+            rebuiltBody += field.declaration;
+        }
+    }
+
+    hlslSource.replace(bodyBegin + 1, bodyEnd - bodyBegin - 1, rebuiltBody);
+    return true;
 }
 
 ccstd::string buildD3D12StageDiagnosticGroupingSource(ShaderStageFlagBit stage,
@@ -1019,6 +1191,61 @@ bool isSystemValueSemantic(const char *semanticName) {
     return semanticName && _strnicmp(semanticName, "SV_", 3) == 0;
 }
 
+bool reflectStageLinkage(const void *bytecode,
+                         size_t bytecodeSize,
+                         bool output,
+                         ccstd::vector<CCD3D12Shader::StageLinkageParameter> &linkage) {
+    linkage.clear();
+    if (!bytecode || bytecodeSize == 0) {
+        return false;
+    }
+    Microsoft::WRL::ComPtr<ID3D12ShaderReflection> reflection;
+    if (FAILED(D3DReflect(bytecode, bytecodeSize, IID_PPV_ARGS(&reflection))) || !reflection) {
+        return false;
+    }
+    D3D12_SHADER_DESC shaderDesc{};
+    if (FAILED(reflection->GetDesc(&shaderDesc))) {
+        return false;
+    }
+    const UINT parameterCount = output ? shaderDesc.OutputParameters : shaderDesc.InputParameters;
+    linkage.reserve(parameterCount);
+    for (UINT i = 0; i < parameterCount; ++i) {
+        D3D12_SIGNATURE_PARAMETER_DESC parameter{};
+        const HRESULT hr = output ? reflection->GetOutputParameterDesc(i, &parameter)
+                                  : reflection->GetInputParameterDesc(i, &parameter);
+        if (FAILED(hr) || isSystemValueSemantic(parameter.SemanticName)) {
+            continue;
+        }
+        linkage.push_back({
+            parameter.SemanticName ? parameter.SemanticName : "",
+            parameter.SemanticIndex,
+            parameter.Register,
+            parameter.Mask,
+            static_cast<uint32_t>(parameter.ComponentType),
+        });
+    }
+    return true;
+}
+
+bool stageLinkageIsCompatible(
+    const ccstd::vector<CCD3D12Shader::StageLinkageParameter> &vertexOutputs,
+    const ccstd::vector<CCD3D12Shader::StageLinkageParameter> &fragmentInputs) {
+    for (const auto &fragmentInput : fragmentInputs) {
+        const ccstd::string fragmentKey = makeStageLinkageKey(fragmentInput);
+        const auto vertexOutput = std::find_if(
+            vertexOutputs.begin(), vertexOutputs.end(), [&fragmentKey](const auto &candidate) {
+                return makeStageLinkageKey(candidate) == fragmentKey;
+            });
+        if (vertexOutput == vertexOutputs.end() ||
+            vertexOutput->registerIndex != fragmentInput.registerIndex ||
+            vertexOutput->componentMask != fragmentInput.componentMask ||
+            vertexOutput->componentType != fragmentInput.componentType) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void reflectVertexInputSignature(const std::vector<uint8_t> &dxbc,
                                  std::vector<CCD3D12Shader::VertexInputSignature> &signature) {
     signature.clear();
@@ -1090,6 +1317,8 @@ struct CCD3D12Shader::Impl {
     // Per-stage bytecode storage (self-owned)
     std::vector<uint8_t> vertexDXBC;
     std::vector<uint8_t> fragmentDXBC;
+    std::vector<uint8_t> linkedFragmentDXBC;
+    ccstd::string linkedFragmentKey;
     std::vector<uint8_t> geometryDXBC;
     std::vector<uint8_t> computeDXBC;
     std::vector<uint8_t> hullDXBC;
@@ -1228,7 +1457,8 @@ bool CCD3D12Shader::compileGLSLToDXBC(ShaderStageFlagBit stage,
                                        const ccstd::string &shaderName,
                                        std::vector<uint8_t> &outDXBC,
                                        bool cacheOnly,
-                                       bool *cacheMiss) {
+                                       bool *cacheMiss,
+                                       const ccstd::vector<StageLinkageParameter> *fragmentLinkage) {
     const auto compileStart = D3D12PerfClock::now();
     if (cacheMiss) {
         *cacheMiss = false;
@@ -1249,16 +1479,25 @@ bool CCD3D12Shader::compileGLSLToDXBC(ShaderStageFlagBit stage,
     // The glsl4 source from EffectAsset does NOT contain #version;
     // each desktop backend must prepend it at runtime.
     // ============================================================
-    const auto optimizedSource = optimizeD3D12ShaderSource(stage, shaderName, glslSource);
+    const auto legacyShadowRewrite = rewriteD3D12LegacyShadowClipDepth(glslSource);
+    const auto optimizedSource = optimizeD3D12ShaderSource(
+        stage, shaderName, legacyShadowRewrite.source);
     const ccstd::string &compileSource = optimizedSource.source;
     const ccstd::string diagnosticGroupingSource =
         buildD3D12StageDiagnosticGroupingSource(stage, shaderName, compileSource);
     const ccstd::string processedSource = buildD3D12ProcessedSource(compileSource);
     const ccstd::string processedDiagnosticGroupingSource = buildD3D12ProcessedSource(diagnosticGroupingSource);
+    ccstd::string cacheSource = processedSource;
+    ccstd::string diagnosticCacheSource = processedDiagnosticGroupingSource;
+    if (fragmentLinkage && !fragmentLinkage->empty()) {
+        const ccstd::string linkageSalt = makeStageLinkageCacheSalt(*fragmentLinkage);
+        cacheSource += linkageSalt;
+        diagnosticCacheSource += linkageSalt;
+    }
 
     const ccstd::string diagnosticGroupingKey = makeDXBCCacheKey(
-        stage, profile, entryName, compileFlags, processedDiagnosticGroupingSource);
-    const ccstd::string fullSourceKey = makeDXBCCacheKey(stage, profile, entryName, compileFlags, processedSource);
+        stage, profile, entryName, compileFlags, diagnosticCacheSource);
+    const ccstd::string fullSourceKey = makeDXBCCacheKey(stage, profile, entryName, compileFlags, cacheSource);
     // A normalized key may group variants for diagnostics, but it is not safe as a bytecode cache identity.
     // Cache and in-flight compile ownership must always use the complete processed source.
     const ccstd::string &cacheKey = fullSourceKey;
@@ -1290,9 +1529,10 @@ bool CCD3D12Shader::compileGLSLToDXBC(ShaderStageFlagBit stage,
             cacheHitBackend = sessionHydrated ? "file+session-hydrate" : "file";
         } else if (cacheLookupPolicy.probeLegacyV3) {
             const auto legacyLookupStart = D3D12PerfClock::now();
-            const auto legacyOptimizedSource = optimizeD3D12ShaderSource(stage, shaderName, glslSource, false);
-            const bool legacySourceIsSafe =
-                !legacyOptimizedSource.changed || !sourceUsesLineSensitiveMacros(glslSource);
+            const auto legacyOptimizedSource = optimizeD3D12ShaderSource(
+                stage, shaderName, legacyShadowRewrite.source, false);
+            const bool legacySourceIsSafe = !fragmentLinkage &&
+                (!legacyOptimizedSource.changed || !sourceUsesLineSensitiveMacros(glslSource));
             legacyFileCacheEligible = legacySourceIsSafe;
             if (legacySourceIsSafe) {
                 const ccstd::string legacyProcessedSource = buildD3D12ProcessedSource(legacyOptimizedSource.source);
@@ -1532,6 +1772,11 @@ bool CCD3D12Shader::compileGLSLToDXBC(ShaderStageFlagBit stage,
         hlslSource = hlslCompiler.compile();
     } catch (const spirv_cross::CompilerError &e) {
         CC_LOG_ERROR("D3D12Shader: SPIR-V -> HLSL failed: %s", e.what());
+        return inFlightCompletion.finish(false);
+    }
+    if (stage == ShaderStageFlagBit::FRAGMENT && fragmentLinkage &&
+        !patchD3D12FragmentInputLinkage(hlslSource, *fragmentLinkage)) {
+        CC_LOG_ERROR("D3D12Shader '%s': failed to align fragment input linkage.", shaderName.c_str());
         return inFlightCompletion.finish(false);
     }
     spirvToHlslMs = elapsedMs(spirvToHlslStart);
@@ -1783,6 +2028,8 @@ void CCD3D12Shader::doInit(const ShaderInfo &info) {
         std::lock_guard<std::mutex> lock(_impl->compileMutex);
         _impl->vertexDXBC.clear();
         _impl->fragmentDXBC.clear();
+        _impl->linkedFragmentDXBC.clear();
+        _impl->linkedFragmentKey.clear();
         _impl->geometryDXBC.clear();
         _impl->computeDXBC.clear();
         _impl->hullDXBC.clear();
@@ -1878,6 +2125,8 @@ void CCD3D12Shader::doDestroy() {
         std::lock_guard<std::mutex> lock(_impl->compileMutex);
         _impl->vertexDXBC.clear();
         _impl->fragmentDXBC.clear();
+        _impl->linkedFragmentDXBC.clear();
+        _impl->linkedFragmentKey.clear();
         _impl->geometryDXBC.clear();
         _impl->computeDXBC.clear();
         _impl->hullDXBC.clear();
@@ -2076,6 +2325,81 @@ CCD3D12Shader::BytecodeBlob CCD3D12Shader::getVertexBytecode() const {
 
 CCD3D12Shader::BytecodeBlob CCD3D12Shader::getFragmentBytecode() const {
     return ensureStageBytecode(ShaderStageFlagBit::FRAGMENT);
+}
+
+CCD3D12Shader::BytecodeBlob CCD3D12Shader::getFragmentBytecodeForVertexLinkage() const {
+    const BytecodeBlob vertexBytecode = ensureStageBytecode(ShaderStageFlagBit::VERTEX);
+    const BytecodeBlob fragmentBytecode = ensureStageBytecode(ShaderStageFlagBit::FRAGMENT);
+    if (!vertexBytecode.data || !fragmentBytecode.data) {
+        return fragmentBytecode;
+    }
+
+    Impl::StageRequestLease linkageRequestLease;
+    uint64_t generation = 0;
+    {
+        std::lock_guard<std::mutex> lock(_impl->compileMutex);
+        if (!_impl->acceptingStageRequests) {
+            return {};
+        }
+        ++_impl->activeStageRequests;
+        linkageRequestLease.arm(_impl.get());
+        generation = _impl->generation;
+    }
+
+    ccstd::vector<StageLinkageParameter> vertexOutputs;
+    ccstd::vector<StageLinkageParameter> fragmentInputs;
+    if (!reflectStageLinkage(vertexBytecode.data, vertexBytecode.size, true, vertexOutputs) ||
+        !reflectStageLinkage(fragmentBytecode.data, fragmentBytecode.size, false, fragmentInputs) ||
+        stageLinkageIsCompatible(vertexOutputs, fragmentInputs)) {
+        return fragmentBytecode;
+    }
+
+    const ccstd::string linkageKey = makeStageLinkageCacheSalt(vertexOutputs);
+    ccstd::string source;
+    ccstd::string entry;
+    ccstd::string shaderName;
+    {
+        std::lock_guard<std::mutex> lock(_impl->compileMutex);
+        if (!_impl->acceptingStageRequests) {
+            return fragmentBytecode;
+        }
+        if (_impl->linkedFragmentKey == linkageKey && !_impl->linkedFragmentDXBC.empty()) {
+            return {_impl->linkedFragmentDXBC.data(), _impl->linkedFragmentDXBC.size()};
+        }
+        if (_impl->fragmentSource.source.empty()) {
+            CC_LOG_ERROR("D3D12Shader: incompatible VS/PS linkage cannot be repaired without fragment GLSL source.");
+            return fragmentBytecode;
+        }
+        source = _impl->fragmentSource.source;
+        entry = _impl->fragmentSource.entry;
+        shaderName = _impl->fragmentSource.shaderName;
+    }
+
+    std::vector<uint8_t> linkedBytecode;
+    if (!compileGLSLToDXBC(ShaderStageFlagBit::FRAGMENT, source, entry, shaderName,
+                           linkedBytecode, false, nullptr, &vertexOutputs)) {
+        CC_LOG_ERROR("D3D12Shader '%s': failed to compile linkage-compatible fragment bytecode.",
+                     shaderName.c_str());
+        return fragmentBytecode;
+    }
+
+    ccstd::vector<StageLinkageParameter> linkedInputs;
+    if (!reflectStageLinkage(linkedBytecode.data(), linkedBytecode.size(), false, linkedInputs) ||
+        !stageLinkageIsCompatible(vertexOutputs, linkedInputs)) {
+        CC_LOG_ERROR("D3D12Shader '%s': repaired fragment bytecode still has incompatible stage linkage.",
+                     shaderName.c_str());
+        return fragmentBytecode;
+    }
+
+    std::lock_guard<std::mutex> lock(_impl->compileMutex);
+    if (!_impl->acceptingStageRequests || _impl->generation != generation) {
+        return {};
+    }
+    if (_impl->linkedFragmentKey != linkageKey || _impl->linkedFragmentDXBC.empty()) {
+        _impl->linkedFragmentDXBC = std::move(linkedBytecode);
+        _impl->linkedFragmentKey = linkageKey;
+    }
+    return {_impl->linkedFragmentDXBC.data(), _impl->linkedFragmentDXBC.size()};
 }
 
 CCD3D12Shader::BytecodeBlob CCD3D12Shader::getGeometryBytecode() const {

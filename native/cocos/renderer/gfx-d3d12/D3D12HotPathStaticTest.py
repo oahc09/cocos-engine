@@ -46,8 +46,30 @@ def test_restored_revision_fast_paths() -> None:
         "void CCD3D12DescriptorSet::updateForLocalRootCbv",
     )
     assert local_update.index("observedTransientUniformUploadGeneration") < local_update.index(
-        "for (const auto &slot"
+        "for (auto &slot"
     )
+
+
+def test_legacy_shadow_depth_source_is_normalized_before_cache_lookup() -> None:
+    shader_cpp = read("D3D12Shader.cpp")
+    rewrite = function_body(
+        shader_cpp,
+        "D3D12LegacyShadowSourceRewrite rewriteD3D12LegacyShadowClipDepth",
+    )
+    compile_shader = function_body(shader_cpp, "bool CCD3D12Shader::compileGLSLToDXBC")
+
+    assert "shadowPosWithDepthBias.w * 0.5 + 0.5" in rewrite
+    assert "shadowNDCPos.xy = shadowNDCPos.xy * 0.5 + 0.5" in rewrite
+    assert "shadowPos.xyz / shadowPos.w * 0.5 + 0.5" in rewrite
+    assert "CCGetLinearDepth(worldPos, viewspaceDepthBias) * 2.0 - 1.0" in rewrite
+    assert "v_clip_depth.x / v_clip_depth.y * 0.5 + 0.5" in rewrite
+    assert "v_clip_depth = clipPos.z / clipPos.w * 0.5 + 0.5" in rewrite
+
+    rewrite_call = compile_shader.index("rewriteD3D12LegacyShadowClipDepth(glslSource)")
+    optimize_call = compile_shader.index("optimizeD3D12ShaderSource(", rewrite_call)
+    cache_key = compile_shader.index("makeDXBCCacheKey(", optimize_call)
+    assert rewrite_call < optimize_call < cache_key
+    assert "legacyShadowRewrite.source, false" in compile_shader
 
 
 def test_local_batch_uses_prepared_binding_metadata_once() -> None:
@@ -169,6 +191,63 @@ def test_local_root_partition_promotes_only_per_draw_b0() -> None:
     assert "rootCbvAssigned" in refresh
     assert "metadata.rootCbvCount = 1" in refresh
     assert "staticElementStart = 1" in refresh
+
+
+def test_local_root_split_repacks_when_descriptor_tables_cross_heaps() -> None:
+    command_cpp = read("D3D12CommandBuffer.cpp")
+    flush = function_body(
+        command_cpp,
+        "bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental",
+    )
+    split_start = flush.index("auto prepareLocalStaticSplit")
+    root_branch_start = flush.index("if (binding.useLocalRootCbv)", split_start)
+    root_branch_end = flush.index(
+        "const auto dynamicAllocation = cbvPool->allocate(binding.dynamicCbvCount)",
+        root_branch_start,
+    )
+    root_branch = flush[root_branch_start:root_branch_end]
+
+    assert "dynamicDescriptorCount + binding.staticCbvSrvUavCount" in root_branch
+    assert "const auto combinedAllocation = cbvPool->allocate" in root_branch
+    assert "copyLocalDynamicCbvSrvUavTable" in root_branch
+    assert "copyLocalStaticCbvTable" in root_branch
+    assert "staticAllocation.heapIndex != dynamicAllocation.heapIndex" not in root_branch
+
+
+def test_local_root_split_accepts_non_null_dynamic_descriptor_sources() -> None:
+    descriptor_h = read("D3D12DescriptorSet.h")
+    descriptor_cpp = read("D3D12DescriptorSet.cpp")
+    command_cpp = read("D3D12CommandBuffer.cpp")
+
+    assert "getLocalRootCbvData" in descriptor_h
+    root_data = function_body(
+        descriptor_cpp,
+        "bool CCD3D12DescriptorSet::getLocalRootCbvData",
+    )
+    assert "metadata.cbvSrvUavPartitionValid" in root_data
+    assert "onlyNullDynamicDescriptorSources" not in root_data
+    assert "staticResourceIdentityValid" not in root_data
+
+    flush = function_body(
+        command_cpp,
+        "bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental",
+    )
+    split_start = flush.index("auto prepareLocalStaticSplit")
+    root_branch_start = flush.index("if (binding.useLocalRootCbv)", split_start)
+    root_branch_end = flush.index(
+        "const auto dynamicAllocation = cbvPool->allocate(binding.dynamicCbvCount)",
+        root_branch_start,
+    )
+    root_branch = flush[root_branch_start:root_branch_end]
+    assert "getLocalRootCbvData" in root_branch
+    assert "getLocalRootCbvBatchFastData" not in root_branch
+
+    for signature in (
+        "bool CCD3D12DescriptorSet::getLocalRootCbvBatchData",
+        "bool CCD3D12DescriptorSet::getLocalRootCbvBatchFastData",
+    ):
+        batch_data = function_body(descriptor_cpp, signature)
+        assert "metadata.onlyNullDynamicDescriptorSources" in batch_data
 
 
 def test_local_batch_writes_commands_directly_to_final_upload() -> None:
@@ -308,6 +387,191 @@ def test_transient_uniform_derives_slot_from_compact_active_frame_state() -> Non
     )
 
 
+def test_transient_uniform_static_content_survives_frame_resource_reuse() -> None:
+    buffer_cpp = read("D3D12Buffer.cpp")
+    device_cpp = read("D3D12Device.cpp")
+    descriptor_cpp = read("D3D12DescriptorSet.cpp")
+
+    update = function_body(buffer_cpp, "void CCD3D12Buffer::update")
+    assert "uniformShadowData" in update
+    assert update.index("uniformShadowData") < update.index(
+        "if (isTransientUniformEligible())"
+    )
+
+    flush_transient = function_body(
+        buffer_cpp,
+        "bool CCD3D12Buffer::flushTransientUniformUpload",
+    )
+    ensure_transient = function_body(
+        buffer_cpp,
+        "bool CCD3D12Buffer::ensureTransientUniformUpload",
+    )
+    assert "uniformShadowData" in flush_transient
+    assert "uniformShadowData" in ensure_transient
+
+    acquire = function_body(device_cpp, "void CCD3D12Device::acquire")
+    frame_switch = acquire.index("_impl->activeFrameResource = nextFrameResource")
+    assert acquire.index("notifyTransientUniformUpload()", frame_switch) > frame_switch
+
+    regular_update = function_body(
+        descriptor_cpp,
+        "void CCD3D12DescriptorSet::update()",
+    )
+    local_update = function_body(
+        descriptor_cpp,
+        "void CCD3D12DescriptorSet::updateForLocalRootCbv",
+    )
+    prepare_uniform = function_body(
+        descriptor_cpp,
+        "void prepareCurrentFrameUniformBuffer",
+    )
+    assert "ensureTransientUniformUpload" in prepare_uniform
+    for descriptor_update in (regular_update, local_update):
+        prepare = descriptor_update.index("prepareCurrentFrameUniformBuffer")
+        version = descriptor_update.index("getUniformDescriptorVersion", prepare)
+        assert prepare < version
+
+
+def test_command_buffer_uniform_updates_freeze_dynamic_cbv_addresses() -> None:
+    buffer_h = read("D3D12Buffer.h")
+    buffer_cpp = read("D3D12Buffer.cpp")
+    command_cpp = read("D3D12CommandBuffer.cpp")
+    descriptor_cpp = read("D3D12DescriptorSet.cpp")
+
+    assert "updateTransientUniform" in buffer_h
+    freeze = function_body(
+        buffer_cpp,
+        "bool CCD3D12Buffer::updateTransientUniform",
+    )
+    assert "isDynamicUniformOnly()" in freeze
+    assert "uniformBackingSize" in freeze
+    assert "uniformShadowData.data() + resourceOffset" in freeze
+    assert "allocateUploadBuffer" in freeze
+    assert "transientUniformGPUAddress = allocation.gpuAddress" in freeze
+
+    command_update = function_body(
+        command_cpp,
+        "void CCD3D12CommandBuffer::updateBuffer",
+    )
+    freeze_call = command_update.index("updateTransientUniform")
+    stable_resource = command_update.index("getD3D12ResourceHandle")
+    assert freeze_call < stable_resource
+
+    dynamic_source = function_body(
+        descriptor_cpp,
+        "bool CCD3D12DescriptorSet::getDynamicDescriptorSource",
+    )
+    assert "slot.type == DescriptorType::DYNAMIC_UNIFORM_BUFFER" in dynamic_source
+    assert "getD3D12UniformGPUVirtualAddress" in dynamic_source
+
+    apply_offsets = function_body(
+        descriptor_cpp,
+        "void CCD3D12DescriptorSet::applyDynamicOffsets",
+    )
+    assert "getD3D12UniformGPUVirtualAddress() + dynamicOffset" in apply_offsets
+
+    regular_update = function_body(
+        buffer_cpp,
+        "void CCD3D12Buffer::update",
+    )
+    assert "uniformBackingSize" in regular_update
+    assert "uniformShadowData.data() + resourceOffset" in regular_update
+    shadow_write = regular_update.index("uniformShadowData.data() + resourceOffset")
+    transient_check = regular_update.index("if (isTransientUniformEligible())")
+    assert shadow_write < transient_check
+
+
+def test_local_descriptor_change_cannot_downgrade_full_dirty_state() -> None:
+    command_cpp = read("D3D12CommandBuffer.cpp")
+    bind = function_body(
+        command_cpp,
+        "void CCD3D12CommandBuffer::bindDescriptorSet",
+    )
+    assert "const bool wasDescriptorSetsDirty" in bind
+    assert "wasDescriptorSetsDirty" in bind
+    assert "_impl->localDescriptorSetOnlyDirty && localSetChanged" in bind
+
+
+def test_dynamic_uniform_address_change_invalidates_descriptor_table_cache() -> None:
+    descriptor_cpp = read("D3D12DescriptorSet.cpp")
+
+    update = function_body(
+        descriptor_cpp,
+        "void CCD3D12DescriptorSet::update",
+    )
+    assert "dynamicDescriptorSlots" in update
+    assert "DescriptorType::DYNAMIC_UNIFORM_BUFFER" in update
+    assert "getUniformDescriptorVersion" in update
+    assert "dynamicDescriptorChanged" in update
+    assert "++_impl->version" in update
+
+    force_update = function_body(
+        descriptor_cpp,
+        "void CCD3D12DescriptorSet::forceUpdate",
+    )
+    assert "slot.buffer = buffer" in force_update
+    assert "slot.version = buffer ? buffer->getUniformDescriptorVersion() : 0" in force_update
+
+
+def test_partial_texture_upload_uses_region_sized_footprints() -> None:
+    texture_h = read("D3D12Texture.h")
+    texture_cpp = read("D3D12Texture.cpp")
+    device_cpp = read("D3D12Device.cpp")
+    command_cpp = read("D3D12CommandBuffer.cpp")
+
+    assert "getD3D12TextureUploadFootprint" in texture_h
+    footprint = function_body(
+        texture_cpp,
+        "bool getD3D12TextureUploadFootprint",
+    )
+    assert "uploadDesc.Width = region.texExtent.width" in footprint
+    assert "uploadDesc.Height = region.texExtent.height" in footprint
+    assert "uploadDesc.MipLevels = 1" in footprint
+    assert "GetCopyableFootprints(&uploadDesc, 0, 1, 0" in footprint
+
+    device_upload = function_body(
+        device_cpp,
+        "void CCD3D12Device::copyBuffersToTextureImmediate",
+    )
+    command_upload = function_body(
+        command_cpp,
+        "void CCD3D12CommandBuffer::copyBuffersToTexture",
+    )
+    for upload in (device_upload, command_upload):
+        assert "getD3D12TextureUploadFootprint" in upload
+        assert "GetCopyableFootprints(&textureDesc, subresource" not in upload
+
+
+def test_fragment_linkage_repair_is_shader_name_independent() -> None:
+    shader_cpp = read("D3D12Shader.cpp")
+    shader_h = read("D3D12Shader.h")
+
+    linkage_patch = function_body(
+        shader_cpp,
+        "bool patchD3D12FragmentInputLinkage",
+    )
+    dummy_type = function_body(shader_cpp, "ccstd::string makeLinkageDummyType")
+    assert "SPIRV_Cross_Input" in linkage_patch
+    assert "semanticName" in linkage_patch
+    assert "componentMask" in dummy_type
+    assert "componentType" in dummy_type
+    assert "legacy/toon" not in linkage_patch
+    assert "getFragmentBytecodeForVertexLinkage" in shader_h
+    assert "patchD3D12FragmentInputLinkage(hlslSource, *fragmentLinkage)" in shader_cpp
+
+
+def test_render_pass_end_transitions_offscreen_attachments_for_legacy_consumers() -> None:
+    command_cpp = read("D3D12CommandBuffer.cpp")
+    end_pass = function_body(command_cpp, "void CCD3D12CommandBuffer::endRenderPass")
+
+    assert "getColorTextureCount" in end_pass
+    assert "getColorBacking" in end_pass
+    assert "getColorAttachment" in end_pass
+    assert "appendFramebufferAttachmentTransitions" in end_pass
+    assert "D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE" in end_pass
+    assert "D3D12_RESOURCE_STATE_DEPTH_READ" in end_pass
+
+
 if __name__ == "__main__":
     test_restored_revision_fast_paths()
     test_local_batch_uses_prepared_binding_metadata_once()
@@ -322,4 +586,8 @@ if __name__ == "__main__":
     test_local_draw_uses_persistent_resource_packet()
     test_local_compatibility_packet_is_force_inlined()
     test_transient_uniform_derives_slot_from_compact_active_frame_state()
+    test_transient_uniform_static_content_survives_frame_resource_reuse()
+    test_partial_texture_upload_uses_region_sized_footprints()
+    test_fragment_linkage_repair_is_shader_name_independent()
+    test_render_pass_end_transitions_offscreen_attachments_for_legacy_consumers()
     print("D3D12 hot-path static tests passed")

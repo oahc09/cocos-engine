@@ -35,11 +35,15 @@
     #include <dxgiformat.h>
     #include <wrl/client.h>
     #include <algorithm>
+    #include <atomic>
     #include <unordered_map>
-    #include <vector>
 
 namespace cc {
 namespace gfx {
+
+namespace {
+std::atomic<uint64_t> TEXTURE_RESOURCE_GENERATION{1};
+}
 
 SampleCount getD3D12EffectiveSampleCount(SampleCount samples) {
     // The built-in pipeline requests X4 by default. D3D12 uses X2 as its
@@ -48,75 +52,10 @@ SampleCount getD3D12EffectiveSampleCount(SampleCount samples) {
 }
 
 struct CCD3D12Texture::Impl {
-    Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+    D3D12ResourceBackingPtr backing;
 };
 
 namespace {
-struct OwnedColorResourceEntry {
-    CCD3D12Texture *owner{nullptr};
-    Microsoft::WRL::ComPtr<ID3D12Resource> resource;
-    uint32_t width{0};
-    uint32_t height{0};
-    Format format{Format::UNKNOWN};
-    SampleCount samples{SampleCount::X1};
-    uint64_t serial{0};
-};
-
-std::vector<OwnedColorResourceEntry> &ownedColorRenderTargets() {
-    static std::vector<OwnedColorResourceEntry> textures;
-    return textures;
-}
-
-uint64_t &ownedColorRenderTargetSerial() {
-    static uint64_t serial{0};
-    return serial;
-}
-
-std::unordered_map<ID3D12Resource *, D3D12_RESOURCE_STATES> &trackedResourceStates() {
-    static std::unordered_map<ID3D12Resource *, D3D12_RESOURCE_STATES> states;
-    return states;
-}
-
-void registerOwnedColorRenderTarget(CCD3D12Texture *texture) {
-    if (!texture) {
-        return;
-    }
-    auto *resource = static_cast<ID3D12Resource *>(texture->getD3D12OwnedResourceHandle());
-    if (!resource) {
-        return;
-    }
-
-    auto &textures = ownedColorRenderTargets();
-    const uint64_t serial = ++ownedColorRenderTargetSerial();
-    const auto found = std::find_if(textures.begin(), textures.end(),
-                                    [texture](const OwnedColorResourceEntry &entry) {
-                                        return entry.owner == texture;
-                                    });
-    if (found == textures.end()) {
-        textures.push_back({texture, resource, texture->getWidth(), texture->getHeight(), texture->getFormat(),
-                            texture->getInfo().samples, serial});
-    } else {
-        found->resource = resource;
-        found->width = texture->getWidth();
-        found->height = texture->getHeight();
-        found->format = texture->getFormat();
-        found->samples = texture->getInfo().samples;
-        found->serial = serial;
-    }
-}
-
-void unregisterOwnedColorRenderTarget(CCD3D12Texture *texture) {
-    auto &textures = ownedColorRenderTargets();
-    textures.erase(std::remove_if(textures.begin(), textures.end(),
-                                  [texture](const OwnedColorResourceEntry &entry) {
-                                      if (entry.owner == texture && entry.resource) {
-                                          trackedResourceStates().erase(entry.resource.Get());
-                                      }
-                                      return entry.owner == texture;
-                                  }),
-                   textures.end());
-}
-
 DXGI_FORMAT mapD3D12Format(Format format) {
     switch (format) {
         case Format::R8:
@@ -297,6 +236,96 @@ DXGI_FORMAT toD3D12Format(Format format) {
     return mapD3D12Format(format);
 }
 
+bool getD3D12TextureUploadFootprint(
+    ID3D12Device *device,
+    const D3D12_RESOURCE_DESC &textureDesc,
+    const BufferTextureCopy &region,
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT &footprint,
+    UINT &rowCount,
+    UINT64 &rowSizeInBytes,
+    UINT64 &uploadSize) {
+    footprint = {};
+    rowCount = 0;
+    rowSizeInBytes = 0;
+    uploadSize = 0;
+    if (!device || textureDesc.SampleDesc.Count != 1 ||
+        region.texExtent.width == 0 || region.texExtent.height == 0 ||
+        region.texExtent.depth == 0) {
+        return false;
+    }
+
+    D3D12_RESOURCE_DESC uploadDesc = textureDesc;
+    uploadDesc.Alignment = 0;
+    uploadDesc.Width = region.texExtent.width;
+    uploadDesc.Height = region.texExtent.height;
+    uploadDesc.MipLevels = 1;
+    uploadDesc.SampleDesc.Count = 1;
+    uploadDesc.SampleDesc.Quality = 0;
+    switch (uploadDesc.Dimension) {
+        case D3D12_RESOURCE_DIMENSION_TEXTURE1D:
+            uploadDesc.Height = 1;
+            uploadDesc.DepthOrArraySize = 1;
+            break;
+        case D3D12_RESOURCE_DIMENSION_TEXTURE2D:
+            uploadDesc.DepthOrArraySize = 1;
+            break;
+        case D3D12_RESOURCE_DIMENSION_TEXTURE3D:
+            uploadDesc.DepthOrArraySize = static_cast<UINT16>(region.texExtent.depth);
+            break;
+        default:
+            return false;
+    }
+
+    device->GetCopyableFootprints(&uploadDesc, 0, 1, 0, &footprint, &rowCount, &rowSizeInBytes, &uploadSize);
+    return uploadSize > 0 && rowCount > 0;
+}
+
+DXGI_FORMAT toD3D12VertexFormat(Format format) {
+    switch (format) {
+        case Format::R8:         return DXGI_FORMAT_R8_UNORM;
+        case Format::R8SN:       return DXGI_FORMAT_R8_SNORM;
+        case Format::R8UI:       return DXGI_FORMAT_R8_UINT;
+        case Format::R8I:        return DXGI_FORMAT_R8_SINT;
+        case Format::R16F:       return DXGI_FORMAT_R16_FLOAT;
+        case Format::R16UI:      return DXGI_FORMAT_R16_UINT;
+        case Format::R16I:       return DXGI_FORMAT_R16_SINT;
+        case Format::R32F:       return DXGI_FORMAT_R32_FLOAT;
+        case Format::R32UI:      return DXGI_FORMAT_R32_UINT;
+        case Format::R32I:       return DXGI_FORMAT_R32_SINT;
+        case Format::RG8:        return DXGI_FORMAT_R8G8_UNORM;
+        case Format::RG8SN:      return DXGI_FORMAT_R8G8_SNORM;
+        case Format::RG8UI:      return DXGI_FORMAT_R8G8_UINT;
+        case Format::RG8I:       return DXGI_FORMAT_R8G8_SINT;
+        case Format::RG16F:      return DXGI_FORMAT_R16G16_FLOAT;
+        case Format::RG16UI:     return DXGI_FORMAT_R16G16_UINT;
+        case Format::RG16I:      return DXGI_FORMAT_R16G16_SINT;
+        case Format::RG32F:      return DXGI_FORMAT_R32G32_FLOAT;
+        case Format::RG32UI:     return DXGI_FORMAT_R32G32_UINT;
+        case Format::RG32I:      return DXGI_FORMAT_R32G32_SINT;
+        case Format::RGB32F:     return DXGI_FORMAT_R32G32B32_FLOAT;
+        case Format::RGB32UI:    return DXGI_FORMAT_R32G32B32_UINT;
+        case Format::RGB32I:     return DXGI_FORMAT_R32G32B32_SINT;
+        case Format::RGBA8:      return DXGI_FORMAT_R8G8B8A8_UNORM;
+        case Format::BGRA8:      return DXGI_FORMAT_B8G8R8A8_UNORM;
+        case Format::SRGB8_A8:   return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+        case Format::RGBA8SN:    return DXGI_FORMAT_R8G8B8A8_SNORM;
+        case Format::RGBA8UI:    return DXGI_FORMAT_R8G8B8A8_UINT;
+        case Format::RGBA8I:     return DXGI_FORMAT_R8G8B8A8_SINT;
+        case Format::RGBA16F:    return DXGI_FORMAT_R16G16B16A16_FLOAT;
+        case Format::RGBA16UI:   return DXGI_FORMAT_R16G16B16A16_UINT;
+        case Format::RGBA16I:    return DXGI_FORMAT_R16G16B16A16_SINT;
+        case Format::RGBA32F:    return DXGI_FORMAT_R32G32B32A32_FLOAT;
+        case Format::RGBA32UI:   return DXGI_FORMAT_R32G32B32A32_UINT;
+        case Format::RGBA32I:    return DXGI_FORMAT_R32G32B32A32_SINT;
+        case Format::RGB10A2:    return DXGI_FORMAT_R10G10B10A2_UNORM;
+        case Format::RGB10A2UI:  return DXGI_FORMAT_R10G10B10A2_UINT;
+        case Format::R11G11B10F: return DXGI_FORMAT_R11G11B10_FLOAT;
+        case Format::RGB8:
+        default:
+            return DXGI_FORMAT_UNKNOWN;
+    }
+}
+
 CCD3D12Texture::CCD3D12Texture() {
     _impl = std::make_unique<Impl>();
 }
@@ -307,7 +336,6 @@ CCD3D12Texture::~CCD3D12Texture() {
 
 void CCD3D12Texture::doInit(const TextureInfo &info) {
     (void)info;
-    unregisterOwnedColorRenderTarget(this);
     _baseMipUploadedLayers.clear();
     _mipmapsGenerated = false;
     _isSwapchainTexture = false;
@@ -324,11 +352,9 @@ void CCD3D12Texture::doInit(const TextureInfo &info) {
     }
     // createResource() uses CreateCommittedResource(..., D3D12_RESOURCE_STATE_COMMON, ...),
     // so tracked state must start from COMMON until an explicit barrier changes it.
-    _currentState = D3D12_RESOURCE_STATE_COMMON;
 }
 
 void CCD3D12Texture::doInit(const TextureViewInfo &info) {
-    unregisterOwnedColorRenderTarget(this);
     _baseMipUploadedLayers.clear();
     _mipmapsGenerated = false;
     auto *texture = static_cast<CCD3D12Texture *>(info.texture);
@@ -338,17 +364,13 @@ void CCD3D12Texture::doInit(const TextureViewInfo &info) {
     _isSwapchainTexture = texture->isSwapchainColorTexture();
     _swapchain = _isSwapchainTexture ? texture->getSwapchain() : nullptr;
     _hash = Texture::computeHash(this);
-    if (_isSwapchainTexture) {
-        _impl->resource.Reset();
-    } else {
-        _impl->resource = static_cast<ID3D12Resource *>(texture->getD3D12OwnedResourceHandle());
-    }
-    setCurrentState(texture->getCurrentState());
+    _impl->backing = _isSwapchainTexture
+                         ? D3D12ResourceBackingPtr{}
+                         : texture->getD3D12ResourceBacking();
 }
 
 void CCD3D12Texture::doInit(const SwapchainTextureInfo &info) {
     (void)info;
-    unregisterOwnedColorRenderTarget(this);
     _baseMipUploadedLayers.clear();
     _mipmapsGenerated = false;
     _isTextureView = false;
@@ -357,11 +379,6 @@ void CCD3D12Texture::doInit(const SwapchainTextureInfo &info) {
     _hash = Texture::computeHash(this);
     if (hasFlag(_info.usage, TextureUsageBit::DEPTH_STENCIL_ATTACHMENT)) {
         createResource(_info.width, _info.height);
-        // Depth resource is created in COMMON and transitioned on first use.
-        _currentState = D3D12_RESOURCE_STATE_COMMON;
-    } else if (hasFlag(_info.usage, TextureUsageBit::COLOR_ATTACHMENT)) {
-        // Swapchain color textures start as PRESENT, will be transitioned by beginRenderPass
-        _currentState = D3D12_RESOURCE_STATE_PRESENT;
     }
     // Swapchain color textures wrap the swapchain's back buffers;
     // the resource is obtained dynamically via getD3D12ResourceHandle()
@@ -371,12 +388,10 @@ void CCD3D12Texture::doDestroy() {
     if (auto *device = CCD3D12Device::getInstance()) {
         device->discardDeferredCubeUploadsForTexture(this);
     }
-    unregisterOwnedColorRenderTarget(this);
     _baseMipUploadedLayers.clear();
     _mipmapsGenerated = false;
     if (_impl) {
-        clearTrackedResourceState(_impl->resource.Get());
-        _impl->resource.Reset();
+        _impl->backing.reset();
     }
     _isSwapchainTexture = false;
     _swapchain = nullptr;
@@ -393,10 +408,6 @@ void CCD3D12Texture::doResize(uint32_t width, uint32_t height, uint32_t size) {
     _baseMipUploadedLayers.clear();
     _mipmapsGenerated = false;
     createResource(width, height);
-    // Resizing recreates the underlying ID3D12Resource in COMMON state.
-    // Keep the tracked state in sync so the next render pass uses a valid
-    // transition source state for render textures.
-    _currentState = D3D12_RESOURCE_STATE_COMMON;
 }
 
 void *CCD3D12Texture::getD3D12ResourceHandle() const {
@@ -404,48 +415,84 @@ void *CCD3D12Texture::getD3D12ResourceHandle() const {
     if (isSwapchainColorTexture()) {
         return static_cast<CCD3D12Swapchain *>(_swapchain)->getCurrentBackBufferHandle();
     }
-    return _impl ? _impl->resource.Get() : nullptr;
+    const auto backing = getD3D12ResourceBacking();
+    return backing ? backing->resource.Get() : nullptr;
 }
 
 void *CCD3D12Texture::getD3D12OwnedResourceHandle() const {
-    return _impl ? _impl->resource.Get() : nullptr;
+    return _impl && _impl->backing && _impl->backing->valid
+               ? _impl->backing->resource.Get()
+               : nullptr;
+}
+
+D3D12ResourceBackingPtr CCD3D12Texture::getD3D12ResourceBacking() const {
+    if (isSwapchainColorTexture()) {
+        return static_cast<CCD3D12Swapchain *>(_swapchain)->getCurrentBackBufferBacking();
+    }
+    return _impl && _impl->backing && _impl->backing->valid
+               ? _impl->backing
+               : D3D12ResourceBackingPtr{};
+}
+
+uint64_t CCD3D12Texture::getD3D12GlobalResourceGeneration() {
+    return TEXTURE_RESOURCE_GENERATION.load(std::memory_order_relaxed);
 }
 
 bool CCD3D12Texture::isSwapchainColorTexture() const {
-    return _isSwapchainTexture && _swapchain != nullptr && !hasFlag(_info.usage, TextureUsageBit::DEPTH_STENCIL_ATTACHMENT) &&
-           getD3D12OwnedResourceHandle() == nullptr;
+    return _isSwapchainTexture && _swapchain != nullptr &&
+           !hasFlag(_info.usage, TextureUsageBit::DEPTH_STENCIL_ATTACHMENT);
 }
 
-D3D12_RESOURCE_STATES CCD3D12Texture::getTrackedResourceState(void *resource, D3D12_RESOURCE_STATES fallback) {
-    auto *d3dResource = static_cast<ID3D12Resource *>(resource);
-    if (!d3dResource) {
-        return fallback;
+D3D12_RESOURCE_STATES CCD3D12Texture::getCurrentState() const {
+    const auto backing = getD3D12ResourceBacking();
+    if (!backing) {
+        return isSwapchainColorTexture() ? D3D12_RESOURCE_STATE_PRESENT : D3D12_RESOURCE_STATE_COMMON;
     }
-    const auto &states = trackedResourceStates();
-    const auto iter = states.find(d3dResource);
-    return iter != states.end() ? iter->second : fallback;
-}
-
-void CCD3D12Texture::setTrackedResourceState(void *resource, D3D12_RESOURCE_STATES state) {
-    auto *d3dResource = static_cast<ID3D12Resource *>(resource);
-    if (!d3dResource) {
-        return;
+    D3D12_RESOURCE_STATES uniformState{};
+    if (backing->states.tryGetUniform(uniformState)) {
+        return uniformState;
     }
-    trackedResourceStates()[d3dResource] = state;
-}
-
-void CCD3D12Texture::clearTrackedResourceState(void *resource) {
-    auto *d3dResource = static_cast<ID3D12Resource *>(resource);
-    if (!d3dResource) {
-        return;
-    }
-    trackedResourceStates().erase(d3dResource);
+    const uint32_t mip = _isTextureView ? _viewInfo.baseLevel : 0;
+    const uint32_t layer = _isTextureView && _info.type != TextureType::TEX3D ? _viewInfo.baseLayer : 0;
+    const uint32_t plane = _isTextureView ? _viewInfo.basePlane : 0;
+    return backing->states.get(backing->subresourceIndex(mip, layer, plane));
 }
 
 void CCD3D12Texture::setCurrentState(D3D12_RESOURCE_STATES state) {
-    _currentState = state;
-    if (_impl && _impl->resource) {
-        setTrackedResourceState(_impl->resource.Get(), state);
+    const auto backing = getD3D12ResourceBacking();
+    if (!backing) {
+        return;
+    }
+    if (!_isTextureView) {
+        backing->states.setAll(state);
+        return;
+    }
+
+    const uint32_t baseMip = std::min(_viewInfo.baseLevel, backing->mipLevels - 1);
+    const uint32_t mipCount = std::min(std::max(_viewInfo.levelCount, 1U), backing->mipLevels - baseMip);
+    const uint32_t baseLayer = std::min(_viewInfo.baseLayer, backing->arraySize - 1);
+    const uint32_t layerCount = std::min(std::max(_viewInfo.layerCount, 1U), backing->arraySize - baseLayer);
+    const uint32_t basePlane = std::min(_viewInfo.basePlane, backing->planeCount - 1);
+    const uint32_t planeCount = std::min(std::max(_viewInfo.planeCount, 1U), backing->planeCount - basePlane);
+    for (uint32_t plane = 0; plane < planeCount; ++plane) {
+        for (uint32_t layer = 0; layer < layerCount; ++layer) {
+            for (uint32_t mip = 0; mip < mipCount; ++mip) {
+                backing->states.set(
+                    backing->subresourceIndex(baseMip + mip, baseLayer + layer, basePlane + plane), state);
+            }
+        }
+    }
+}
+
+D3D12_RESOURCE_STATES CCD3D12Texture::getSubresourceState(uint32_t subresource) const {
+    const auto backing = getD3D12ResourceBacking();
+    return backing ? backing->states.get(subresource) : D3D12_RESOURCE_STATE_COMMON;
+}
+
+void CCD3D12Texture::setSubresourceState(uint32_t subresource, D3D12_RESOURCE_STATES state) {
+    const auto backing = getD3D12ResourceBacking();
+    if (backing) {
+        backing->states.set(subresource, state);
     }
 }
 
@@ -495,34 +542,6 @@ bool CCD3D12Texture::shouldGenerateMipmapsAfterUpload() const {
 
 void CCD3D12Texture::markMipmapsGenerated() {
     _mipmapsGenerated = true;
-}
-
-void *CCD3D12Texture::findLatestOwnedColorResource(uint32_t width, uint32_t height, Format format, SampleCount samples) {
-    ID3D12Resource *latestMatch = nullptr;
-    uint64_t latestSerial = 0;
-    uint32_t matchCount = 0;
-    for (const auto &entry : ownedColorRenderTargets()) {
-        if (entry.width != width || entry.height != height || entry.format != format || entry.samples != samples) {
-            continue;
-        }
-        auto *resource = entry.resource.Get();
-        if (!resource) {
-            continue;
-        }
-        ++matchCount;
-        if (!latestMatch || entry.serial >= latestSerial) {
-            latestMatch = resource;
-            latestSerial = entry.serial;
-        }
-    }
-    static ID3D12Resource *lastWarnedMultipleMatch{nullptr};
-    if (matchCount > 1 && latestMatch != lastWarnedMultipleMatch) {
-        CC_LOG_WARNING("D3D12Texture: multiple owned color RTs match %ux%u format=%u samples=%u; "
-                       "using latest registered resource %p.",
-                       width, height, static_cast<unsigned>(format), static_cast<unsigned>(samples), latestMatch);
-        lastWarnedMultipleMatch = latestMatch;
-    }
-    return latestMatch;
 }
 
 bool CCD3D12Texture::createResource(uint32_t width, uint32_t height) {
@@ -641,14 +660,25 @@ bool CCD3D12Texture::createResource(uint32_t width, uint32_t height) {
         return false;
     }
 
-    clearTrackedResourceState(_impl->resource.Get());
-    _impl->resource = resource;
-    setCurrentState(D3D12_RESOURCE_STATE_COMMON);
-    if (hasFlag(_info.usage, TextureUsageBit::COLOR_ATTACHMENT) &&
-        !hasFlag(_info.usage, TextureUsageBit::DEPTH_STENCIL_ATTACHMENT) &&
-        !_isSwapchainTexture) {
-        registerOwnedColorRenderTarget(this);
+    const uint32_t mipLevels = std::max(_info.levelCount, 1U);
+    const uint32_t arraySize = _info.type == TextureType::TEX3D ? 1U : std::max(_info.layerCount, 1U);
+    const uint32_t planeCount = _info.format == Format::DEPTH_STENCIL ? 2U : 1U;
+    auto newBacking = std::make_shared<D3D12ResourceBacking>();
+    const auto oldBacking = _impl->backing;
+    newBacking->resource = std::move(resource);
+    newBacking->deviceEpoch = device->getDeviceEpoch();
+    newBacking->generation = oldBacking ? oldBacking->generation + 1 : 1;
+    newBacking->mipLevels = mipLevels;
+    newBacking->arraySize = arraySize;
+    newBacking->planeCount = planeCount;
+    newBacking->valid = true;
+    newBacking->states.reset(
+        newBacking->subresourceCount(), D3D12_RESOURCE_STATE_COMMON);
+    if (oldBacking) {
+        oldBacking->valid = false;
     }
+    _impl->backing = std::move(newBacking);
+    TEXTURE_RESOURCE_GENERATION.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
 

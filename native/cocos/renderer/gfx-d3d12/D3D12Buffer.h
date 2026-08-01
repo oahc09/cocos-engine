@@ -50,10 +50,11 @@ public:
     uint64_t getUniformDescriptorVersion() const;
     uint32_t getD3D12ConstantBufferSize() const;
     uint32_t getPendingTransientUniformUploadSize() const;
+    bool updateTransientUniform(const void *data, uint32_t size);
     bool flushTransientUniformUpload(void *resource, void *mappedData,
                                      uint64_t gpuAddress, uint64_t epoch);
     bool ensureTransientUniformUpload();
-    uint32_t getD3D12ResourceOffset() const;
+    uint64_t getD3D12ResourceOffset() const;
     bool isD3D12UploadHeap() const;
     void markUniformDescriptorBinding(bool dynamic);
     bool isDynamicUniformOnly() const;
@@ -73,7 +74,9 @@ private:
     bool canUseTransientUniformUpload() const;
 
     struct Impl;
-    std::unique_ptr<Impl> _impl;
+    std::shared_ptr<Impl> _impl;
+    uint64_t _resourceOffset{0};
+    bool _viewValid{true};
 };
 
 } // namespace gfx

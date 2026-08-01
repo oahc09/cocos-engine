@@ -2003,6 +2003,8 @@ if(CC_USE_D3D12)
         cocos/renderer/gfx-d3d12/D3D12Queue.cpp
         cocos/renderer/gfx-d3d12/D3D12RenderPass.h
         cocos/renderer/gfx-d3d12/D3D12RenderPass.cpp
+        cocos/renderer/gfx-d3d12/D3D12ResourceState.h
+        cocos/renderer/gfx-d3d12/D3D12ResourceState.cpp
         cocos/renderer/gfx-d3d12/D3D12Shader.h
         cocos/renderer/gfx-d3d12/D3D12Shader.cpp
         cocos/renderer/gfx-d3d12/D3D12Swapchain.h

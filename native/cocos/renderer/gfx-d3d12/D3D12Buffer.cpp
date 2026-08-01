@@ -50,8 +50,6 @@ struct CCD3D12Buffer::Impl {
     std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, D3D12_MAX_FRAMES_IN_FLIGHT> uploadResources;
     uint32_t activeUploadResource{0};
     uint64_t resourceVersion{1};
-    CCD3D12Buffer *parent{nullptr};
-    uint32_t resourceOffset{0};
     bool uploadHeap{true};
     bool seenDynamicUniformBinding{false};
     bool seenNonDynamicUniformBinding{false};
@@ -59,6 +57,8 @@ struct CCD3D12Buffer::Impl {
     D3D12_RESOURCE_STATES currentState{D3D12_RESOURCE_STATE_GENERIC_READ};
     uint64_t stateEpoch{0};
     ccstd::vector<uint8_t> pendingData;
+    ccstd::vector<uint8_t> uniformShadowData;
+    uint64_t uniformBackingSize{0};
     bool updateQueued{false};
     ID3D12Resource *transientUniformResource{nullptr};
     uint64_t transientUniformGPUAddress{0};
@@ -71,7 +71,7 @@ struct CCD3D12Buffer::Impl {
 };
 
 CCD3D12Buffer::CCD3D12Buffer() {
-    _impl = std::make_unique<Impl>();
+    _impl = std::make_shared<Impl>();
 }
 
 CCD3D12Buffer::~CCD3D12Buffer() {
@@ -80,53 +80,57 @@ CCD3D12Buffer::~CCD3D12Buffer() {
 
 void CCD3D12Buffer::doInit(const BufferInfo &info) {
     (void)info;
+    if (!_impl || _impl.use_count() > 1) {
+        _impl = std::make_shared<Impl>();
+    }
+    _resourceOffset = 0;
+    _viewValid = true;
     createResource(_size);
 }
 
 void CCD3D12Buffer::doInit(const BufferViewInfo &info) {
+    _viewValid = false;
     auto *buffer = static_cast<CCD3D12Buffer *>(info.buffer);
-    if (!buffer) {
+    if (!buffer || !buffer->_impl) {
         return;
     }
 
-    _impl->parent = buffer;
-    _impl->resource.Reset();
-    _impl->resourceOffset = info.offset;
+    auto *resource = static_cast<ID3D12Resource *>(buffer->getD3D12ResourceHandle());
+    if (!resource) {
+        return;
+    }
+    const uint64_t parentOffset = buffer->getD3D12ResourceOffset();
+    const uint64_t parentRange = buffer->getSize();
+    const uint64_t viewOffset = info.offset;
+    const uint64_t viewRange = info.range;
+    const uint64_t resourceWidth = resource->GetDesc().Width;
+    if (viewRange == 0 || viewOffset > parentRange ||
+        viewRange > parentRange - viewOffset ||
+        parentOffset > resourceWidth ||
+        viewOffset > resourceWidth - parentOffset ||
+        viewRange > resourceWidth - parentOffset - viewOffset) {
+        CC_LOG_ERROR(
+            "D3D12Buffer view range out of bounds. parentOffset=%llu parentRange=%llu "
+            "viewOffset=%llu viewRange=%llu resourceWidth=%llu",
+            static_cast<unsigned long long>(parentOffset),
+            static_cast<unsigned long long>(parentRange),
+            static_cast<unsigned long long>(viewOffset),
+            static_cast<unsigned long long>(viewRange),
+            static_cast<unsigned long long>(resourceWidth));
+        return;
+    }
+
+    _impl = buffer->_impl;
+    _resourceOffset = parentOffset + viewOffset;
+    _viewValid = true;
     BUFFER_RESOURCE_GENERATION.fetch_add(1, std::memory_order_relaxed);
 
-    auto *owner = buffer;
-    while (owner->_impl && owner->_impl->parent) {
-        owner = owner->_impl->parent;
-    }
-    if (owner->_impl) {
-        owner->_impl->hasBufferViews = true;
-        owner->_impl->transientUniformResource = nullptr;
-        owner->_impl->transientUniformGPUAddress = 0;
-        ++owner->_impl->uniformDescriptorVersion;
-        if (auto *device = CCD3D12Device::getInstance()) {
-            device->notifyTransientUniformUpload();
-        }
-        if (!owner->_impl->pendingData.empty() && !owner->_impl->updateQueued) {
-            owner->_impl->updateQueued = true;
-            if (auto *device = CCD3D12Device::getInstance()) {
-                device->enqueueBufferUpdate(owner);
-            }
-        }
-    }
-
-    auto *resource = static_cast<ID3D12Resource *>(buffer->getD3D12ResourceHandle());
-    const uint64_t requestedOffset = static_cast<uint64_t>(buffer->getD3D12ResourceOffset()) + static_cast<uint64_t>(info.offset);
-
-    if (resource) {
-        const uint64_t resourceWidth = static_cast<uint64_t>(resource->GetDesc().Width);
-        if (requestedOffset > resourceWidth) {
-            CC_LOG_ERROR("D3D12Buffer view offset out of range. parentOffset=%llu info.offset=%u resourceWidth=%llu",
-                         static_cast<unsigned long long>(buffer->getD3D12ResourceOffset()),
-                         info.offset,
-                         static_cast<unsigned long long>(resourceWidth));
-            _impl->resourceOffset = static_cast<uint32_t>(resourceWidth - buffer->getD3D12ResourceOffset());
-            return;
-        }
+    _impl->hasBufferViews = true;
+    _impl->transientUniformResource = nullptr;
+    _impl->transientUniformGPUAddress = 0;
+    ++_impl->uniformDescriptorVersion;
+    if (auto *device = CCD3D12Device::getInstance()) {
+        device->notifyTransientUniformUpload();
     }
 }
 
@@ -142,16 +146,10 @@ void CCD3D12Buffer::doDestroy() {
     if (auto *device = CCD3D12Device::getInstance()) {
         device->discardPendingBufferUpdate(this);
     }
-    if (_impl) {
+    if (_impl && !_isBufferView) {
         _impl->pendingData.clear();
+        _impl->uniformShadowData.clear();
         _impl->updateQueued = false;
-        _impl->resource.Reset();
-        for (auto &resource : _impl->uploadResources) {
-            resource.Reset();
-        }
-        ++_impl->resourceVersion;
-        BUFFER_RESOURCE_GENERATION.fetch_add(1, std::memory_order_relaxed);
-        _impl->parent = nullptr;
         _impl->transientUniformResource = nullptr;
         _impl->transientUniformGPUAddress = 0;
         _impl->transientUniformEpoch = std::numeric_limits<uint64_t>::max();
@@ -161,9 +159,10 @@ void CCD3D12Buffer::doDestroy() {
         _impl->uniformDescriptorVersion = 1;
         _impl->hasBufferViews = false;
     }
-    if (_impl) {
-        _impl->resourceOffset = 0;
-    }
+    BUFFER_RESOURCE_GENERATION.fetch_add(1, std::memory_order_relaxed);
+    _impl.reset();
+    _resourceOffset = 0;
+    _viewValid = false;
 }
 
 void CCD3D12Buffer::update(const void *buffer, uint32_t size) {
@@ -181,7 +180,23 @@ void CCD3D12Buffer::update(const void *buffer, uint32_t size) {
     }
 
     const uint32_t copySize = std::min(size, _size);
-    const uint32_t resourceOffset = getD3D12ResourceOffset();
+    const uint64_t resourceOffset = getD3D12ResourceOffset();
+    const bool retainUniformShadow =
+        hasFlag(_usage, BufferUsageBit::UNIFORM) &&
+        !hasFlag(_usage, BufferUsageBit::INDEX) &&
+        !hasFlag(_usage, BufferUsageBit::VERTEX) &&
+        !hasFlag(_usage, BufferUsageBit::STORAGE) &&
+        !hasFlag(_usage, BufferUsageBit::INDIRECT);
+    if (retainUniformShadow) {
+        if (_impl->uniformShadowData.size() != _impl->uniformBackingSize) {
+            _impl->uniformShadowData.assign(_impl->uniformBackingSize, 0);
+        }
+        if (resourceOffset <= _impl->uniformShadowData.size() &&
+            copySize <= _impl->uniformShadowData.size() - resourceOffset) {
+            std::memcpy(_impl->uniformShadowData.data() + resourceOffset, buffer, copySize);
+            ++_impl->uniformContentVersion;
+        }
+    }
 
     if (isTransientUniformEligible()) {
         auto *device = CCD3D12Device::getInstance();
@@ -217,8 +232,9 @@ void CCD3D12Buffer::update(const void *buffer, uint32_t size) {
         }
         if (allocation.isValid && allocation.resource && allocation.mappedData &&
             allocation.gpuAddress != 0) {
-            std::memcpy(allocation.mappedData, buffer, copySize);
-            ++_impl->uniformContentVersion;
+            const auto &uploadData = _impl->uniformShadowData;
+            const size_t uploadBytes = std::min<size_t>(uploadData.size(), allocation.size);
+            std::memcpy(allocation.mappedData, uploadData.data(), uploadBytes);
             _impl->updateQueued = false;
             _impl->pendingData.clear();
             _impl->transientUniformResource = static_cast<ID3D12Resource *>(allocation.resource);
@@ -236,7 +252,6 @@ void CCD3D12Buffer::update(const void *buffer, uint32_t size) {
         if (!device) {
             return;
         }
-
         // Buffer::update is frequently called once per model before drawing.
         // Keep the latest CPU payload and record all GPU copies into the main
         // command list instead of creating/submitting/waiting on one command
@@ -293,7 +308,7 @@ void CCD3D12Buffer::flushPendingUpdate(CCD3D12CommandBuffer *commandBuffer) {
 }
 
 bool CCD3D12Buffer::isTransientUniformEligible() const {
-    if (!_impl || _impl->parent || _impl->hasBufferViews ||
+    if (!_impl || _isBufferView || _impl->hasBufferViews ||
         !_impl->seenNonDynamicUniformBinding || _impl->seenDynamicUniformBinding) {
         return false;
     }
@@ -314,14 +329,65 @@ uint32_t CCD3D12Buffer::getPendingTransientUniformUploadSize() const {
                : 0;
 }
 
-bool CCD3D12Buffer::flushTransientUniformUpload(void *resource, void *mappedData,
-                                                uint64_t gpuAddress, uint64_t epoch) {
-    if (!resource || !mappedData || gpuAddress == 0 ||
-        getPendingTransientUniformUploadSize() == 0) {
+bool CCD3D12Buffer::updateTransientUniform(const void *data, uint32_t size) {
+    if (!_impl || !data || size == 0 || !isDynamicUniformOnly() ||
+        !hasFlag(_usage, BufferUsageBit::UNIFORM) ||
+        hasFlag(_usage, BufferUsageBit::INDEX) ||
+        hasFlag(_usage, BufferUsageBit::VERTEX) ||
+        hasFlag(_usage, BufferUsageBit::STORAGE) ||
+        hasFlag(_usage, BufferUsageBit::INDIRECT)) {
         return false;
     }
-    std::memcpy(mappedData, _impl->pendingData.data(), _impl->pendingData.size());
+
+    const uint32_t copySize = std::min(size, _size);
+    const uint64_t resourceOffset = getD3D12ResourceOffset();
+    if (_impl->uniformBackingSize == 0 ||
+        resourceOffset > _impl->uniformBackingSize ||
+        copySize > _impl->uniformBackingSize - resourceOffset) {
+        return false;
+    }
+    if (_impl->uniformShadowData.size() != _impl->uniformBackingSize) {
+        _impl->uniformShadowData.assign(_impl->uniformBackingSize, 0);
+    }
+    std::memcpy(_impl->uniformShadowData.data() + resourceOffset, data, copySize);
+
+    auto *device = CCD3D12Device::getInstance();
+    const auto allocation = device
+                                ? device->allocateUploadBuffer(
+                                      _impl->uniformBackingSize,
+                                      D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT)
+                                : D3D12UploadAllocation{};
+    if (!allocation.isValid || !allocation.resource || !allocation.mappedData ||
+        allocation.gpuAddress == 0) {
+        return false;
+    }
+
+    std::memcpy(allocation.mappedData, _impl->uniformShadowData.data(),
+                _impl->uniformShadowData.size());
+    ++_impl->uniformContentVersion;
+    _impl->uploadedContentVersion = _impl->uniformContentVersion;
     _impl->updateQueued = false;
+    _impl->pendingData.clear();
+    _impl->transientUniformResource = static_cast<ID3D12Resource *>(allocation.resource);
+    _impl->transientUniformGPUAddress = allocation.gpuAddress;
+    _impl->transientUniformEpoch = device->getBufferStateEpoch();
+    ++_impl->uniformDescriptorVersion;
+    device->notifyTransientUniformUpload();
+    return true;
+}
+
+bool CCD3D12Buffer::flushTransientUniformUpload(void *resource, void *mappedData,
+                                                 uint64_t gpuAddress, uint64_t epoch) {
+    if (!resource || !mappedData || gpuAddress == 0 ||
+        getPendingTransientUniformUploadSize() == 0 ||
+        _impl->uniformShadowData.empty()) {
+        return false;
+    }
+    const size_t uploadBytes = std::min<size_t>(
+        _impl->uniformShadowData.size(), getD3D12ConstantBufferSize());
+    std::memcpy(mappedData, _impl->uniformShadowData.data(), uploadBytes);
+    _impl->updateQueued = false;
+    _impl->pendingData.clear();
     _impl->transientUniformResource = static_cast<ID3D12Resource *>(resource);
     _impl->transientUniformGPUAddress = gpuAddress;
     _impl->transientUniformEpoch = epoch;
@@ -331,7 +397,7 @@ bool CCD3D12Buffer::flushTransientUniformUpload(void *resource, void *mappedData
 }
 
 bool CCD3D12Buffer::ensureTransientUniformUpload() {
-    if (!canUseTransientUniformUpload() || _impl->pendingData.empty()) {
+    if (!canUseTransientUniformUpload()) {
         return false;
     }
     auto *device = CCD3D12Device::getInstance();
@@ -344,12 +410,17 @@ bool CCD3D12Buffer::ensureTransientUniformUpload() {
         _impl->uploadedContentVersion == _impl->uniformContentVersion) {
         return true;
     }
+    if (_impl->uniformShadowData.empty()) {
+        return false;
+    }
     const auto allocation = device->allocateUploadBuffer(
-        _impl->pendingData.size(), D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+        getD3D12ConstantBufferSize(), D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
     if (!allocation.isValid || !allocation.resource || !allocation.mappedData || allocation.gpuAddress == 0) {
         return false;
     }
-    std::memcpy(allocation.mappedData, _impl->pendingData.data(), _impl->pendingData.size());
+    const size_t uploadBytes = std::min<size_t>(
+        _impl->uniformShadowData.size(), allocation.size);
+    std::memcpy(allocation.mappedData, _impl->uniformShadowData.data(), uploadBytes);
     _impl->transientUniformResource = static_cast<ID3D12Resource *>(allocation.resource);
     _impl->transientUniformGPUAddress = allocation.gpuAddress;
     _impl->transientUniformEpoch = epoch;
@@ -359,36 +430,27 @@ bool CCD3D12Buffer::ensureTransientUniformUpload() {
 }
 
 void *CCD3D12Buffer::getD3D12ResourceHandle() const {
-    if (!_impl) {
+    if (!_impl || (_isBufferView && !_viewValid)) {
         return nullptr;
-    }
-    if (_impl->parent) {
-        return _impl->parent->getD3D12ResourceHandle();
     }
     return _impl->resource.Get();
 }
 
 uint64_t CCD3D12Buffer::getD3D12GPUVirtualAddress() const {
-    if (!_impl) {
+    if (!_impl || (_isBufferView && !_viewValid)) {
         return 0;
-    }
-    if (_impl->parent) {
-        return _impl->parent->getD3D12GPUVirtualAddress() + _impl->resourceOffset;
     }
 
     auto *resource = _impl->resource.Get();
     if (!resource) {
         return 0;
     }
-    return static_cast<uint64_t>(resource->GetGPUVirtualAddress() + _impl->resourceOffset);
+    return static_cast<uint64_t>(resource->GetGPUVirtualAddress() + _resourceOffset);
 }
 
 uint64_t CCD3D12Buffer::getD3D12ResourceVersion() const {
-    if (!_impl) {
+    if (!_impl || (_isBufferView && !_viewValid)) {
         return 0;
-    }
-    if (_impl->parent) {
-        return _impl->parent->getD3D12ResourceVersion();
     }
     return _impl->resource ? _impl->resourceVersion : 0;
 }
@@ -398,21 +460,19 @@ uint64_t CCD3D12Buffer::getD3D12GlobalResourceGeneration() {
 }
 
 uint64_t CCD3D12Buffer::getD3D12UniformGPUVirtualAddress() const {
-    if (!_impl) {
+    if (!_impl || (_isBufferView && !_viewValid)) {
         return 0;
     }
-    if (_impl->parent) {
-        return _impl->parent->getD3D12UniformGPUVirtualAddress() + _impl->resourceOffset;
+    if (_impl->transientUniformGPUAddress != 0) {
+        return _impl->transientUniformGPUAddress + _resourceOffset;
     }
-    return _impl->transientUniformGPUAddress != 0
-               ? _impl->transientUniformGPUAddress
-               : getD3D12GPUVirtualAddress();
+    return getD3D12GPUVirtualAddress();
 }
 
 bool CCD3D12Buffer::getD3D12UniformGPUVirtualAddressStorage(
     const uint64_t *&storage) const {
     storage = nullptr;
-    if (!_impl || _impl->parent || !isTransientUniformEligible()) {
+    if (!_impl || _isBufferView || !isTransientUniformEligible()) {
         return false;
     }
     storage = &_impl->transientUniformGPUAddress;
@@ -420,11 +480,9 @@ bool CCD3D12Buffer::getD3D12UniformGPUVirtualAddressStorage(
 }
 
 uint64_t CCD3D12Buffer::getUniformDescriptorVersion() const {
-    if (!_impl) {
-        return 0;
-    }
-    return _impl->parent ? _impl->parent->getUniformDescriptorVersion()
-                         : _impl->uniformDescriptorVersion;
+    return _impl && (!_isBufferView || _viewValid)
+               ? _impl->uniformDescriptorVersion
+               : 0;
 }
 
 uint32_t CCD3D12Buffer::getD3D12ConstantBufferSize() const {
@@ -432,38 +490,22 @@ uint32_t CCD3D12Buffer::getD3D12ConstantBufferSize() const {
     return static_cast<uint32_t>(std::min<uint64_t>(alignedSize, 64ULL * 1024ULL));
 }
 
-uint32_t CCD3D12Buffer::getD3D12ResourceOffset() const {
-    if (!_impl) {
-        return 0;
-    }
-    if (_impl->parent) {
-        return _impl->parent->getD3D12ResourceOffset() + _impl->resourceOffset;
-    }
-    return _impl->resourceOffset;
+uint64_t CCD3D12Buffer::getD3D12ResourceOffset() const {
+    return _impl && (!_isBufferView || _viewValid) ? _resourceOffset : 0;
 }
 
 bool CCD3D12Buffer::isD3D12UploadHeap() const {
-    if (!_impl) {
-        return true;
-    }
-    if (_impl->parent) {
-        return _impl->parent->isD3D12UploadHeap();
-    }
-    return _impl->uploadHeap;
+    return !_impl || _impl->uploadHeap;
 }
 
 void CCD3D12Buffer::markUniformDescriptorBinding(bool dynamic) {
     if (!_impl) {
         return;
     }
-    auto *owner = _impl->parent ? _impl->parent : this;
-    if (!owner->_impl) {
-        return;
-    }
     if (dynamic) {
-        owner->_impl->seenDynamicUniformBinding = true;
+        _impl->seenDynamicUniformBinding = true;
     } else {
-        owner->_impl->seenNonDynamicUniformBinding = true;
+        _impl->seenNonDynamicUniformBinding = true;
     }
 }
 
@@ -471,17 +513,16 @@ bool CCD3D12Buffer::isDynamicUniformOnly() const {
     if (!_impl) {
         return false;
     }
-    const auto *owner = _impl->parent ? _impl->parent : this;
-    return owner->_impl && owner->_impl->seenDynamicUniformBinding &&
-           !owner->_impl->seenNonDynamicUniformBinding;
+    return _impl->seenDynamicUniformBinding &&
+           !_impl->seenNonDynamicUniformBinding;
 }
 
 D3D12_RESOURCE_STATES CCD3D12Buffer::getCurrentState() const {
     if (!_impl) {
         return D3D12_RESOURCE_STATE_COMMON;
     }
-    if (_impl->parent) {
-        return _impl->parent->getCurrentState();
+    if (_impl->uploadHeap) {
+        return D3D12_RESOURCE_STATE_GENERIC_READ;
     }
     auto *device = CCD3D12Device::getInstance();
     if (device && _impl->stateEpoch != device->getBufferStateEpoch()) {
@@ -496,8 +537,10 @@ void CCD3D12Buffer::setCurrentState(D3D12_RESOURCE_STATES state) {
     if (!_impl) {
         return;
     }
-    if (_impl->parent) {
-        _impl->parent->setCurrentState(state);
+    if (_impl->uploadHeap) {
+        if (state != D3D12_RESOURCE_STATE_GENERIC_READ) {
+            CC_LOG_ERROR("D3D12 upload heap buffers must remain in GENERIC_READ state.");
+        }
         return;
     }
     _impl->currentState = state;
@@ -569,6 +612,8 @@ bool CCD3D12Buffer::createResource(uint32_t size) {
         device->discardPendingBufferUpdate(this);
     }
     _impl->pendingData.clear();
+    _impl->uniformShadowData.clear();
+    _impl->uniformBackingSize = resourceDesc.Width;
     _impl->updateQueued = false;
     _impl->transientUniformResource = nullptr;
     _impl->transientUniformGPUAddress = 0;
@@ -578,7 +623,8 @@ bool CCD3D12Buffer::createResource(uint32_t size) {
     _impl->uploadedContentVersion = std::numeric_limits<uint64_t>::max();
     ++_impl->uniformDescriptorVersion;
     device->notifyTransientUniformUpload();
-    _impl->resourceOffset = 0;
+    _resourceOffset = 0;
+    _viewValid = true;
     _impl->uploadHeap = useUploadHeap;
     _impl->currentState = useUploadHeap ? D3D12_RESOURCE_STATE_GENERIC_READ : D3D12_RESOURCE_STATE_COMMON;
     _impl->stateEpoch = device->getBufferStateEpoch();

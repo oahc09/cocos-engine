@@ -24,6 +24,7 @@
 
 #pragma once
 
+#include "D3D12ResourceState.h"
 #include "gfx-base/GFXTexture.h"
 #include <memory>
 #include <vector>
@@ -39,7 +40,16 @@ namespace gfx {
 class Swapchain;
 
 DXGI_FORMAT toD3D12Format(Format format);
+DXGI_FORMAT toD3D12VertexFormat(Format format);
 SampleCount getD3D12EffectiveSampleCount(SampleCount samples);
+bool getD3D12TextureUploadFootprint(
+    ID3D12Device *device,
+    const D3D12_RESOURCE_DESC &textureDesc,
+    const BufferTextureCopy &region,
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT &footprint,
+    UINT &rowCount,
+    UINT64 &rowSizeInBytes,
+    UINT64 &uploadSize);
 
 class CC_DLL CCD3D12Texture final : public Texture {
 public:
@@ -48,21 +58,19 @@ public:
 
     void *getD3D12ResourceHandle() const;
     void *getD3D12OwnedResourceHandle() const;
+    D3D12ResourceBackingPtr getD3D12ResourceBacking() const;
+    static uint64_t getD3D12GlobalResourceGeneration();
 
     // Returns true if this texture wraps a swapchain back buffer (color attachment)
     bool isSwapchainColorTexture() const;
 
-    static void *findLatestOwnedColorResource(uint32_t width, uint32_t height, Format format, SampleCount samples);
-
     // Returns the parent swapchain for swapchain textures, nullptr otherwise
     Swapchain *getSwapchain() const { return _isSwapchainTexture ? _swapchain : nullptr; }
 
-    // D3D12 resource state tracking - used by pipelineBarrier
-    D3D12_RESOURCE_STATES getCurrentState() const { return _currentState; }
+    D3D12_RESOURCE_STATES getCurrentState() const;
     void setCurrentState(D3D12_RESOURCE_STATES state);
-    static D3D12_RESOURCE_STATES getTrackedResourceState(void *resource, D3D12_RESOURCE_STATES fallback);
-    static void setTrackedResourceState(void *resource, D3D12_RESOURCE_STATES state);
-    static void clearTrackedResourceState(void *resource);
+    D3D12_RESOURCE_STATES getSubresourceState(uint32_t subresource) const;
+    void setSubresourceState(uint32_t subresource, D3D12_RESOURCE_STATES state);
 
     void markBaseMipLayerUploaded(uint32_t mipLevel, uint32_t baseLayer, uint32_t layerCount);
     bool shouldGenerateMipmapsAfterUpload() const;
@@ -82,7 +90,6 @@ private:
     std::unique_ptr<Impl> _impl;
 
     bool _isSwapchainTexture{false};
-    D3D12_RESOURCE_STATES _currentState = D3D12_RESOURCE_STATE_COMMON;
     ccstd::vector<uint8_t> _baseMipUploadedLayers;
     bool _mipmapsGenerated{false};
 };

@@ -24,20 +24,26 @@
 
 #pragma once
 
+#include "D3D12ResourceState.h"
 #include "gfx-base/GFXCommandBuffer.h"
 #include <d3d12.h>
 #include <memory>
+#include <vector>
 #include <wrl/client.h>
 
 namespace cc {
 namespace gfx {
 
+class CCD3D12Queue;
+
 bool generateD3D12Mipmaps(
     ID3D12Device *device,
     ID3D12GraphicsCommandList *commandList,
     ID3D12Resource *resource,
+    const D3D12ResourceBackingPtr &backing,
     const TextureInfo &textureInfo,
-    ccstd::vector<Microsoft::WRL::ComPtr<ID3D12DescriptorHeap>> &pendingDescriptorHeaps);
+    ccstd::vector<Microsoft::WRL::ComPtr<ID3D12DescriptorHeap>> &pendingDescriptorHeaps,
+    D3D12ResourceStateJournal *stateJournal = nullptr);
 
 class CC_DLL CCD3D12CommandBuffer final : public CommandBuffer {
 public:
@@ -86,11 +92,17 @@ public:
 
     // Returns the closed ID3D12GraphicsCommandList as void* for Queue::submit
     void *getD3D12CommandList() const;
+    std::shared_ptr<void> getD3D12CommandRecordingContext() const;
+    uint32_t getD3D12RetainedResourceCount() const;
+    void captureSubmissionResourceStates(std::vector<D3D12ResourceStateSnapshot> &snapshots) const;
+    bool appendSubmissionStateFixupBarriers(std::vector<D3D12_RESOURCE_BARRIER> &barriers) const;
+    bool commitSubmissionResourceStates() const;
 
     void notifySubmitted(void *fence, uint64_t fenceValue);
+    void notifySubmissionFailed();
 
     // Flush pending descriptor set bindings to GPU (called internally before draw/dispatch)
-    void flushDescriptorSets();
+    bool flushDescriptorSets();
 
 protected:
     void doInit(const CommandBufferInfo &info) override;
@@ -98,13 +110,15 @@ protected:
 
 private:
     friend class CCD3D12Device;
+    friend class CCD3D12Queue;
 
     // Coalesce transition barriers for unique DEFAULT-buffer updates drained
     // at one synchronization point. Repeated resources retain legacy ordering.
     void startBufferUpdateBatch(bool destinationsAreUnique);
     void finishBufferUpdateBatch();
 
-    void waitForFenceValue();
+    bool waitForFenceValue();
+    static void retireD3D12CommandRecordingContext(const std::shared_ptr<void> &context);
     void invalidateGraphicsState();
     void invalidateDescriptorTables();
     bool flushDescriptorSetsIncremental();
@@ -122,6 +136,9 @@ private:
                                        class CCD3D12DescriptorSet *directDescriptorSet);
     void flushLocalRootCbvBatch();
     void applyDynamicPipelineState();
+    void retainDescriptorSetResources(class CCD3D12DescriptorSet *descriptorSet);
+    void retainRecordingResource(ID3D12Resource *resource);
+    void retainRecordingDeviceObject(ID3D12DeviceChild *object);
     void transitionColorAttachment(uint32_t attachment, D3D12_RESOURCE_STATES state);
     void bindSubpassRenderTargets(uint32_t subpass);
     void resolveSubpass(uint32_t subpass);

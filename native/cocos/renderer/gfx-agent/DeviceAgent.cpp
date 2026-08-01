@@ -455,6 +455,29 @@ void DeviceAgent::frameSync() {
         });
 }
 
+bool DeviceAgent::waitIdle() {
+    if (!_actor || !_mainMessageQueue) {
+        return false;
+    }
+
+    bool result{false};
+    Semaphore completion{0};
+    ENQUEUE_MESSAGE_3(
+        _mainMessageQueue, WaitIdle,
+        actor, _actor,
+        result, &result,
+        completion, &completion,
+        {
+            *result = actor->waitIdle();
+            completion->signal();
+        });
+
+    MessageQueue::freeChunksInFreeQueue(_mainMessageQueue);
+    _mainMessageQueue->finishWriting();
+    completion.wait();
+    return result;
+}
+
 SampleCount DeviceAgent::getMaxSampleCount(Format format, TextureUsage usage, TextureFlags flags) const {
     return _actor->getMaxSampleCount(format, usage, flags);
 }

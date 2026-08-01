@@ -24,6 +24,7 @@
 
 #pragma once
 
+#include "D3D12ResourceState.h"
 #include "gfx-base/GFXSwapchain.h"
 #include <cstdint>
 #include <memory>
@@ -40,6 +41,7 @@ public:
 
     bool isReady() const;
     void *getCurrentBackBufferHandle() const;
+    D3D12ResourceBackingPtr getCurrentBackBufferBacking() const;
     uintptr_t getCurrentRTVHandle() const;
     uint32_t getCurrentBackBufferIndex() const;
     bool containsBackBuffer(void *resource) const;

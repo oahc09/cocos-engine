@@ -50,7 +50,7 @@ struct CCD3D12Swapchain::Impl {
     static constexpr uint32_t BACK_BUFFER_COUNT = D3D12_MAX_FRAMES_IN_FLIGHT;
     Microsoft::WRL::ComPtr<IDXGISwapChain3> swapChain;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> rtvHeap;
-    Microsoft::WRL::ComPtr<ID3D12Resource> backBuffers[BACK_BUFFER_COUNT];
+    D3D12ResourceBackingPtr backBuffers[BACK_BUFFER_COUNT];
     uint32_t currentBackBufferIndex{0};
     uint32_t rtvDescriptorSize{0};
     bool ready{false};
@@ -97,12 +97,15 @@ void CCD3D12Swapchain::doDestroy() {
         if (auto *device = CCD3D12Device::getInstance()) {
             device->unregisterSwapchain(this);
             if (_impl->swapChain) {
-                device->waitForGpu();
-                device->retireFrameResources();
+                if (device->waitForGpu()) {
+                    device->retireFrameResources();
+                } else {
+                    CC_LOG_ERROR("D3D12 swapchain teardown could not drain the GPU queue.");
+                }
             }
         }
         for (auto &backBuffer : _impl->backBuffers) {
-            backBuffer.Reset();
+            backBuffer.reset();
         }
         _impl->rtvHeap.Reset();
         _impl->swapChain.Reset();
@@ -124,7 +127,8 @@ void CCD3D12Swapchain::doResize(uint32_t width, uint32_t height, SurfaceTransfor
     }
 
     const bool resized = createOrResizeSwapchain(width, height);
-    _impl->ready = resized || (_impl->swapChain && _impl->backBuffers[0].Get() != nullptr);
+    _impl->ready = resized || (_impl->swapChain && _impl->backBuffers[0] &&
+                               _impl->backBuffers[0]->resource != nullptr);
     if (!resized) {
         return;
     }
@@ -148,7 +152,15 @@ void *CCD3D12Swapchain::getCurrentBackBufferHandle() const {
     if (!_impl || !_impl->ready) {
         return nullptr;
     }
-    return _impl->backBuffers[_impl->currentBackBufferIndex].Get();
+    const auto &backing = _impl->backBuffers[_impl->currentBackBufferIndex];
+    return backing ? backing->resource.Get() : nullptr;
+}
+
+D3D12ResourceBackingPtr CCD3D12Swapchain::getCurrentBackBufferBacking() const {
+    if (!_impl || !_impl->ready) {
+        return {};
+    }
+    return _impl->backBuffers[_impl->currentBackBufferIndex];
 }
 
 uintptr_t CCD3D12Swapchain::getCurrentRTVHandle() const {
@@ -172,7 +184,7 @@ bool CCD3D12Swapchain::containsBackBuffer(void *resource) const {
 
     auto *candidate = static_cast<ID3D12Resource *>(resource);
     for (const auto &backBuffer : _impl->backBuffers) {
-        if (backBuffer.Get() == candidate) {
+        if (backBuffer && backBuffer->resource.Get() == candidate) {
             return true;
         }
     }
@@ -259,10 +271,13 @@ bool CCD3D12Swapchain::createOrResizeSwapchain(uint32_t width, uint32_t height) 
             return false;
         }
     } else {
-        device->waitForGpu();
+        if (!device->waitForGpu()) {
+            CC_LOG_ERROR("D3D12 swapchain resize aborted because GPU synchronization failed.");
+            return false;
+        }
         device->retireFrameResources();
         for (auto &backBuffer : _impl->backBuffers) {
-            backBuffer.Reset();
+            backBuffer.reset();
         }
         hr = _impl->swapChain->ResizeBuffers(Impl::BACK_BUFFER_COUNT, width, height, DXGI_FORMAT_R8G8B8A8_UNORM, 0);
         if (FAILED(hr)) {
@@ -306,12 +321,21 @@ bool CCD3D12Swapchain::createRenderTargetViews() {
 
     D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = _impl->rtvHeap->GetCPUDescriptorHandleForHeapStart();
     for (uint32_t index = 0; index < Impl::BACK_BUFFER_COUNT; ++index) {
-        HRESULT hr = _impl->swapChain->GetBuffer(index, IID_PPV_ARGS(&_impl->backBuffers[index]));
+        Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+        HRESULT hr = _impl->swapChain->GetBuffer(index, IID_PPV_ARGS(&resource));
         if (FAILED(hr)) {
             CC_LOG_ERROR("GetBuffer(%u) failed. HRESULT=0x%08x", index, static_cast<unsigned>(hr));
             return false;
         }
-        d3dDevice->CreateRenderTargetView(_impl->backBuffers[index].Get(), nullptr, rtvHandle);
+        auto backing = std::make_shared<D3D12ResourceBacking>();
+        backing->resource = std::move(resource);
+        backing->deviceEpoch = device->getDeviceEpoch();
+        backing->mipLevels = 1;
+        backing->arraySize = 1;
+        backing->planeCount = 1;
+        backing->states.reset(1, D3D12_RESOURCE_STATE_PRESENT);
+        _impl->backBuffers[index] = std::move(backing);
+        d3dDevice->CreateRenderTargetView(_impl->backBuffers[index]->resource.Get(), nullptr, rtvHandle);
         rtvHandle.ptr += _impl->rtvDescriptorSize;
     }
 

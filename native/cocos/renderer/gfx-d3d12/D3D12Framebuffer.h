@@ -24,14 +24,33 @@
 
 #pragma once
 
+#include "D3D12ResourceState.h"
 #include "gfx-base/GFXFramebuffer.h"
+#include <cstdint>
 #include <memory>
 
 namespace cc {
 namespace gfx {
 
 class CCD3D12Swapchain;
-class CCD3D12Texture;
+
+struct D3D12FramebufferAttachment {
+    D3D12ResourceBackingPtr backing;
+    Format format{Format::UNKNOWN};
+    TextureType type{TextureType::TEX2D};
+    SampleCount samples{SampleCount::X1};
+    uint32_t width{0};
+    uint32_t height{0};
+    uint32_t baseMip{0};
+    uint32_t mipCount{1};
+    uint32_t baseLayer{0};
+    uint32_t layerCount{1};
+    uint32_t basePlane{0};
+    uint32_t planeCount{1};
+    uintptr_t resourceId{0};
+    uint64_t backingGeneration{0};
+    bool isSwapchain{false};
+};
 
 class CC_DLL CCD3D12Framebuffer final : public Framebuffer {
 public:
@@ -49,11 +68,14 @@ public:
     uint32_t getWidth() const;
     uint32_t getHeight() const;
     uint32_t getColorTextureCount() const;
-    CCD3D12Texture *getColorTexture(uint32_t index) const;
-    CCD3D12Texture *getDepthStencilTexture() const;
+    const D3D12FramebufferAttachment *getColorAttachment(uint32_t index) const;
+    const D3D12FramebufferAttachment *getDepthStencilAttachment() const;
     void *getColorResource(uint32_t index) const;
     void *getDepthStencilResource() const;
+    D3D12ResourceBackingPtr getColorBacking(uint32_t index) const;
+    D3D12ResourceBackingPtr getDepthStencilBacking() const;
     bool hasColorTextureState(uint32_t index) const;
+    bool isValid() const;
     CCD3D12Swapchain *getSwapchain() const;
     bool isOffscreen() const;
 
@@ -62,8 +84,6 @@ protected:
     void doDestroy() override;
 
 private:
-    void refreshRepairedColorResource(uint32_t index) const;
-
     struct Impl;
     std::unique_ptr<Impl> _impl;
     CCD3D12Swapchain *_swapchain{nullptr};

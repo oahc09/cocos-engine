@@ -88,6 +88,7 @@ public:
     using Device::createTextureBarrier;
 
     void frameSync() override {}
+    bool waitIdle() override;
     void acquire(Swapchain *const *swapchains, uint32_t count) override;
     void present() override;
 
@@ -116,11 +117,15 @@ public:
                                                    bool indexed,
                                                    uint32_t byteStride);
     void *getDispatchIndirectSignature() const;
+    std::shared_ptr<void> getBlitPipelineCacheEntry(uint32_t key) const;
+    std::shared_ptr<void> cacheBlitPipeline(uint32_t key, std::shared_ptr<void> pipeline);
+    void *getOrCreateEmptyRootSignature();
     static CC_FORCE_INLINE const D3D12TransientUniformFrameState &
     getActiveTransientUniformFrameState() {
         return activeTransientUniformFrameState;
     }
     uint64_t getBufferStateEpoch() const;
+    uint64_t getDeviceEpoch() const;
     uint32_t getActiveFrameResourceIndex() const;
     uint64_t getTransientUniformUploadGeneration() const;
     void notifyTransientUniformUpload();
@@ -176,7 +181,7 @@ protected:
     void initializeShaderCacheSession();
     void initFormatFeatures();
     void initCapabilities();
-    void waitForGpu();
+    bool waitForGpu();
     void advanceBufferStateEpoch();
     struct Impl;
     std::unique_ptr<Impl> _impl;

@@ -86,6 +86,7 @@ public:
     bool getDynamicDescriptorOffset(uint32_t index, uint32_t &descriptorOffset) const;
     bool getDynamicDescriptorSource(uint32_t index, uint64_t &gpuAddress, uint64_t &size) const;
     bool hasOnlyNullDynamicDescriptorSources() const;
+    bool getLocalRootCbvData(D3D12LocalRootCbvBatchData &data) const;
     bool getLocalRootCbvBatchData(D3D12LocalRootCbvBatchData &data);
     bool getLocalRootCbvBatchFastData(D3D12LocalRootCbvBatchData &data) const;
     bool getLocalRootCbvFastPacket(D3D12LocalRootCbvFastPacket &packet) const;
@@ -104,6 +105,7 @@ public:
     uint32_t getDescriptorSemanticCount() const;
     bool getDescriptorSemanticSignature(uint32_t index, uint32_t &kind,
                                         uint64_t &value0, uint64_t &value1) const;
+    void collectBoundD3D12Resources(ccstd::vector<void *> &resources) const;
     const ccstd::vector<uint32_t> &getSamplerTableKey() const;
     uint64_t getSamplerSignature() const;
     void applyDynamicOffsets(uint32_t dynamicOffsetCount, const uint32_t *dynamicOffsets);

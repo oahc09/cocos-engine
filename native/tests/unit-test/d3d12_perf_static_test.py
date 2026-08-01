@@ -40,8 +40,263 @@ def test_submit_and_present_do_not_wait_for_gpu() -> None:
     assert_not_in_body("D3D12Device.cpp", "void CCD3D12Device::present", "WaitForSingleObject")
 
 
+def test_restart_drains_gpu_before_vm_teardown() -> None:
+    device_header = (RENDERER / "gfx-base" / "GFXDevice.h").read_text(encoding="utf-8")
+    agent_header = (RENDERER / "gfx-agent" / "DeviceAgent.h").read_text(encoding="utf-8")
+    agent_source = (RENDERER / "gfx-agent" / "DeviceAgent.cpp").read_text(encoding="utf-8")
+    validator_header = (RENDERER / "gfx-validator" / "DeviceValidator.h").read_text(encoding="utf-8")
+    validator_source = (RENDERER / "gfx-validator" / "DeviceValidator.cpp").read_text(encoding="utf-8")
+    engine = (ROOT / "cocos" / "engine" / "Engine.cpp").read_text(encoding="utf-8")
+    root = (ROOT / "cocos" / "core" / "Root.cpp").read_text(encoding="utf-8")
+
+    restart = function_body(engine, "void Engine::doRestart")
+    root_destroy = function_body(root, "void Root::destroy")
+    d3d12_wait = function_body(read("D3D12Device.cpp"), "bool CCD3D12Device::waitIdle")
+
+    assert "virtual bool waitIdle()" in device_header
+    assert "bool waitIdle() override" in agent_header
+    assert "bool DeviceAgent::waitIdle()" in agent_source
+    assert "actor->waitIdle()" in function_body(agent_source, "bool DeviceAgent::waitIdle")
+    assert "bool waitIdle() override" in validator_header
+    assert "bool DeviceValidator::waitIdle()" in validator_source
+    assert "return _actor->waitIdle()" in function_body(validator_source, "bool DeviceValidator::waitIdle")
+    assert "_gfxDevice->waitIdle()" in restart
+    assert restart.index("_gfxDevice->waitIdle()") < restart.index("events::RestartVM::broadcast()")
+    assert "framegraph::FrameGraph::gc(0)" in restart
+    assert restart.index("events::RestartVM::broadcast()") < restart.index("framegraph::FrameGraph::gc(0)")
+    assert restart.index("framegraph::FrameGraph::gc(0)") < restart.index("destroy()")
+    assert "graphicsQueue->Signal" in d3d12_wait
+    assert "WaitForSingleObject" in d3d12_wait
+    assert "GetCompletedValue()" in d3d12_wait
+    assert "std::numeric_limits<UINT64>::max()" in d3d12_wait
+    assert "GetDeviceRemovedReason()" in d3d12_wait
+    assert "swapchain->destroy()" in root_destroy
+    assert root_destroy.index("swapchain->destroy()") < root_destroy.index("CC_SAFE_DELETE(swapchain)")
+
+
+def test_compute_capability_is_fail_closed() -> None:
+    device = read("D3D12Device.cpp")
+    pipeline = read("D3D12PipelineState.cpp")
+    command_buffer = read("D3D12CommandBuffer.cpp")
+
+    init = function_body(device, "bool CCD3D12Device::doInit")
+    pso_init = function_body(pipeline, "void CCD3D12PipelineState::doInit")
+    dispatch = function_body(command_buffer, "void CCD3D12CommandBuffer::dispatch")
+
+    assert "_features[toNumber(Feature::COMPUTE_SHADER)] = false" in init
+    assert "info.bindPoint == PipelineBindPoint::COMPUTE" in pso_init
+    assert pso_init.index("info.bindPoint == PipelineBindPoint::COMPUTE") < pso_init.index(
+        "CreateGraphicsPipelineState"
+    )
+    assert "not supported" in pso_init
+    assert "not supported" in dispatch
+    assert "Dispatch(" not in dispatch
+    assert "ExecuteIndirect(" not in dispatch
+
+
+def test_device_scopes_native_pipeline_caches() -> None:
+    device = read("D3D12Device.cpp")
+    command_buffer = read("D3D12CommandBuffer.cpp")
+    pipeline = read("D3D12PipelineState.cpp")
+    destroy = function_body(device, "void CCD3D12Device::doDestroy")
+
+    assert "blitPipelineCache" in device
+    assert "emptyRootSignature" in device
+    assert "static std::unordered_map<uint32_t, D3D12BlitPipeline>" not in command_buffer
+    assert "static Microsoft::WRL::ComPtr<ID3D12RootSignature>" not in pipeline
+    assert "_impl->blitPipelineCache.clear()" in destroy
+    assert "_impl->emptyRootSignature.Reset()" in destroy
+    assert destroy.index("waitIdle()") < destroy.index("_impl->blitPipelineCache.clear()")
+    assert destroy.index("_impl->emptyRootSignature.Reset()") < destroy.index("_impl->d3dDevice.Reset()")
+
+
+def test_texture_state_is_shared_by_backing_and_tracks_subresources() -> None:
+    state_header = read("D3D12ResourceState.h")
+    texture_header = read("D3D12Texture.h")
+    texture = read("D3D12Texture.cpp")
+    swapchain = read("D3D12Swapchain.cpp")
+    view_init = function_body(texture, "void CCD3D12Texture::doInit(const TextureViewInfo &info)")
+
+    assert "class D3D12ResourceState" in state_header
+    assert "std::unordered_map<uint32_t, D3D12_RESOURCE_STATES> _overrides" in state_header
+    assert "struct D3D12ResourceBacking" in state_header
+    assert "uint64_t deviceEpoch" in state_header
+    assert "D3D12ResourceBackingPtr getD3D12ResourceBacking() const" in texture_header
+    assert "_impl->backing = _isSwapchainTexture" in view_init
+    assert "D3D12ResourceBackingPtr{}" in view_init
+    assert "texture->getD3D12ResourceBacking()" in view_init
+    swapchain_color = function_body(texture, "bool CCD3D12Texture::isSwapchainColorTexture")
+    assert "getD3D12OwnedResourceHandle()" not in swapchain_color
+    assert "trackedResourceStates()" not in texture
+    assert "D3D12ResourceBackingPtr backBuffers[BACK_BUFFER_COUNT]" in swapchain
+    assert "D3D12_RESOURCE_STATE_PRESENT" in function_body(
+        swapchain, "bool CCD3D12Swapchain::createRenderTargetViews"
+    )
+
+
+def test_pipeline_barrier_uses_tracked_subresources_and_fail_closed_mapping() -> None:
+    command_buffer = read("D3D12CommandBuffer.cpp")
+    device = read("D3D12Device.cpp")
+    buffer = read("D3D12Buffer.cpp")
+    resource_state = read("D3D12ResourceState.cpp")
+    pipeline_barrier = function_body(command_buffer, "void CCD3D12CommandBuffer::pipelineBarrier")
+    buffer_state = function_body(buffer, "D3D12_RESOURCE_STATES CCD3D12Buffer::getCurrentState")
+    transition_helper = function_body(resource_state, "bool makeD3D12TransitionBarrier")
+    journal_transition = function_body(
+        resource_state, "bool D3D12ResourceStateJournal::transition"
+    )
+
+    assert "exclusiveWriteCount > 1" in pipeline_barrier
+    assert "mappedNext.hostOnly" in pipeline_barrier
+    assert "makeTrackedTextureTransition" in pipeline_barrier
+    assert "activeResourceStateJournal()" in pipeline_barrier
+    assert "appendUavBarrier(resource)" in pipeline_barrier
+    assert "needsD3D12UavOrderingBarrier" in pipeline_barrier
+    assert "bufBarrierInfo.type == BarrierType::SPLIT_BEGIN" not in pipeline_barrier
+    assert "texBarrierInfo.type == BarrierType::SPLIT_BEGIN" not in pipeline_barrier
+    assert "D3D12_RESOURCE_STATE_GENERIC_READ" in buffer_state
+    assert buffer_state.index("D3D12_RESOURCE_STATE_GENERIC_READ") < buffer_state.index("stateEpoch")
+    assert "backing.states.get(subresource)" in transition_helper
+    assert "barrier.Transition.Subresource = subresource" in transition_helper
+    assert "barrier.Transition.StateBefore = previousState" in transition_helper
+    assert "backing.states.set(subresource, nextState)" in transition_helper
+    assert "entry.finalStates.set(subresource, nextState)" in journal_transition
+    assert "backing->states.set" not in journal_transition
+
+    for signature in [
+        "void CCD3D12CommandBuffer::copyBuffersToTexture",
+        "void CCD3D12CommandBuffer::copyTexture",
+        "void CCD3D12CommandBuffer::resolveTexture",
+    ]:
+        assert "makeTrackedTextureTransition" in function_body(command_buffer, signature)
+    generate_mipmaps = function_body(command_buffer, "bool generateMipmaps")
+    assert "makeTrackedTextureTransition" in generate_mipmaps
+    assert ".Transition.StateBefore =" not in generate_mipmaps
+    for signature in [
+        "void CCD3D12Device::copyBuffersToTextureImmediate",
+        "void CCD3D12Device::copyTextureToBuffers",
+    ]:
+        assert "makeD3D12TransitionBarrier" in function_body(device, signature)
+
+
+def test_descriptor_binding_failures_block_draw_and_static_cache_is_versioned() -> None:
+    header = read("D3D12CommandBuffer.h")
+    command_buffer = read("D3D12CommandBuffer.cpp")
+    descriptor_set = read("D3D12DescriptorSet.cpp")
+    flush = function_body(command_buffer, "bool CCD3D12CommandBuffer::flushDescriptorSets()")
+    draw = function_body(command_buffer, "void CCD3D12CommandBuffer::draw(const DrawInfo &info)")
+
+    assert "bool flushDescriptorSets()" in header
+    assert "return false" in flush
+    assert "descriptorSetsDirty = false" in flush
+    assert flush.rindex("descriptorSetsDirty = false") > flush.index("SetGraphicsRootDescriptorTable")
+    assert "if (!flushDescriptorSets())" in draw
+    assert "fallback cannot safely bind a split local descriptor set" in flush
+    assert "staticDescriptorVersion" in command_buffer
+    assert "entry.owner == binding.set" in command_buffer
+    assert "binding.set->getStaticDescriptorVersion()" in command_buffer
+    assert "layout->getInputAttachmentCount()" not in function_body(
+        descriptor_set, "void CCD3D12DescriptorSet::doInit"
+    )
+    assert "CC_ASSERT(cbvSrvUavOffset == _impl->cbvSrvUavDescriptorCount)" in function_body(
+        descriptor_set, "void CCD3D12DescriptorSet::forceUpdate"
+    )
+
+
+def test_render_semantics_fail_closed_without_attachment_substitution() -> None:
+    framebuffer_header = read("D3D12Framebuffer.h")
+    framebuffer = read("D3D12Framebuffer.cpp")
+    texture_header = read("D3D12Texture.h")
+    texture = read("D3D12Texture.cpp")
+    command_buffer = read("D3D12CommandBuffer.cpp")
+    pipeline = read("D3D12PipelineState.cpp")
+
+    assert "bool isValid() const" in framebuffer_header
+    assert "struct D3D12FramebufferAttachment" in framebuffer_header
+    assert "D3D12ResourceBackingPtr backing" in framebuffer_header
+    assert "buildAttachmentSnapshot" in framebuffer
+    assert "getColorTexture(" not in command_buffer
+    assert "getDepthStencilTexture(" not in command_buffer
+    assert "makeRenderTargetViewDesc" in framebuffer
+    assert "CreateRenderTargetView(resource, &rtvDesc, handleSlot)" in framebuffer
+    assert "colorCount != renderPassColors->size()" in framebuffer
+    assert "findLatestOwnedColorResource" not in framebuffer
+    assert "findLatestOwnedColorResource" not in texture_header
+    assert "OwnedColorResourceEntry" not in texture
+    assert "if (!d3d12Fbo->isValid())" in function_body(
+        command_buffer, "void CCD3D12CommandBuffer::beginRenderPass"
+    )
+
+    subpass_resolve = function_body(
+        command_buffer, "void CCD3D12CommandBuffer::resolveSubpass"
+    )
+    assert "destinationAttachment = subpass.resolves[colorIndex]" in subpass_resolve
+    assert "subpass.resolves[sourceAttachment]" not in subpass_resolve
+    assert "toD3D12Format(sourceAttachmentInfo->format)" in subpass_resolve
+
+    explicit_resolve = function_body(
+        command_buffer, "void CCD3D12CommandBuffer::resolveTexture"
+    )
+    assert "dstInfo.samples != SampleCount::X1" in explicit_resolve
+    assert "srcFormat != dstFormat" in explicit_resolve
+    assert "toD3D12Format(srcTexture->getFormat())" in explicit_resolve
+    assert "DXGI_FORMAT_UNKNOWN);" not in explicit_resolve
+    assert "resolveFormat);" in explicit_resolve
+    assert "srcBacking->subresourceIndex" in explicit_resolve
+    assert "dstBacking->subresourceIndex" in explicit_resolve
+
+    stencil = function_body(pipeline, "D3D12_STENCIL_OP toD3D12StencilOp")
+    assert "StencilOp::INCR:       return D3D12_STENCIL_OP_INCR_SAT" in stencil
+    assert "StencilOp::DECR:       return D3D12_STENCIL_OP_DECR_SAT" in stencil
+    assert "StencilOp::INCR_WRAP:  return D3D12_STENCIL_OP_INCR" in stencil
+    assert "StencilOp::DECR_WRAP:  return D3D12_STENCIL_OP_DECR" in stencil
+
+    vertex_format = function_body(texture, "DXGI_FORMAT toD3D12VertexFormat")
+    assert "case Format::RGB8:" in vertex_format
+    assert "case Format::RGB8:" in vertex_format and "return DXGI_FORMAT_UNKNOWN" in vertex_format
+    assert "case Format::RGB10A2UI:" in vertex_format
+    assert "DXGI_FORMAT_R10G10B10A2_UINT" in vertex_format
+    assert "default:" in vertex_format
+    pso_init = function_body(pipeline, "void CCD3D12PipelineState::doInit")
+    assert "unsupported vertex format" in pso_init
+    assert "DXGI_FORMAT_UNKNOWN" in pso_init
+    draw = function_body(
+        command_buffer, "void CCD3D12CommandBuffer::draw(const DrawInfo &info)"
+    )
+    assert "!_impl->boundNativePipelineState" in draw
+
+
+def test_d3d12_input_assembler_init_has_no_per_object_debug_log() -> None:
+    input_assembler = read("D3D12InputAssembler.cpp")
+
+    assert "D3D12InputAssembler initialized with" not in input_assembler
+
+
+def test_input_assembler_flushes_pending_batch_before_changing_native_views() -> None:
+    command_buffer = read("D3D12CommandBuffer.cpp")
+    bind = function_body(
+        command_buffer, "void CCD3D12CommandBuffer::bindInputAssembler"
+    )
+
+    flush = bind.index("flushLocalRootCbvBatch();")
+    set_vertex_buffers = bind.index("IASetVertexBuffers")
+    set_index_buffer = bind.index("IASetIndexBuffer")
+    assert flush < set_vertex_buffers
+    assert flush < set_index_buffer
+
+
 def test_frame_resources_are_waited_before_reuse_not_after_submit() -> None:
-    assert_in_body("D3D12CommandBuffer.cpp", "void CCD3D12CommandBuffer::begin", "waitForFenceValue")
+    command_header = read("D3D12CommandBuffer.h")
+    command_source = read("D3D12CommandBuffer.cpp")
+    begin = function_body(command_source, "void CCD3D12CommandBuffer::begin")
+    wait = function_body(command_source, "bool CCD3D12CommandBuffer::waitForFenceValue")
+
+    assert "bool waitForFenceValue()" in command_header
+    assert "if (!waitForFenceValue())" in begin
+    assert begin.index("if (!waitForFenceValue())") < begin.index("pendingUploadResources.clear()")
+    assert "waitResult != WAIT_OBJECT_0" in wait
+    assert "DEVICE_REMOVED_FENCE_VALUE" in wait
+    assert "return false" in wait
     assert_in_body("D3D12Device.cpp", "void CCD3D12Device::acquire", "retireFrameResources")
 
 
@@ -52,6 +307,9 @@ def test_frame_slot_wait_precedes_descriptor_range_reuse() -> None:
     assert "nextFrameResource" in acquire
     assert "frameResources.fence->SetEventOnCompletion" in acquire
     assert "WaitForSingleObject" in acquire
+    assert "waitResult != WAIT_OBJECT_0" in acquire
+    assert "if (!waitIdle())" in acquire
+    assert "return;" in acquire
     assert "_impl->gpuDescriptorHeapPool->beginFrameAllocationRange" in acquire
     assert acquire.index("frameResources.fence->SetEventOnCompletion") < acquire.index(
         "_impl->gpuDescriptorHeapPool->beginFrameAllocationRange"
@@ -76,15 +334,16 @@ def test_three_frame_pipeline_keeps_swapchain_allocators_and_transient_resources
     assert "D3D12_GPU_DESCRIPTORS_PER_FRAME" in acquire
     submit = function_body(device, "void CCD3D12Device::notifySubmittedFence")
     assert "frameResources.fenceValue = value" in submit
-    assert "CommandRecordingContext recordingContexts[D3D12_MAX_FRAMES_IN_FLIGHT]" in command_buffer
-    assert "executedBundles[D3D12_MAX_FRAMES_IN_FLIGHT]" in command_buffer
+    assert "std::shared_ptr<CommandRecordingContext> recordingContexts[D3D12_MAX_FRAMES_IN_FLIGHT]" in command_buffer
+    assert "ccstd::vector<std::shared_ptr<CommandRecordingContext>> executedBundles" in command_buffer
     assert "% D3D12_MAX_FRAMES_IN_FLIGHT" in command_buffer
     assert "activeRecordingContext" in begin
     assert begin.index("activeRecordingContext") < begin.index("waitForFenceValue")
 
 
 def test_frame_slot_reuse_owns_sampler_and_upload_resets() -> None:
-    body = function_body(read("D3D12Device.cpp"), "void CCD3D12Device::waitForGpu")
+    body = function_body(read("D3D12Device.cpp"), "bool CCD3D12Device::waitForGpu")
+    assert "return waitIdle()" in body
     assert "gpuDescriptorHeapPool" not in body
     assert "samplerDescriptorHeapPool" not in body
     assert "uploadPages" not in body
@@ -179,7 +438,6 @@ def test_direct_buffer_updates_are_deferred_to_main_command_list() -> None:
     command_buffer = read("D3D12CommandBuffer.cpp")
     for signature in [
         "void CCD3D12CommandBuffer::draw(const DrawInfo &info)",
-        "void CCD3D12CommandBuffer::dispatch",
         "void CCD3D12CommandBuffer::execute",
         "void CCD3D12CommandBuffer::end()",
     ]:
@@ -462,8 +720,14 @@ def test_query_fetch_reuses_d3d12_objects() -> None:
 
 def test_dynamic_pso_repeated_state_is_cached() -> None:
     body = function_body(read("D3D12CommandBuffer.cpp"), "void CCD3D12CommandBuffer::applyDynamicPipelineState")
+    pipeline = function_body(
+        read("D3D12PipelineState.cpp"),
+        "void *CCD3D12PipelineState::getDynamicID3D12PipelineState",
+    )
     assert "dynamicPipelineStateValid" in body
     assert "lastDynamicPipelineStateOwner" in body
+    assert "_impl->boundNativePipelineState = nullptr" in body
+    assert "return _impl->pipelineState.Get()" not in pipeline
 
 
 def test_background_cache_probe_skips_legacy_v3_migration() -> None:
@@ -742,7 +1006,7 @@ def test_buffer_state_epoch_tracks_execute_submission_boundary() -> None:
     get_state = function_body(buffer, "D3D12_RESOURCE_STATES CCD3D12Buffer::getCurrentState")
     update_buffer = function_body(command_buffer, "void CCD3D12CommandBuffer::updateBuffer")
 
-    empty_check = submit.index("if (commandLists.empty()) return")
+    empty_check = submit.index("if (submissions.empty()) return")
     execute = submit.index("graphicsQueue->ExecuteCommandLists")
     advance = submit.index("device->advanceBufferStateEpoch")
     signal = submit.index("graphicsQueue->Signal")
@@ -842,18 +1106,52 @@ def test_validator_skips_invariant_layout_and_empty_offset_work() -> None:
 
 
 def test_executed_bundle_lifetime_follows_primary_submission_fence() -> None:
+    command_header = read("D3D12CommandBuffer.h")
     command_buffer = read("D3D12CommandBuffer.cpp")
+    queue = read("D3D12Queue.cpp")
     begin = function_body(command_buffer, "void CCD3D12CommandBuffer::begin")
     notify = function_body(command_buffer, "void CCD3D12CommandBuffer::notifySubmitted")
     execute = function_body(command_buffer, "void CCD3D12CommandBuffer::execute")
 
-    assert "ccstd::vector<IntrusivePtr<CCD3D12CommandBuffer>> executedBundles[D3D12_MAX_FRAMES_IN_FLIGHT]" in command_buffer
-    assert "auto &executedBundles = _impl->executedBundles[_impl->activeRecordingContext]" in begin
+    assert "ccstd::vector<std::shared_ptr<CommandRecordingContext>> executedBundles" in command_buffer
+    assert "auto &executedBundles = activeContext.executedBundles" in begin
     assert "executedBundles.clear()" in begin
-    assert "_impl->executedBundles[_impl->activeRecordingContext]" in notify
-    assert "bundleCommandBuffer->notifySubmitted(fence, fenceValue)" in notify
-    assert "executedBundles[_impl->activeRecordingContext].emplace_back(d3d12CmdBuff)" in execute
-    assert execute.index("ExecuteBundle(bundle)") < execute.index("executedBundles[_impl->activeRecordingContext].emplace_back(d3d12CmdBuff)")
+    assert "context.executedBundles" in notify
+    assert "bundleContext->lastSubmittedFence" in notify
+    assert "bundleContext->lastSubmittedFenceValue" in notify
+    assert "context.executedBundles.emplace_back(bundleContext)" in execute
+    assert execute.index("ExecuteBundle(bundle)") < execute.index("context.executedBundles.emplace_back(bundleContext)")
+    assert "std::shared_ptr<void> getD3D12CommandRecordingContext() const" in command_header
+    assert "inFlightContexts" in queue
+    assert "getD3D12CommandRecordingContext()" in queue
+    assert "retireSubmittedContexts" in queue
+    assert "notifySubmissionFailed()" in queue
+    assert "if (device->waitIdle())" in queue
+    assert "submissionFailed" in command_buffer
+    assert "IntrusivePtr<CCD3D12CommandBuffer>" not in command_buffer
+
+
+def test_async_texture_upload_fence_owns_the_frame_upload_pages() -> None:
+    device = read("D3D12Device.cpp")
+    upload = function_body(device, "void CCD3D12Device::copyBuffersToTextureImmediate")
+
+    assert "uploadSourceResources" in upload
+    assert "pendingContext.referencedResources" in upload
+    assert "frameResources.fence = _impl->frameFence" in upload
+    assert "frameResources.fenceValue = _impl->fenceValue" in upload
+    assert upload.index("frameResources.fence = _impl->frameFence") < upload.index(
+        "_impl->pendingUploadCommandContexts.emplace_back"
+    )
+
+
+def test_d3d12_buffer_view_shares_native_backing_without_actor_ownership() -> None:
+    header = read("D3D12Buffer.h")
+    buffer = read("D3D12Buffer.cpp")
+
+    assert "std::shared_ptr<Impl> _impl" in header
+    assert "_impl = buffer->_impl" in buffer
+    assert "IntrusivePtr<CCD3D12Buffer>" not in buffer
+    assert "_impl->parent" not in buffer
 
 
 def test_render_queue_skips_only_redundant_pipeline_and_material_bind_calls() -> None:
@@ -893,7 +1191,8 @@ def test_local_root_cbv_batch_fuses_local_set_selection_with_draw_encoding() -> 
     assert fused_signature in command_d3d12
     assert "cmdBuff->drawPackets(" in queue
     assert "drawLocalRootCbvBatchInternal(info, d3d12Set)" in command_d3d12
-    assert "hasMatchingStaticCbvSrvUavResources" in command_d3d12
+    assert "descriptorSet != _impl->localRootCbvBatchDescriptorSet" in command_d3d12
+    assert "_impl->localRootCbvBatchStaticDescriptorVersion" in command_d3d12
 
 
 def test_local_root_cbv_batch_is_scoped_and_preserves_immediate_fallback() -> None:
@@ -909,7 +1208,8 @@ def test_local_root_cbv_batch_is_scoped_and_preserves_immediate_fallback() -> No
     assert "const bool useDrawBatch = !enableOcclusionQuery && cmdBuff->supportsDrawBatch()" in queue
     assert "captureLocalRootCbvBatchBinding" in command_header
     assert "flushLocalRootCbvBatch" in command_buffer
-    assert "hasMatchingStaticCbvSrvUavResources" in command_buffer
+    assert "descriptorSet != _impl->localRootCbvBatchDescriptorSet" in command_buffer
+    assert "descriptorSet->getStaticDescriptorVersion()" in command_buffer
     assert "getSamplerTableKey() != _impl->localRootCbvBatchSamplerKey" in command_buffer
     assert "_impl->commandList->ExecuteIndirect(" in command_buffer
     assert "_impl->localRootCbvBatchCommandSignature" in command_buffer
@@ -1066,9 +1366,24 @@ def test_frame_slot_reuse_keeps_the_cbv_srv_uav_heap_object_stable() -> None:
     assert "waitForSubmittedFence" not in acquire
 
 
+def test_render_window_camera_uses_committed_swapchain_extent() -> None:
+    render_window = (ROOT / "cocos" / "scene" / "RenderWindow.cpp").read_text(encoding="utf-8")
+    resize = function_body(render_window, "void RenderWindow::resize")
+
+    assert "camera->resize(_width, _height)" in resize
+    assert "camera->resize(width, height)" not in resize
+
+
 if __name__ == "__main__":
     tests = [
         test_submit_and_present_do_not_wait_for_gpu,
+        test_restart_drains_gpu_before_vm_teardown,
+        test_compute_capability_is_fail_closed,
+        test_device_scopes_native_pipeline_caches,
+        test_texture_state_is_shared_by_backing_and_tracks_subresources,
+        test_pipeline_barrier_uses_tracked_subresources_and_fail_closed_mapping,
+        test_descriptor_binding_failures_block_draw_and_static_cache_is_versioned,
+        test_render_semantics_fail_closed_without_attachment_substitution,
         test_frame_resources_are_waited_before_reuse_not_after_submit,
         test_frame_slot_wait_precedes_descriptor_range_reuse,
         test_three_frame_pipeline_keeps_swapchain_allocators_and_transient_resources_in_sync,
@@ -1105,6 +1420,8 @@ if __name__ == "__main__":
         test_descriptor_set_recovers_staging_allocations_before_writes,
         test_descriptor_sets_suballocate_cpu_staging_descriptors,
         test_local_static_descriptor_metadata_is_built_on_update_not_per_draw,
+        test_d3d12_input_assembler_init_has_no_per_object_debug_log,
+        test_input_assembler_flushes_pending_batch_before_changing_native_views,
         test_command_buffer_caches_redundant_graphics_state,
         test_shader_blit_invalidates_cached_graphics_state,
         test_descriptor_flush_is_versioned_and_incremental,
@@ -1119,6 +1436,8 @@ if __name__ == "__main__":
         test_dynamic_descriptor_table_cache_keys_exact_offsets,
         test_validator_skips_invariant_layout_and_empty_offset_work,
         test_executed_bundle_lifetime_follows_primary_submission_fence,
+        test_async_texture_upload_fence_owns_the_frame_upload_pages,
+        test_d3d12_buffer_view_shares_native_backing_without_actor_ownership,
         test_render_queue_skips_only_redundant_pipeline_and_material_bind_calls,
         test_d3d12_owns_draw_batch_input_assembler_compatibility,
         test_local_root_cbv_batch_fuses_local_set_selection_with_draw_encoding,
@@ -1131,6 +1450,7 @@ if __name__ == "__main__":
         test_d3d12_runtime_selection_is_explicit_and_precedes_vulkan,
         test_win32_platform_is_the_only_windows_frame_pacer,
         test_frame_slot_reuse_keeps_the_cbv_srv_uav_heap_object_stable,
+        test_render_window_camera_uses_committed_swapchain_extent,
     ]
     for test in tests:
         test()

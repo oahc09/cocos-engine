@@ -25,6 +25,7 @@
 #include "D3D12InputAssembler.h"
 #include "D3D12Buffer.h"
 #include "D3D12Device.h"
+#include "D3D12Texture.h"
 #include "base/Log.h"
 
     #ifndef NOMINMAX
@@ -35,49 +36,6 @@
 
 namespace cc {
 namespace gfx {
-
-static DXGI_FORMAT gfxFormatToDXGI(Format format) {
-    switch (format) {
-        case Format::R8:      return DXGI_FORMAT_R8_UNORM;
-        case Format::R8SN:    return DXGI_FORMAT_R8_SNORM;
-        case Format::R8UI:    return DXGI_FORMAT_R8_UINT;
-        case Format::R8I:     return DXGI_FORMAT_R8_SINT;
-        case Format::R16F:    return DXGI_FORMAT_R16_FLOAT;
-        case Format::R16UI:   return DXGI_FORMAT_R16_UINT;
-        case Format::R16I:    return DXGI_FORMAT_R16_SINT;
-        case Format::R32F:    return DXGI_FORMAT_R32_FLOAT;
-        case Format::R32UI:   return DXGI_FORMAT_R32_UINT;
-        case Format::R32I:    return DXGI_FORMAT_R32_SINT;
-        case Format::RG8:     return DXGI_FORMAT_R8G8_UNORM;
-        case Format::RG8SN:   return DXGI_FORMAT_R8G8_SNORM;
-        case Format::RG8UI:   return DXGI_FORMAT_R8G8_UINT;
-        case Format::RG8I:    return DXGI_FORMAT_R8G8_SINT;
-        case Format::RG16F:   return DXGI_FORMAT_R16G16_FLOAT;
-        case Format::RG16UI:  return DXGI_FORMAT_R16G16_UINT;
-        case Format::RG16I:   return DXGI_FORMAT_R16G16_SINT;
-        case Format::RG32F:   return DXGI_FORMAT_R32G32_FLOAT;
-        case Format::RG32UI:  return DXGI_FORMAT_R32G32_UINT;
-        case Format::RG32I:   return DXGI_FORMAT_R32G32_SINT;
-        case Format::RGB32F:  return DXGI_FORMAT_R32G32B32_FLOAT;
-        case Format::RGB32UI: return DXGI_FORMAT_R32G32B32_UINT;
-        case Format::RGB32I:  return DXGI_FORMAT_R32G32B32_SINT;
-        case Format::RGBA8:   return DXGI_FORMAT_R8G8B8A8_UNORM;
-        case Format::BGRA8:   return DXGI_FORMAT_B8G8R8A8_UNORM;
-        case Format::SRGB8_A8: return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
-        case Format::RGBA8SN: return DXGI_FORMAT_R8G8B8A8_SNORM;
-        case Format::RGBA8UI: return DXGI_FORMAT_R8G8B8A8_UINT;
-        case Format::RGBA8I:  return DXGI_FORMAT_R8G8B8A8_SINT;
-        case Format::RGBA16F: return DXGI_FORMAT_R16G16B16A16_FLOAT;
-        case Format::RGBA16UI: return DXGI_FORMAT_R16G16B16A16_UINT;
-        case Format::RGBA16I: return DXGI_FORMAT_R16G16B16A16_SINT;
-        case Format::RGBA32F: return DXGI_FORMAT_R32G32B32A32_FLOAT;
-        case Format::RGBA32UI: return DXGI_FORMAT_R32G32B32A32_UINT;
-        case Format::RGBA32I: return DXGI_FORMAT_R32G32B32A32_SINT;
-        case Format::RGB10A2:   return DXGI_FORMAT_R10G10B10A2_UNORM;
-        case Format::R11G11B10F:  return DXGI_FORMAT_R11G11B10_FLOAT;
-        default:               return DXGI_FORMAT_UNKNOWN;
-    }
-}
 
 // Extract semantic name and index from attribute name
 // e.g. "a_position" → "POSITION", 0
@@ -206,7 +164,7 @@ void CCD3D12InputAssembler::doInit(const InputAssemblerInfo &info) {
         _impl->semanticNames.emplace_back(semanticName);
         element.SemanticName = _impl->semanticNames.back().c_str();
         element.SemanticIndex = semanticIndex;
-        element.Format = gfxFormatToDXGI(attr.format);
+        element.Format = toD3D12VertexFormat(attr.format);
         element.InputSlot = attr.stream;
         element.AlignedByteOffset = D3D12_APPEND_ALIGNED_ELEMENT;
         element.InputSlotClass = attr.isInstanced
@@ -229,9 +187,6 @@ void CCD3D12InputAssembler::doInit(const InputAssemblerInfo &info) {
     _d3d12ViewSignature = 0;
     refreshBufferViews();
 
-    CC_LOG_DEBUG("D3D12InputAssembler initialized with %u attributes, %u vertex buffers.",
-                 static_cast<unsigned>(info.attributes.size()),
-                 static_cast<unsigned>(info.vertexBuffers.size()));
 }
 
 void CCD3D12InputAssembler::doDestroy() {

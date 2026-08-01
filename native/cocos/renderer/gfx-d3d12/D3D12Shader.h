@@ -50,8 +50,17 @@ public:
         uint32_t semanticIndex{0};
     };
 
+    struct StageLinkageParameter {
+        ccstd::string semanticName;
+        uint32_t semanticIndex{0};
+        uint32_t registerIndex{0};
+        uint32_t componentMask{0};
+        uint32_t componentType{0};
+    };
+
     BytecodeBlob getVertexBytecode() const;
     BytecodeBlob getFragmentBytecode() const;
+    BytecodeBlob getFragmentBytecodeForVertexLinkage() const;
     BytecodeBlob getGeometryBytecode() const;
     BytecodeBlob getComputeBytecode() const;
     BytecodeBlob getHullBytecode() const;
@@ -80,7 +89,8 @@ private:
                                   const ccstd::string &shaderName,
                                   std::vector<uint8_t> &outDXBC,
                                   bool cacheOnly = false,
-                                  bool *cacheMiss = nullptr);
+                                  bool *cacheMiss = nullptr,
+                                  const ccstd::vector<StageLinkageParameter> *fragmentLinkage = nullptr);
 
     struct Impl;
     std::unique_ptr<Impl> _impl;

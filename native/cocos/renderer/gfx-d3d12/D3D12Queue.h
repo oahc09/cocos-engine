@@ -38,6 +38,7 @@ public:
     using Queue::submit;
 
     void submit(CommandBuffer *const *cmdBuffs, uint32_t count) override;
+    void retireSubmittedContexts(bool allCompleted);
 
 protected:
     void doInit(const QueueInfo &info) override;

@@ -32,6 +32,7 @@
     #ifndef NOMINMAX
         #define NOMINMAX
     #endif
+    #include <algorithm>
     #include <d3d12.h>
     #include <dxgiformat.h>
     #include <wrl/client.h>
@@ -48,48 +49,195 @@ DXGI_FORMAT toD3D12DSVFormat(Format format) {
         case Format::DEPTH_STENCIL:
             return DXGI_FORMAT_D24_UNORM_S8_UINT;
         default:
-            return DXGI_FORMAT_D32_FLOAT;
+            return DXGI_FORMAT_UNKNOWN;
     }
 }
 
-D3D12_DEPTH_STENCIL_VIEW_DESC makeDepthStencilViewDesc(const CCD3D12Texture *texture) {
-    D3D12_DEPTH_STENCIL_VIEW_DESC desc{};
+bool buildAttachmentSnapshot(
+    CCD3D12Texture *texture,
+    uint64_t deviceEpoch,
+    D3D12FramebufferAttachment &attachment) {
+    if (!texture) {
+        return false;
+    }
+
+    const auto backing = texture->getD3D12ResourceBacking();
+    if (!backing || !backing->valid || !backing->resource ||
+        backing->deviceEpoch != deviceEpoch) {
+        return false;
+    }
+
     const auto &info = texture->getInfo();
-    const auto &viewInfo = texture->getViewInfo();
-    const bool isView = texture->isTextureView();
-    const Format format = isView ? viewInfo.format : info.format;
-    const TextureType type = isView ? viewInfo.type : info.type;
-    const uint32_t baseLevel = isView ? viewInfo.baseLevel : 0;
-    const uint32_t baseLayer = isView ? viewInfo.baseLayer : 0;
-    uint32_t layerCount = isView ? viewInfo.layerCount : info.layerCount;
-    if (layerCount == 0) {
-        layerCount = 1;
-    }
-    const bool isArrayView = info.layerCount > 1 || baseLayer > 0 ||
-                             layerCount > 1 || type == TextureType::CUBE;
-    const bool isMS = info.samples != SampleCount::X1;
+    const auto &view = texture->getViewInfo();
+    attachment = {};
+    attachment.backing = backing;
+    attachment.format = texture->getFormat();
+    attachment.type = texture->isTextureView() ? view.type : info.type;
+    attachment.samples = info.samples;
+    attachment.baseMip = texture->isTextureView() ? view.baseLevel : 0;
+    attachment.mipCount = 1;
+    attachment.baseLayer = texture->isTextureView() ? view.baseLayer : 0;
+    attachment.layerCount = texture->isTextureView()
+                                ? std::max(view.layerCount, 1U)
+                                : std::max(info.layerCount, 1U);
+    attachment.basePlane = texture->isTextureView() ? view.basePlane : 0;
+    attachment.planeCount = texture->isTextureView()
+                                ? std::max(view.planeCount, 1U)
+                                : backing->planeCount;
+    attachment.resourceId = reinterpret_cast<uintptr_t>(texture);
+    attachment.backingGeneration = backing->generation;
+    attachment.isSwapchain = texture->isSwapchainColorTexture();
 
-    desc.Format = toD3D12DSVFormat(format);
-    desc.Flags = D3D12_DSV_FLAG_NONE;
-    if (isMS) {
-        if (isArrayView) {
-            desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DMSARRAY;
-            desc.Texture2DMSArray.FirstArraySlice = baseLayer;
-            desc.Texture2DMSArray.ArraySize = layerCount;
-        } else {
-            desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DMS;
+    if (texture->isTextureView() && view.levelCount != 1) {
+        return false;
+    }
+    if (attachment.baseMip >= backing->mipLevels ||
+        attachment.basePlane >= backing->planeCount ||
+        attachment.planeCount > backing->planeCount - attachment.basePlane) {
+        return false;
+    }
+
+    attachment.width = std::max(info.width >> attachment.baseMip, 1U);
+    attachment.height = attachment.type == TextureType::TEX1D ||
+                                attachment.type == TextureType::TEX1D_ARRAY
+                            ? 1U
+                            : std::max(info.height >> attachment.baseMip, 1U);
+
+    if (attachment.type == TextureType::TEX3D) {
+        const uint32_t mipDepth = std::max(info.depth >> attachment.baseMip, 1U);
+        if (!texture->isTextureView()) {
+            attachment.baseLayer = 0;
+            attachment.layerCount = mipDepth;
         }
-    } else if (isArrayView) {
-        desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
-        desc.Texture2DArray.MipSlice = baseLevel;
-        desc.Texture2DArray.FirstArraySlice = baseLayer;
-        desc.Texture2DArray.ArraySize = layerCount;
-    } else {
-        desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
-        desc.Texture2D.MipSlice = baseLevel;
+        if (attachment.baseLayer >= mipDepth ||
+            attachment.layerCount > mipDepth - attachment.baseLayer) {
+            return false;
+        }
+    } else if (attachment.baseLayer >= backing->arraySize ||
+               attachment.layerCount > backing->arraySize - attachment.baseLayer) {
+        return false;
     }
 
-    return desc;
+    return true;
+}
+
+bool makeRenderTargetViewDesc(
+    const D3D12FramebufferAttachment &attachment,
+    const D3D12_RESOURCE_DESC &resourceDesc,
+    D3D12_RENDER_TARGET_VIEW_DESC &desc) {
+    desc = {};
+    desc.Format = toD3D12Format(attachment.format);
+    if (desc.Format == DXGI_FORMAT_UNKNOWN) {
+        return false;
+    }
+
+    switch (resourceDesc.Dimension) {
+        case D3D12_RESOURCE_DIMENSION_TEXTURE1D:
+            if (resourceDesc.DepthOrArraySize > 1 || attachment.baseLayer > 0 ||
+                attachment.layerCount > 1) {
+                desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE1DARRAY;
+                desc.Texture1DArray.MipSlice = attachment.baseMip;
+                desc.Texture1DArray.FirstArraySlice = attachment.baseLayer;
+                desc.Texture1DArray.ArraySize = attachment.layerCount;
+            } else {
+                desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE1D;
+                desc.Texture1D.MipSlice = attachment.baseMip;
+            }
+            break;
+        case D3D12_RESOURCE_DIMENSION_TEXTURE2D:
+            if (resourceDesc.SampleDesc.Count > 1) {
+                if (attachment.baseMip != 0 || attachment.basePlane != 0) {
+                    return false;
+                }
+                if (resourceDesc.DepthOrArraySize > 1 || attachment.baseLayer > 0 ||
+                    attachment.layerCount > 1) {
+                    desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DMSARRAY;
+                    desc.Texture2DMSArray.FirstArraySlice = attachment.baseLayer;
+                    desc.Texture2DMSArray.ArraySize = attachment.layerCount;
+                } else {
+                    desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DMS;
+                }
+            } else if (resourceDesc.DepthOrArraySize > 1 || attachment.baseLayer > 0 ||
+                       attachment.layerCount > 1) {
+                desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
+                desc.Texture2DArray.MipSlice = attachment.baseMip;
+                desc.Texture2DArray.FirstArraySlice = attachment.baseLayer;
+                desc.Texture2DArray.ArraySize = attachment.layerCount;
+                desc.Texture2DArray.PlaneSlice = attachment.basePlane;
+            } else {
+                desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+                desc.Texture2D.MipSlice = attachment.baseMip;
+                desc.Texture2D.PlaneSlice = attachment.basePlane;
+            }
+            break;
+        case D3D12_RESOURCE_DIMENSION_TEXTURE3D:
+            if (resourceDesc.SampleDesc.Count > 1) {
+                return false;
+            }
+            desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE3D;
+            desc.Texture3D.MipSlice = attachment.baseMip;
+            desc.Texture3D.FirstWSlice = attachment.baseLayer;
+            desc.Texture3D.WSize = attachment.layerCount;
+            break;
+        default:
+            return false;
+    }
+    return true;
+}
+
+bool makeDepthStencilViewDesc(
+    const D3D12FramebufferAttachment &attachment,
+    const D3D12_RESOURCE_DESC &resourceDesc,
+    D3D12_DEPTH_STENCIL_VIEW_DESC &desc) {
+    desc = {};
+    desc.Format = toD3D12DSVFormat(attachment.format);
+    if (desc.Format == DXGI_FORMAT_UNKNOWN) {
+        return false;
+    }
+    desc.Flags = D3D12_DSV_FLAG_NONE;
+
+    switch (resourceDesc.Dimension) {
+        case D3D12_RESOURCE_DIMENSION_TEXTURE1D:
+            if (resourceDesc.DepthOrArraySize > 1 || attachment.baseLayer > 0 ||
+                attachment.layerCount > 1) {
+                desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE1DARRAY;
+                desc.Texture1DArray.MipSlice = attachment.baseMip;
+                desc.Texture1DArray.FirstArraySlice = attachment.baseLayer;
+                desc.Texture1DArray.ArraySize = attachment.layerCount;
+            } else {
+                desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE1D;
+                desc.Texture1D.MipSlice = attachment.baseMip;
+            }
+            break;
+        case D3D12_RESOURCE_DIMENSION_TEXTURE2D:
+            if (resourceDesc.SampleDesc.Count > 1) {
+                if (attachment.baseMip != 0) {
+                    return false;
+                }
+                if (resourceDesc.DepthOrArraySize > 1 || attachment.baseLayer > 0 ||
+                    attachment.layerCount > 1) {
+                    desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DMSARRAY;
+                    desc.Texture2DMSArray.FirstArraySlice = attachment.baseLayer;
+                    desc.Texture2DMSArray.ArraySize = attachment.layerCount;
+                } else {
+                    desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DMS;
+                }
+            } else if (resourceDesc.DepthOrArraySize > 1 || attachment.baseLayer > 0 ||
+                       attachment.layerCount > 1) {
+                desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
+                desc.Texture2DArray.MipSlice = attachment.baseMip;
+                desc.Texture2DArray.FirstArraySlice = attachment.baseLayer;
+                desc.Texture2DArray.ArraySize = attachment.layerCount;
+            } else {
+                desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+                desc.Texture2D.MipSlice = attachment.baseMip;
+            }
+            break;
+        default:
+            return false;
+    }
+
+    return true;
 }
 
 } // namespace
@@ -103,20 +251,15 @@ struct CCD3D12Framebuffer::Impl {
     // Store CPU descriptor handles
     ccstd::vector<D3D12_CPU_DESCRIPTOR_HANDLE> rtvHandles;
     D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle{};
-    ccstd::vector<CCD3D12Texture *> colorTextures;
-    ccstd::vector<bool> colorHasTextureState;
-    ccstd::vector<bool> colorRepairsFromOwnedResource;
-    ccstd::vector<uint32_t> colorRepairWidths;
-    ccstd::vector<uint32_t> colorRepairHeights;
-    ccstd::vector<Format> colorRepairFormats;
-    ccstd::vector<SampleCount> colorRepairSamples;
-    CCD3D12Texture *depthStencilTexture{nullptr};
-    ccstd::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> colorResources;
-    Microsoft::WRL::ComPtr<ID3D12Resource> depthStencilResource;
+    ccstd::vector<D3D12FramebufferAttachment> colorAttachments;
+    D3D12FramebufferAttachment depthStencilAttachment;
+    bool hasDepthStencil{false};
 
     uint32_t width{0};
     uint32_t height{0};
     uint32_t rtvDescriptorSize{0};
+    uint64_t deviceEpoch{0};
+    bool valid{false};
 };
 
 CCD3D12Framebuffer::CCD3D12Framebuffer() {
@@ -128,7 +271,6 @@ CCD3D12Framebuffer::~CCD3D12Framebuffer() {
 }
 
 void CCD3D12Framebuffer::doInit(const FramebufferInfo &info) {
-    (void)info;
     if (!_impl) return;
     _swapchain = nullptr;
     _isOffscreen = true;
@@ -136,19 +278,14 @@ void CCD3D12Framebuffer::doInit(const FramebufferInfo &info) {
     _impl->dsvHeap.Reset();
     _impl->rtvHandles.clear();
     _impl->dsvHandle = D3D12_CPU_DESCRIPTOR_HANDLE{};
-    _impl->colorTextures.clear();
-    _impl->colorHasTextureState.clear();
-    _impl->colorRepairsFromOwnedResource.clear();
-    _impl->colorRepairWidths.clear();
-    _impl->colorRepairHeights.clear();
-    _impl->colorRepairFormats.clear();
-    _impl->colorRepairSamples.clear();
-    _impl->colorResources.clear();
-    _impl->depthStencilTexture = nullptr;
-    _impl->depthStencilResource.Reset();
+    _impl->colorAttachments.clear();
+    _impl->depthStencilAttachment = {};
+    _impl->hasDepthStencil = false;
     _impl->width = 0;
     _impl->height = 0;
     _impl->rtvDescriptorSize = 0;
+    _impl->deviceEpoch = 0;
+    _impl->valid = false;
 
     auto *device = CCD3D12Device::getInstance();
     auto *d3dDevice = static_cast<ID3D12Device *>(device ? device->getD3D12DeviceHandle() : nullptr);
@@ -156,26 +293,146 @@ void CCD3D12Framebuffer::doInit(const FramebufferInfo &info) {
         CC_LOG_ERROR("D3D12Framebuffer: device unavailable.");
         return;
     }
+    _impl->deviceEpoch = device->getDeviceEpoch();
 
     const uint32_t colorCount = static_cast<uint32_t>(_colorTextures.size());
-    _impl->colorTextures.resize(colorCount);
-    _impl->colorHasTextureState.assign(colorCount, false);
-    _impl->colorRepairsFromOwnedResource.assign(colorCount, false);
-    _impl->colorRepairWidths.assign(colorCount, 0);
-    _impl->colorRepairHeights.assign(colorCount, 0);
-    _impl->colorRepairFormats.assign(colorCount, Format::UNKNOWN);
-    _impl->colorRepairSamples.assign(colorCount, SampleCount::X1);
-    _impl->colorResources.resize(colorCount);
-    for (uint32_t i = 0; i < colorCount; ++i) {
-        _impl->colorTextures[i] = static_cast<CCD3D12Texture *>(_colorTextures[i]);
+    if (colorCount > D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT) {
+        CC_LOG_ERROR("D3D12Framebuffer: %u color attachments exceed the D3D12 limit of %u.",
+                     colorCount, D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT);
+        return;
     }
-    _impl->depthStencilTexture = static_cast<CCD3D12Texture *>(_depthStencilTexture);
+    const auto *renderPassColors =
+        info.renderPass ? &info.renderPass->getColorAttachments() : nullptr;
+    if (renderPassColors && colorCount != renderPassColors->size()) {
+        CC_LOG_ERROR(
+            "D3D12Framebuffer: color attachment count %u does not match render pass count %zu.",
+            colorCount, renderPassColors->size());
+        return;
+    }
 
-    // Determine dimensions from first color texture or depth texture
-    Texture *sizeRef = colorCount > 0 ? _impl->colorTextures[0] : _impl->depthStencilTexture;
-    if (sizeRef) {
-        _impl->width = sizeRef->getWidth();
-        _impl->height = sizeRef->getHeight();
+    if (colorCount == 0 && !_depthStencilTexture) {
+        CC_LOG_ERROR("D3D12Framebuffer: no attachments were provided (deviceEpoch=%llu).",
+                     static_cast<unsigned long long>(_impl->deviceEpoch));
+        return;
+    }
+
+    _impl->colorAttachments.resize(colorCount);
+    bool hasSizeReference = false;
+    for (uint32_t i = 0; i < colorCount; ++i) {
+        auto *texture = static_cast<CCD3D12Texture *>(_colorTextures[i]);
+        auto &attachmentInfo = _impl->colorAttachments[i];
+        if (!texture || !buildAttachmentSnapshot(texture, _impl->deviceEpoch, attachmentInfo)) {
+            CC_LOG_ERROR("D3D12Framebuffer: color[%u] is null, deviceEpoch=%llu.",
+                         i, static_cast<unsigned long long>(_impl->deviceEpoch));
+            return;
+        }
+        if (!hasSizeReference) {
+            _impl->width = attachmentInfo.width;
+            _impl->height = attachmentInfo.height;
+            hasSizeReference = true;
+        }
+        if (attachmentInfo.width != _impl->width ||
+            attachmentInfo.height != _impl->height) {
+            CC_LOG_ERROR(
+                "D3D12Framebuffer: invalid color[%u] resourceId=0x%llx resource=%p "
+                "size=%ux%u expected=%ux%u format=%u samples=%u "
+                "resourceEpoch=%llu deviceEpoch=%llu.",
+                i, static_cast<unsigned long long>(attachmentInfo.resourceId),
+                attachmentInfo.backing->resource.Get(),
+                attachmentInfo.width, attachmentInfo.height, _impl->width, _impl->height,
+                static_cast<unsigned>(attachmentInfo.format),
+                static_cast<unsigned>(attachmentInfo.samples),
+                static_cast<unsigned long long>(attachmentInfo.backing->deviceEpoch),
+                static_cast<unsigned long long>(_impl->deviceEpoch));
+            return;
+        }
+        if (renderPassColors) {
+            const auto &attachment = (*renderPassColors)[i];
+            const SampleCount expectedSamples = getD3D12EffectiveSampleCount(attachment.sampleCount);
+            if ((attachment.format != Format::UNKNOWN && attachment.format != attachmentInfo.format) ||
+                expectedSamples != attachmentInfo.samples) {
+                CC_LOG_ERROR("D3D12Framebuffer: color[%u] resourceId=0x%llx does not match render pass: "
+                             "format=%u expected=%u samples=%u expected=%u, deviceEpoch=%llu.",
+                             i, static_cast<unsigned long long>(attachmentInfo.resourceId),
+                             static_cast<unsigned>(attachmentInfo.format),
+                             static_cast<unsigned>(attachment.format),
+                             static_cast<unsigned>(attachmentInfo.samples),
+                             static_cast<unsigned>(expectedSamples),
+                             static_cast<unsigned long long>(_impl->deviceEpoch));
+                return;
+            }
+        }
+        if (attachmentInfo.isSwapchain) {
+            auto *swapchain = static_cast<CCD3D12Swapchain *>(texture->getSwapchain());
+            if (!swapchain || (_swapchain && _swapchain != swapchain)) {
+                CC_LOG_ERROR("D3D12Framebuffer: color[%u] resourceId=0x%llx has an invalid or mismatched swapchain, "
+                             "deviceEpoch=%llu.",
+                             i, static_cast<unsigned long long>(attachmentInfo.resourceId),
+                             static_cast<unsigned long long>(_impl->deviceEpoch));
+                return;
+            }
+            _swapchain = swapchain;
+            _isOffscreen = false;
+            // Swapchain framebuffers resolve the current backing dynamically.
+            // Retaining this snapshot would keep an IDXGISwapChain back buffer
+            // alive and make ResizeBuffers fail with DXGI_ERROR_INVALID_CALL.
+            attachmentInfo.backing.reset();
+        }
+    }
+
+    if (_depthStencilTexture) {
+        auto *texture = static_cast<CCD3D12Texture *>(_depthStencilTexture);
+        auto &attachmentInfo = _impl->depthStencilAttachment;
+        if (!buildAttachmentSnapshot(texture, _impl->deviceEpoch, attachmentInfo)) {
+            CC_LOG_ERROR("D3D12Framebuffer: invalid depth resourceId=0x%llx deviceEpoch=%llu.",
+                         static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(texture)),
+                         static_cast<unsigned long long>(_impl->deviceEpoch));
+            return;
+        }
+        if (!hasSizeReference) {
+            _impl->width = attachmentInfo.width;
+            _impl->height = attachmentInfo.height;
+            hasSizeReference = true;
+        }
+        if (attachmentInfo.width != _impl->width ||
+            attachmentInfo.height != _impl->height) {
+            CC_LOG_ERROR("D3D12Framebuffer: invalid depth resourceId=0x%llx resource=%p "
+                         "size=%ux%u expected=%ux%u format=%u samples=%u "
+                         "resourceEpoch=%llu deviceEpoch=%llu.",
+                         static_cast<unsigned long long>(attachmentInfo.resourceId),
+                         attachmentInfo.backing->resource.Get(),
+                         attachmentInfo.width, attachmentInfo.height,
+                         _impl->width, _impl->height,
+                         static_cast<unsigned>(attachmentInfo.format),
+                         static_cast<unsigned>(attachmentInfo.samples),
+                         static_cast<unsigned long long>(attachmentInfo.backing->deviceEpoch),
+                         static_cast<unsigned long long>(_impl->deviceEpoch));
+            return;
+        }
+        if (info.renderPass) {
+            const auto &attachment = info.renderPass->getDepthStencilAttachment();
+            const SampleCount expectedSamples = getD3D12EffectiveSampleCount(attachment.sampleCount);
+            if ((attachment.format != Format::UNKNOWN && attachment.format != attachmentInfo.format) ||
+                expectedSamples != attachmentInfo.samples) {
+                CC_LOG_ERROR("D3D12Framebuffer: depth resourceId=0x%llx does not match render pass: "
+                             "format=%u expected=%u samples=%u expected=%u, deviceEpoch=%llu.",
+                             static_cast<unsigned long long>(attachmentInfo.resourceId),
+                             static_cast<unsigned>(attachmentInfo.format),
+                             static_cast<unsigned>(attachment.format),
+                             static_cast<unsigned>(attachmentInfo.samples),
+                             static_cast<unsigned>(expectedSamples),
+                             static_cast<unsigned long long>(_impl->deviceEpoch));
+                return;
+            }
+        }
+        _impl->hasDepthStencil = true;
+    }
+
+    if (!hasSizeReference || _impl->width == 0 || _impl->height == 0) {
+        CC_LOG_ERROR("D3D12Framebuffer: attachments have invalid size %ux%u, deviceEpoch=%llu.",
+                     _impl->width, _impl->height,
+                     static_cast<unsigned long long>(_impl->deviceEpoch));
+        return;
     }
 
     // Create RTV descriptor heap and render target views
@@ -201,73 +458,34 @@ void CCD3D12Framebuffer::doInit(const FramebufferInfo &info) {
             auto handleSlot = rtvHandle;
             rtvHandle.ptr += _impl->rtvDescriptorSize;
 
-            auto *texture = _impl->colorTextures[i];
-            if (!texture) continue;
-
-            if (texture->isSwapchainColorTexture() && _impl->depthStencilTexture) {
-                auto *depthTexture = _impl->depthStencilTexture;
-                const bool mixedOffscreenDepth = depthTexture &&
-                                                 !depthTexture->isSwapchainColorTexture() &&
-                                                 depthTexture->getD3D12OwnedResourceHandle() != nullptr &&
-                                                 (depthTexture->getWidth() != texture->getWidth() ||
-                                                  depthTexture->getHeight() != texture->getHeight());
-                if (mixedOffscreenDepth) {
-                    auto *replacementResource = static_cast<ID3D12Resource *>(CCD3D12Texture::findLatestOwnedColorResource(
-                        depthTexture->getWidth(), depthTexture->getHeight(), texture->getFormat(),
-                        depthTexture->getInfo().samples));
-                    if (replacementResource) {
-                        CC_LOG_WARNING("D3D12Framebuffer: mixed swapchain color/offscreen depth repaired with owned RT. "
-                                       "color[%u] swapchain %ux%u replaced with owned RT resource %p %ux%u.",
-                                       i, texture->getWidth(), texture->getHeight(), replacementResource,
-                                       depthTexture->getWidth(), depthTexture->getHeight());
-                        _impl->colorTextures[i] = nullptr;
-                        _impl->colorRepairsFromOwnedResource[i] = true;
-                        _impl->colorRepairWidths[i] = depthTexture->getWidth();
-                        _impl->colorRepairHeights[i] = depthTexture->getHeight();
-                        _impl->colorRepairFormats[i] = texture->getFormat();
-                        _impl->colorRepairSamples[i] = depthTexture->getInfo().samples;
-                        _impl->colorResources[i] = replacementResource;
-                        d3dDevice->CreateRenderTargetView(replacementResource, nullptr, handleSlot);
-                        _impl->rtvHandles[i] = handleSlot;
-                        if (i == 0) {
-                            _impl->width = depthTexture->getWidth();
-                            _impl->height = depthTexture->getHeight();
-                        }
-                        continue;
-                    } else {
-                        CC_LOG_WARNING("D3D12Framebuffer: mixed swapchain color/offscreen depth detected. "
-                                        "color[%u]=%ux%u depth=%ux%u format=%u, but no owned color RT resource was found.",
-                                       i, texture->getWidth(), texture->getHeight(),
-                                       depthTexture->getWidth(), depthTexture->getHeight(),
-                                       static_cast<unsigned>(texture->getFormat()));
-                    }
-                }
-            }
+            const auto &attachmentInfo = _impl->colorAttachments[i];
 
             // Detect swapchain color textures — their RTVs are managed by the swapchain
-            if (texture->isSwapchainColorTexture()) {
-                _swapchain = static_cast<CCD3D12Swapchain *>(texture->getSwapchain());
-                _isOffscreen = false;
+            if (attachmentInfo.isSwapchain) {
                 // Leave placeholder handle; getRTVHandle() returns swapchain's RTV dynamically
                 _impl->rtvHandles[i] = D3D12_CPU_DESCRIPTOR_HANDLE{};
                 continue;
             }
 
-            auto *resource = static_cast<ID3D12Resource *>(texture->getD3D12OwnedResourceHandle());
-            if (!resource) {
-                CC_LOG_WARNING("D3D12Framebuffer: color texture %u has no D3D12 resource.", i);
-                continue;
+            auto *resource = attachmentInfo.backing->resource.Get();
+            D3D12_RENDER_TARGET_VIEW_DESC rtvDesc{};
+            if (!makeRenderTargetViewDesc(attachmentInfo, resource->GetDesc(), rtvDesc)) {
+                CC_LOG_ERROR("D3D12Framebuffer: unsupported RTV attachment[%u] resourceId=0x%llx "
+                             "format=%u type=%u mip=%u layer=%u+%u.",
+                             i, static_cast<unsigned long long>(attachmentInfo.resourceId),
+                             static_cast<unsigned>(attachmentInfo.format),
+                             static_cast<unsigned>(attachmentInfo.type),
+                             attachmentInfo.baseMip, attachmentInfo.baseLayer,
+                             attachmentInfo.layerCount);
+                return;
             }
-
-            _impl->colorResources[i] = resource;
-            _impl->colorHasTextureState[i] = true;
-            d3dDevice->CreateRenderTargetView(resource, nullptr, handleSlot);
+            d3dDevice->CreateRenderTargetView(resource, &rtvDesc, handleSlot);
             _impl->rtvHandles[i] = handleSlot;
         }
     }
 
     // Create DSV descriptor heap and depth-stencil view
-    if (_impl->depthStencilTexture) {
+    if (_impl->hasDepthStencil) {
         D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDesc{};
         dsvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
         dsvHeapDesc.NumDescriptors = 1;
@@ -281,20 +499,24 @@ void CCD3D12Framebuffer::doInit(const FramebufferInfo &info) {
             return;
         }
 
-        auto *depthTexture = _impl->depthStencilTexture;
-        if (depthTexture) {
-            auto *resource = static_cast<ID3D12Resource *>(depthTexture->getD3D12ResourceHandle());
-            if (resource) {
-                _impl->depthStencilResource = resource;
-                _impl->dsvHandle = _impl->dsvHeap->GetCPUDescriptorHandleForHeapStart();
-                const auto dsvDesc = makeDepthStencilViewDesc(depthTexture);
-                d3dDevice->CreateDepthStencilView(resource, &dsvDesc, _impl->dsvHandle);
-            } else {
-                CC_LOG_WARNING("D3D12Framebuffer: depth texture has no D3D12 resource.");
-            }
+        const auto &attachmentInfo = _impl->depthStencilAttachment;
+        auto *resource = attachmentInfo.backing->resource.Get();
+        D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
+        if (!makeDepthStencilViewDesc(attachmentInfo, resource->GetDesc(), dsvDesc)) {
+            CC_LOG_ERROR("D3D12Framebuffer: unsupported DSV attachment resourceId=0x%llx "
+                         "format=%u type=%u mip=%u layer=%u+%u.",
+                         static_cast<unsigned long long>(attachmentInfo.resourceId),
+                         static_cast<unsigned>(attachmentInfo.format),
+                         static_cast<unsigned>(attachmentInfo.type),
+                         attachmentInfo.baseMip, attachmentInfo.baseLayer,
+                         attachmentInfo.layerCount);
+            return;
         }
+        _impl->dsvHandle = _impl->dsvHeap->GetCPUDescriptorHandleForHeapStart();
+        d3dDevice->CreateDepthStencilView(resource, &dsvDesc, _impl->dsvHandle);
     }
 
+    _impl->valid = true;
     CC_LOG_INFO("D3D12Framebuffer initialized: %u color attachments, size=%ux%u, swapchain=%s",
                 colorCount, _impl->width, _impl->height, _swapchain ? "yes" : "no");
 }
@@ -304,70 +526,31 @@ void CCD3D12Framebuffer::doDestroy() {
         _impl->rtvHeap.Reset();
         _impl->dsvHeap.Reset();
         _impl->rtvHandles.clear();
-        _impl->colorTextures.clear();
-        _impl->colorHasTextureState.clear();
-        _impl->colorRepairsFromOwnedResource.clear();
-        _impl->colorRepairWidths.clear();
-        _impl->colorRepairHeights.clear();
-        _impl->colorRepairFormats.clear();
-        _impl->colorRepairSamples.clear();
-        _impl->colorResources.clear();
-        _impl->depthStencilTexture = nullptr;
-        _impl->depthStencilResource.Reset();
+        _impl->colorAttachments.clear();
+        _impl->depthStencilAttachment = {};
+        _impl->hasDepthStencil = false;
         _impl->dsvHandle = D3D12_CPU_DESCRIPTOR_HANDLE{};
         _impl->width = 0;
         _impl->height = 0;
         _impl->rtvDescriptorSize = 0;
+        _impl->deviceEpoch = 0;
+        _impl->valid = false;
     }
-}
-
-void CCD3D12Framebuffer::refreshRepairedColorResource(uint32_t index) const {
-    if (!_impl || index >= _impl->colorRepairsFromOwnedResource.size() ||
-        !_impl->colorRepairsFromOwnedResource[index]) {
-        return;
-    }
-
-    auto *device = CCD3D12Device::getInstance();
-    auto *d3dDevice = static_cast<ID3D12Device *>(device ? device->getD3D12DeviceHandle() : nullptr);
-    if (!d3dDevice || index >= _impl->rtvHandles.size() || _impl->rtvHandles[index].ptr == 0) {
-        return;
-    }
-
-    auto *latestResource = static_cast<ID3D12Resource *>(CCD3D12Texture::findLatestOwnedColorResource(
-        _impl->colorRepairWidths[index],
-        _impl->colorRepairHeights[index],
-        _impl->colorRepairFormats[index],
-        _impl->colorRepairSamples[index]));
-    if (!latestResource) {
-        return;
-    }
-
-    auto *currentResource = _impl->colorResources[index].Get();
-    if (currentResource == latestResource) {
-        return;
-    }
-
-    _impl->colorResources[index] = latestResource;
-    d3dDevice->CreateRenderTargetView(latestResource, nullptr, _impl->rtvHandles[index]);
-    CC_LOG_WARNING("D3D12Framebuffer: refreshed repaired offscreen color[%u] to latest owned RT resource %p.",
-                   index, latestResource);
+    _swapchain = nullptr;
+    _isOffscreen = true;
 }
 
 CCD3D12Framebuffer::DescriptorPair CCD3D12Framebuffer::getRTVHandle(uint32_t index) const {
     if (!_impl) return {};
     if (index >= _impl->rtvHandles.size()) return {};
 
-    refreshRepairedColorResource(index);
-
-    if (index < _impl->colorTextures.size()) {
-        auto *texture = _impl->colorTextures[index];
-        if (texture && texture->isSwapchainColorTexture()) {
-            auto *sw = static_cast<CCD3D12Swapchain *>(texture->getSwapchain());
-            if (sw) {
-                uintptr_t rtvPtr = sw->getCurrentRTVHandle();
-                return {static_cast<uint64_t>(rtvPtr), 0};
-            }
+    if (index < _impl->colorAttachments.size() &&
+        _impl->colorAttachments[index].isSwapchain) {
+        if (_swapchain) {
+            uintptr_t rtvPtr = _swapchain->getCurrentRTVHandle();
+            return {static_cast<uint64_t>(rtvPtr), 0};
         }
+        return {};
     }
 
     const auto &handle = _impl->rtvHandles[index];
@@ -388,30 +571,80 @@ uint32_t CCD3D12Framebuffer::getHeight() const {
 }
 
 uint32_t CCD3D12Framebuffer::getColorTextureCount() const {
-    return _impl ? static_cast<uint32_t>(_impl->colorTextures.size()) : 0;
+    return _impl ? static_cast<uint32_t>(_impl->colorAttachments.size()) : 0;
 }
 
-CCD3D12Texture *CCD3D12Framebuffer::getColorTexture(uint32_t index) const {
-    if (!_impl || index >= _impl->colorTextures.size()) return nullptr;
-    return _impl->colorTextures[index];
+const D3D12FramebufferAttachment *CCD3D12Framebuffer::getColorAttachment(uint32_t index) const {
+    if (!_impl || index >= _impl->colorAttachments.size()) return nullptr;
+    return &_impl->colorAttachments[index];
 }
 
-CCD3D12Texture *CCD3D12Framebuffer::getDepthStencilTexture() const {
-    return _impl ? _impl->depthStencilTexture : nullptr;
+const D3D12FramebufferAttachment *CCD3D12Framebuffer::getDepthStencilAttachment() const {
+    return _impl && _impl->hasDepthStencil ? &_impl->depthStencilAttachment : nullptr;
 }
 
 void *CCD3D12Framebuffer::getColorResource(uint32_t index) const {
-    if (!_impl || index >= _impl->colorResources.size()) return nullptr;
-    refreshRepairedColorResource(index);
-    return _impl->colorResources[index].Get();
+    const auto backing = getColorBacking(index);
+    return backing ? backing->resource.Get() : nullptr;
 }
 
 void *CCD3D12Framebuffer::getDepthStencilResource() const {
-    return _impl ? _impl->depthStencilResource.Get() : nullptr;
+    const auto backing = getDepthStencilBacking();
+    return backing ? backing->resource.Get() : nullptr;
+}
+
+D3D12ResourceBackingPtr CCD3D12Framebuffer::getColorBacking(uint32_t index) const {
+    if (!_impl || index >= _impl->colorAttachments.size()) return {};
+    auto *device = CCD3D12Device::getInstance();
+    if (!device || _impl->deviceEpoch != device->getDeviceEpoch()) return {};
+    if (_impl->colorAttachments[index].isSwapchain) {
+        const auto backing = _swapchain
+                                 ? _swapchain->getCurrentBackBufferBacking()
+                                 : D3D12ResourceBackingPtr{};
+        return backing && backing->valid ? backing : D3D12ResourceBackingPtr{};
+    }
+    const auto &attachment = _impl->colorAttachments[index];
+    return attachment.backing && attachment.backing->valid &&
+                   attachment.backing->generation == attachment.backingGeneration
+               ? attachment.backing
+               : D3D12ResourceBackingPtr{};
+}
+
+D3D12ResourceBackingPtr CCD3D12Framebuffer::getDepthStencilBacking() const {
+    if (!_impl) return {};
+    auto *device = CCD3D12Device::getInstance();
+    if (!device || _impl->deviceEpoch != device->getDeviceEpoch()) return {};
+    if (!_impl->hasDepthStencil) {
+        return {};
+    }
+    const auto &attachment = _impl->depthStencilAttachment;
+    return attachment.backing && attachment.backing->valid &&
+                   attachment.backing->generation == attachment.backingGeneration
+               ? attachment.backing
+               : D3D12ResourceBackingPtr{};
 }
 
 bool CCD3D12Framebuffer::hasColorTextureState(uint32_t index) const {
-    return _impl && index < _impl->colorHasTextureState.size() && _impl->colorHasTextureState[index];
+    return static_cast<bool>(getColorBacking(index));
+}
+
+bool CCD3D12Framebuffer::isValid() const {
+    if (!_impl || !_impl->valid) return false;
+    auto *device = CCD3D12Device::getInstance();
+    if (!device || _impl->deviceEpoch != device->getDeviceEpoch()) return false;
+    for (uint32_t i = 0; i < _impl->colorAttachments.size(); ++i) {
+        const auto backing = getColorBacking(i);
+        if (!backing || !backing->resource || backing->deviceEpoch != _impl->deviceEpoch) {
+            return false;
+        }
+    }
+    if (_impl->hasDepthStencil) {
+        const auto backing = getDepthStencilBacking();
+        if (!backing || !backing->resource || backing->deviceEpoch != _impl->deviceEpoch) {
+            return false;
+        }
+    }
+    return true;
 }
 
 CCD3D12Swapchain *CCD3D12Framebuffer::getSwapchain() const {

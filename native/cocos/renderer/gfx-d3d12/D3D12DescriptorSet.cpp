@@ -267,6 +267,12 @@ SamplerInfo makeDefaultSamplerInfo() {
     return info;
 }
 
+void prepareCurrentFrameUniformBuffer(CCD3D12Buffer *buffer) {
+    if (buffer) {
+        buffer->ensureTransientUniformUpload();
+    }
+}
+
 } // namespace
 
 // CPU-side descriptor storage for a single binding slot.
@@ -302,6 +308,8 @@ struct CCD3D12DescriptorSet::Impl {
         uint32_t binding{0};
         uint32_t descriptorIndex{0};
         uint32_t cbvSrvUavOffset{0};
+        CCD3D12Buffer *buffer{nullptr};
+        uint64_t version{0};
     };
 
     ccstd::vector<DescriptorData> descriptors;
@@ -328,6 +336,7 @@ struct CCD3D12DescriptorSet::Impl {
     ccstd::vector<uint32_t> zeroDynamicOffsets;
     ccstd::vector<uint32_t> samplerTableKey;
     uint64_t observedTransientUniformUploadGeneration{0};
+    uint64_t observedTextureResourceGeneration{0};
     uint64_t identity{DESCRIPTOR_SET_ID.fetch_add(1, std::memory_order_relaxed)};
     mutable uint64_t lastComparedStaticResourceOtherIdentity{0};
     mutable uint64_t lastComparedStaticResourceSelfVersion{0};
@@ -431,7 +440,7 @@ void CCD3D12DescriptorSet::doInit(const DescriptorSetInfo &info) {
     const uint32_t totalDescriptors = _layout->getDescriptorCount();
     _impl->descriptors.resize(totalDescriptors);
     _impl->cbvSrvUavDescriptorCount = layout->getTextureCount() + layout->getBufferCount() +
-                                       layout->getStorageImageCount() + layout->getInputAttachmentCount();
+                                       layout->getStorageImageCount();
     _impl->samplerDescriptorCount = layout->getSamplerCount();
     _impl->needsCbvSrvUav = (_impl->cbvSrvUavDescriptorCount > 0);
     _impl->needsSampler = (_impl->samplerDescriptorCount > 0);
@@ -522,12 +531,16 @@ void CCD3D12DescriptorSet::update() {
     const uint64_t transientGeneration = device
                                              ? device->getTransientUniformUploadGeneration()
                                              : 0;
+    const uint64_t textureGeneration =
+        CCD3D12Texture::getD3D12GlobalResourceGeneration();
     if (!_isDirty &&
-        _impl->observedTransientUniformUploadGeneration == transientGeneration) {
+        _impl->observedTransientUniformUploadGeneration == transientGeneration &&
+        _impl->observedTextureResourceGeneration == textureGeneration) {
         return;
     }
 
-    if (_isDirty) {
+    if (_isDirty ||
+        _impl->observedTextureResourceGeneration != textureGeneration) {
         forceUpdate();
         return;
     }
@@ -545,6 +558,7 @@ void CCD3D12DescriptorSet::update() {
     // each command-buffer epoch. Rewrite only the changed CBV staging slots;
     // textures, samplers, storage descriptors, and unchanged CBVs remain intact.
     bool descriptorChanged = false;
+    bool dynamicDescriptorChanged = false;
     bool staticDescriptorChanged = false;
     const auto isLocalRootCbvOffset = [this](uint32_t offset) {
         const auto &metadata = _impl->staticDescriptorMetadata;
@@ -555,6 +569,7 @@ void CCD3D12DescriptorSet::update() {
     };
     for (auto &slot : _impl->uniformBufferDescriptorSlots) {
         auto *buffer = static_cast<CCD3D12Buffer *>(_buffers[slot.descriptorIndex].ptr);
+        prepareCurrentFrameUniformBuffer(buffer);
         if (buffer != slot.buffer) {
             _isDirty = true;
             break;
@@ -590,13 +605,32 @@ void CCD3D12DescriptorSet::update() {
                                    !isLocalRootCbvOffset(slot.cbvSrvUavOffset));
     }
 
+    // Dynamic CBVs are rewritten immediately before copying into the
+    // shader-visible heap, but their source address is still part of the set
+    // cache identity. A command-buffer update may move the immutable upload
+    // slice without changing either the bound Buffer pointer or dynamic offset.
+    for (auto &slot : _impl->dynamicDescriptorSlots) {
+        if (slot.type != DescriptorType::DYNAMIC_UNIFORM_BUFFER) {
+            continue;
+        }
+        auto *buffer = static_cast<CCD3D12Buffer *>(_buffers[slot.descriptorIndex].ptr);
+        const uint64_t version = buffer ? buffer->getUniformDescriptorVersion() : 0;
+        if (buffer == slot.buffer && version == slot.version) {
+            continue;
+        }
+        slot.buffer = buffer;
+        slot.version = version;
+        dynamicDescriptorChanged = true;
+    }
+
     if (_isDirty) {
         forceUpdate();
         return;
     }
     _impl->observedTransientUniformUploadGeneration =
         device->getTransientUniformUploadGeneration();
-    if (descriptorChanged) {
+    _impl->observedTextureResourceGeneration = textureGeneration;
+    if (descriptorChanged || dynamicDescriptorChanged) {
         if (staticDescriptorChanged) {
             refreshStaticDescriptorMetadata();
             ++_impl->staticDescriptorVersion;
@@ -610,7 +644,9 @@ void CCD3D12DescriptorSet::updateForLocalRootCbv(bool skipStaticCbvStaging) {
         return;
     }
 
-    if (_isDirty) {
+    if (_isDirty ||
+        _impl->observedTextureResourceGeneration !=
+            CCD3D12Texture::getD3D12GlobalResourceGeneration()) {
         forceUpdate();
         return;
     }
@@ -635,12 +671,18 @@ void CCD3D12DescriptorSet::updateForLocalRootCbv(bool skipStaticCbvStaging) {
         // its current shader-visible allocation.  Keep the CPU staging copy
         // untouched: it remains the conservative source for non-local and
         // fallback paths, while avoiding a duplicate CreateCBV per draw.
-        for (const auto &slot : _impl->uniformBufferDescriptorSlots) {
+        for (auto &slot : _impl->uniformBufferDescriptorSlots) {
+            auto *buffer = static_cast<CCD3D12Buffer *>(_buffers[slot.descriptorIndex].ptr);
+            prepareCurrentFrameUniformBuffer(buffer);
+            const uint64_t version = buffer ? buffer->getUniformDescriptorVersion() : 0;
             if (isLocalRootCbvOffset(slot.cbvSrvUavOffset)) {
+                if (buffer != slot.buffer) {
+                    _isDirty = true;
+                    break;
+                }
+                slot.version = version;
                 continue;
             }
-            auto *buffer = static_cast<CCD3D12Buffer *>(_buffers[slot.descriptorIndex].ptr);
-            const uint64_t version = buffer ? buffer->getUniformDescriptorVersion() : 0;
             if (buffer != slot.buffer || version != slot.version) {
                 _isDirty = true;
                 break;
@@ -670,10 +712,16 @@ void CCD3D12DescriptorSet::updateForLocalRootCbv(bool skipStaticCbvStaging) {
     // all following ordinary CBVs exact: they remain part of the static table.
     bool staticDescriptorChanged = false;
     for (auto &slot : _impl->uniformBufferDescriptorSlots) {
+        auto *buffer = static_cast<CCD3D12Buffer *>(_buffers[slot.descriptorIndex].ptr);
+        prepareCurrentFrameUniformBuffer(buffer);
         if (isLocalRootCbvOffset(slot.cbvSrvUavOffset)) {
+            if (buffer != slot.buffer) {
+                _isDirty = true;
+                break;
+            }
+            slot.version = buffer ? buffer->getUniformDescriptorVersion() : 0;
             continue;
         }
-        auto *buffer = static_cast<CCD3D12Buffer *>(_buffers[slot.descriptorIndex].ptr);
         if (buffer != slot.buffer) {
             _isDirty = true;
             break;
@@ -1063,14 +1111,25 @@ void CCD3D12DescriptorSet::forceUpdate() {
         }
     }
 
+    CC_ASSERT(cbvSrvUavOffset == _impl->cbvSrvUavDescriptorCount);
     for (auto &slot : _impl->uniformBufferDescriptorSlots) {
         slot.buffer = static_cast<CCD3D12Buffer *>(_buffers[slot.descriptorIndex].ptr);
         slot.version = slot.buffer ? slot.buffer->getUniformDescriptorVersion() : 0;
+    }
+    for (auto &slot : _impl->dynamicDescriptorSlots) {
+        if (slot.type != DescriptorType::DYNAMIC_UNIFORM_BUFFER) {
+            continue;
+        }
+        auto *buffer = static_cast<CCD3D12Buffer *>(_buffers[slot.descriptorIndex].ptr);
+        slot.buffer = buffer;
+        slot.version = buffer ? buffer->getUniformDescriptorVersion() : 0;
     }
 
     refreshStaticDescriptorMetadata();
     _impl->observedTransientUniformUploadGeneration =
         device->getTransientUniformUploadGeneration();
+    _impl->observedTextureResourceGeneration =
+        CCD3D12Texture::getD3D12GlobalResourceGeneration();
     _isDirty = false;
     ++_impl->staticDescriptorVersion;
     ++_impl->version;
@@ -1207,7 +1266,9 @@ bool CCD3D12DescriptorSet::getDynamicDescriptorSource(uint32_t index, uint64_t &
     if (!buffer) {
         return false;
     }
-    gpuAddress = buffer->getD3D12GPUVirtualAddress();
+    gpuAddress = slot.type == DescriptorType::DYNAMIC_UNIFORM_BUFFER
+                     ? buffer->getD3D12UniformGPUVirtualAddress()
+                     : buffer->getD3D12GPUVirtualAddress();
     size = buffer->getSize();
     // Dynamic storage views need not expose a GPU virtual address. Their
     // buffer-object identity still distinguishes whether a reusable dynamic
@@ -1220,6 +1281,44 @@ bool CCD3D12DescriptorSet::getDynamicDescriptorSource(uint32_t index, uint64_t &
 
 bool CCD3D12DescriptorSet::hasOnlyNullDynamicDescriptorSources() const {
     return _impl && _impl->staticDescriptorMetadata.onlyNullDynamicDescriptorSources;
+}
+
+bool CCD3D12DescriptorSet::getLocalRootCbvData(D3D12LocalRootCbvBatchData &data) const {
+    data = {};
+    if (!_impl || _isDirty) {
+        return false;
+    }
+
+    const auto &metadata = _impl->staticDescriptorMetadata;
+    if (!metadata.cbvSrvUavPartitionValid ||
+        metadata.rootCbvCount == 0 ||
+        metadata.rootCbvCount > D3D12_MAX_LOCAL_ROOT_CBVS) {
+        return false;
+    }
+
+    data.rootCbvCount = metadata.rootCbvCount;
+    auto *device = CCD3D12Device::getInstance();
+    auto *dummyBuffer = device ? device->getDummyBuffer() : nullptr;
+    for (uint32_t i = 0; i < metadata.rootCbvCount; ++i) {
+        const uint32_t slotIndex = metadata.rootUniformSlotIndices[i];
+        if (slotIndex == INVALID_BINDING || slotIndex >= _impl->uniformBufferDescriptorSlots.size()) {
+            return false;
+        }
+        const auto &slot = _impl->uniformBufferDescriptorSlots[slotIndex];
+        data.rootBuffers[i] = slot.buffer ? slot.buffer : dummyBuffer;
+        data.gpuAddresses[i] = data.rootBuffers[i]
+                                   ? data.rootBuffers[i]->getD3D12UniformGPUVirtualAddress()
+                                   : 0;
+        data.sizes[i] = data.rootBuffers[i]
+                            ? data.rootBuffers[i]->getD3D12ConstantBufferSize()
+                            : 0;
+        if (!data.rootBuffers[i] || data.gpuAddresses[i] == 0 || data.sizes[i] < 256U) {
+            return false;
+        }
+    }
+    data.staticSignature = metadata.staticSignature;
+    data.samplerSignature = metadata.samplerSignature;
+    return true;
 }
 
 bool CCD3D12DescriptorSet::getLocalRootCbvBatchData(D3D12LocalRootCbvBatchData &data) {
@@ -1537,6 +1636,28 @@ bool CCD3D12DescriptorSet::getDescriptorSemanticSignature(uint32_t index, uint32
     return true;
 }
 
+void CCD3D12DescriptorSet::collectBoundD3D12Resources(
+    ccstd::vector<void *> &resources) const {
+    for (const auto &boundBuffer : _buffers) {
+        if (!boundBuffer.ptr) {
+            continue;
+        }
+        auto *buffer = static_cast<CCD3D12Buffer *>(boundBuffer.ptr);
+        if (void *resource = buffer->getD3D12ResourceHandle()) {
+            resources.push_back(resource);
+        }
+    }
+    for (const auto &boundTexture : _textures) {
+        if (!boundTexture.ptr) {
+            continue;
+        }
+        auto *texture = static_cast<CCD3D12Texture *>(boundTexture.ptr);
+        if (void *resource = texture->getD3D12ResourceHandle()) {
+            resources.push_back(resource);
+        }
+    }
+}
+
 const ccstd::vector<uint32_t> &CCD3D12DescriptorSet::getSamplerTableKey() const {
     static const ccstd::vector<uint32_t> EMPTY_KEY;
     return _impl ? _impl->samplerTableKey : EMPTY_KEY;
@@ -1626,7 +1747,7 @@ void CCD3D12DescriptorSet::applyDynamicOffsets(uint32_t dynamicOffsetCount, cons
                             }
 
                             D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc{};
-                            cbvDesc.BufferLocation = d3d12Buffer->getD3D12GPUVirtualAddress() + dynamicOffset;
+                            cbvDesc.BufferLocation = d3d12Buffer->getD3D12UniformGPUVirtualAddress() + dynamicOffset;
                             cbvDesc.SizeInBytes = static_cast<UINT>(cbvSize);
 
                             D3D12_CPU_DESCRIPTOR_HANDLE handle;

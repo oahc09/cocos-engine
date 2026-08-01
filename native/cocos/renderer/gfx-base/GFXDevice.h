@@ -60,6 +60,10 @@ public:
 
     // aim to ensure waiting for work on gpu done when cpu encodes ahead of gpu certain frame(s).
     virtual void frameSync() = 0;
+    virtual bool waitIdle() {
+        frameSync();
+        return true;
+    }
 
     virtual void acquire(Swapchain *const *swapchains, uint32_t count) = 0;
     virtual void present() = 0;
