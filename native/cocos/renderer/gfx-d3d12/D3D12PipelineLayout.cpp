@@ -23,6 +23,7 @@
 ****************************************************************************/
 
 #include "D3D12PipelineLayout.h"
+#include "D3D12DebugOptimization.h"
 #include "D3D12DescriptorSetLayout.h"
 #include "D3D12Device.h"
 #include "base/Log.h"
@@ -348,10 +349,10 @@ void CCD3D12PipelineLayout::doInit(const PipelineLayoutInfo &info) {
     _impl->rootSignatureHash = hashRootSignatureBlob(signatureBlob->GetBufferPointer(),
                                                       signatureBlob->GetBufferSize());
 
-    CC_LOG_INFO("D3D12 PipelineLayout initialized: %u set layouts, %u root parameters",
+    CC_D3D12_DIAGNOSTIC_LOG("D3D12 PipelineLayout initialized: %u set layouts, %u root parameters",
                 static_cast<uint32_t>(_setLayouts.size()),
                 static_cast<uint32_t>(rootParameters.size()));
-    CC_LOG_INFO("[D3D12-PERF] PipelineLayoutInit setLayouts=%u rootParameters=%u descriptorRanges=%u serializeRootSigMs=%llu createRootSigMs=%llu totalMs=%llu",
+    CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] PipelineLayoutInit setLayouts=%u rootParameters=%u descriptorRanges=%u serializeRootSigMs=%llu createRootSigMs=%llu totalMs=%llu",
                 static_cast<uint32_t>(_setLayouts.size()),
                 static_cast<uint32_t>(rootParameters.size()),
                 static_cast<uint32_t>(allRanges.size()),

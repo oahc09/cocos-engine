@@ -23,6 +23,7 @@
 ****************************************************************************/
 
 #include "D3D12RenderPass.h"
+#include "D3D12DebugOptimization.h"
 #include "base/Log.h"
 #include "gfx-base/GFXDef.h"
 
@@ -164,7 +165,7 @@ void CCD3D12RenderPass::doInit(const RenderPassInfo &info) {
         _impl->sampleCount = static_cast<uint32_t>(_depthStencilAttachment.sampleCount);
     }
 
-    CC_LOG_INFO("D3D12RenderPass initialized: %u color attachments, DSV format=0x%x",
+    CC_D3D12_DIAGNOSTIC_LOG("D3D12RenderPass initialized: %u color attachments, DSV format=0x%x",
                 _impl->colorAttachmentCount, _impl->dsvFormat);
 }
 

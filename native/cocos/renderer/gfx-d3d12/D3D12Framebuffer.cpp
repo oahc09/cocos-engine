@@ -23,6 +23,7 @@
 ****************************************************************************/
 
 #include "D3D12Framebuffer.h"
+#include "D3D12DebugOptimization.h"
 #include "D3D12Device.h"
 #include "D3D12Swapchain.h"
 #include "D3D12Texture.h"
@@ -517,7 +518,7 @@ void CCD3D12Framebuffer::doInit(const FramebufferInfo &info) {
     }
 
     _impl->valid = true;
-    CC_LOG_INFO("D3D12Framebuffer initialized: %u color attachments, size=%ux%u, swapchain=%s",
+    CC_D3D12_DIAGNOSTIC_LOG("D3D12Framebuffer initialized: %u color attachments, size=%ux%u, swapchain=%s",
                 colorCount, _impl->width, _impl->height, _swapchain ? "yes" : "no");
 }
 

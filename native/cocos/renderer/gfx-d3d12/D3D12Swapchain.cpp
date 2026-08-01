@@ -23,11 +23,15 @@
 ****************************************************************************/
 
 #include "D3D12Swapchain.h"
+#include "D3D12DebugOptimization.h"
 #include "D3D12Device.h"
 #include "D3D12Texture.h"
 #include "base/Log.h"
 #include "base/Macros.h"
-#include <chrono>
+
+#if CC_D3D12_DIAGNOSTICS_ENABLED
+    #include <chrono>
+#endif
 
     #ifndef NOMINMAX
         #define NOMINMAX
@@ -43,7 +47,9 @@ namespace gfx {
 namespace {
 constexpr UINT D3D12_PRESENT_SYNC_INTERVAL = 0;
 constexpr UINT D3D12_PRESENT_FLAGS = 0;
+#if CC_D3D12_DIAGNOSTICS_ENABLED
 constexpr uint64_t D3D12_PRESENT_DIAG_THRESHOLD_MS = 2;
+#endif
 } // namespace
 
 struct CCD3D12Swapchain::Impl {
@@ -84,7 +90,7 @@ void CCD3D12Swapchain::doInit(const SwapchainInfo &info) {
     textureInfo.format = Format::DEPTH_STENCIL;
     initTexture(textureInfo, _depthStencilTexture);
 
-    CC_LOG_INFO("D3D12 swapchain initialized: %ux%u.", info.width, info.height);
+    CC_D3D12_DIAGNOSTIC_LOG("D3D12 swapchain initialized: %ux%u.", info.width, info.height);
 
     _impl->ready = createOrResizeSwapchain(info.width, info.height);
     if (!_impl->ready) {
@@ -196,16 +202,20 @@ bool CCD3D12Swapchain::present() {
         return false;
     }
 
+#if CC_D3D12_DIAGNOSTICS_ENABLED
     const auto presentStart = std::chrono::steady_clock::now();
+#endif
     HRESULT hr = _impl->swapChain->Present(D3D12_PRESENT_SYNC_INTERVAL, D3D12_PRESENT_FLAGS);
+#if CC_D3D12_DIAGNOSTICS_ENABLED
     const auto presentEnd = std::chrono::steady_clock::now();
     const auto presentMs = std::chrono::duration_cast<std::chrono::milliseconds>(presentEnd - presentStart).count();
     if (presentMs >= D3D12_PRESENT_DIAG_THRESHOLD_MS) {
-        CC_LOG_INFO("[D3D12-PERF] SwapchainPresent syncInterval=%u flags=%u totalMs=%llu",
+        CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] SwapchainPresent syncInterval=%u flags=%u totalMs=%llu",
                     D3D12_PRESENT_SYNC_INTERVAL,
                     D3D12_PRESENT_FLAGS,
                     static_cast<unsigned long long>(presentMs));
     }
+#endif
     if (FAILED(hr)) {
         CC_LOG_ERROR("IDXGISwapChain::Present failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
         return false;
@@ -230,7 +240,7 @@ bool CCD3D12Swapchain::createOrResizeSwapchain(uint32_t width, uint32_t height) 
         return false;
     }
 
-    CC_LOG_INFO("D3D12 swapchain creating: %ux%u, hwnd=%p", width, height, hwnd);
+    CC_D3D12_DIAGNOSTIC_LOG("D3D12 swapchain creating: %ux%u, hwnd=%p", width, height, hwnd);
 
     DXGI_SWAP_CHAIN_DESC1 swapchainDesc{};
     swapchainDesc.Width = width;

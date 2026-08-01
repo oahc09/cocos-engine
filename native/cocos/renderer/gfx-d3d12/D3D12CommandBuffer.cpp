@@ -23,6 +23,7 @@
 ****************************************************************************/
 
 #include "D3D12CommandBuffer.h"
+#include "D3D12DebugOptimization.h"
 
 #include "D3D12Buffer.h"
 #include "D3D12DescriptorSet.h"
@@ -675,7 +676,7 @@ bool generateMipmaps(ID3D12Device *device,
         !backing || backing->resource.Get() != resource) {
 #ifndef NDEBUG
         if (hasFlag(textureInfo.flags, TextureFlagBit::GEN_MIPMAP) && textureInfo.levelCount > 1) {
-            CC_LOG_WARNING("[D3D12-MIP-DIAG] generation rejected resource=%p size=%ux%u levels=%u format=%u flags=0x%x",
+            CC_D3D12_DIAGNOSTIC_LOG("[D3D12-MIP-DIAG] generation rejected resource=%p size=%ux%u levels=%u format=%u flags=0x%x",
                            resource, textureInfo.width, textureInfo.height, textureInfo.levelCount,
                            static_cast<unsigned>(textureInfo.format),
                            resource ? static_cast<unsigned>(resource->GetDesc().Flags) : 0U);
@@ -1034,7 +1035,7 @@ void CCD3D12CommandBuffer::doInit(const CommandBufferInfo &info) {
     _impl->commandAllocator = _impl->recordingContexts[0]->commandAllocator;
     _impl->commandList = _impl->recordingContexts[0]->commandList;
 
-    CC_LOG_INFO("D3D12CommandBuffer initialized as %s.",
+    CC_D3D12_DIAGNOSTIC_LOG("D3D12CommandBuffer initialized as %s.",
                 info.type == CommandBufferType::SECONDARY ? "bundle" : "direct list");
 }
 
@@ -1407,7 +1408,7 @@ void CCD3D12CommandBuffer::end() {
             Microsoft::WRL::ComPtr<ID3D12InfoQueue> infoQueue;
             if (SUCCEEDED(_impl->d3dDevice->QueryInterface(IID_PPV_ARGS(&infoQueue)))) {
                 const UINT64 msgCount = infoQueue->GetNumStoredMessages();
-                CC_LOG_ERROR("[DIAG-CLOSE] InfoQueue pending messages: %llu",
+                CC_LOG_ERROR("D3D12CommandBuffer::end - InfoQueue pending messages: %llu",
                              static_cast<unsigned long long>(msgCount));
                 for (UINT64 i = 0; i < msgCount; ++i) {
                     SIZE_T msgSize = 0;
@@ -1420,7 +1421,7 @@ void CCD3D12CommandBuffer::end() {
                         continue;
                     }
                     if (SUCCEEDED(infoQueue->GetMessage(i, msgData, &msgSize))) {
-                        CC_LOG_ERROR("[DIAG-CLOSE] ID=%u Severity=%u: %.*s",
+                        CC_LOG_ERROR("D3D12CommandBuffer::end - InfoQueue ID=%u Severity=%u: %.*s",
                                      static_cast<unsigned>(msgData->ID),
                                      static_cast<unsigned>(msgData->Severity),
                                      static_cast<int>(msgData->DescriptionByteLength),

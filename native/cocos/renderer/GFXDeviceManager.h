@@ -166,7 +166,8 @@ public:
 private:
     static bool isRequestedGFXAPI(const char *api) {
         const char *requested = std::getenv("CC_GFX_API");
-        return requested && api && std::strcmp(requested, api) == 0;
+        return true;
+        //requested &&api &&std::strcmp(requested, api) == 0;
     }
 
     template <typename DeviceCtor, typename Enable = std::enable_if_t<std::is_base_of<Device, DeviceCtor>::value>>

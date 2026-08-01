@@ -23,6 +23,7 @@
 ****************************************************************************/
 
 #include "D3D12DescriptorSetLayout.h"
+#include "D3D12DebugOptimization.h"
 #include "base/Log.h"
 #include "gfx-base/GFXDef.h"
 
@@ -102,7 +103,7 @@ void CCD3D12DescriptorSetLayout::doInit(const DescriptorSetLayoutInfo &info) {
         _impl->bindingTypes[b.binding] = b.descriptorType;
     }
 
-    CC_LOG_INFO("D3D12 DescriptorSetLayout initialized: %u bindings, %u total descriptors "
+    CC_D3D12_DIAGNOSTIC_LOG("D3D12 DescriptorSetLayout initialized: %u bindings, %u total descriptors "
                 "(sampler=%u, texture=%u, buffer=%u, image=%u, input=%u)",
                 static_cast<uint32_t>(_bindings.size()), _descriptorCount,
                 _impl->samplerCount, _impl->textureCount,

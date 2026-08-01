@@ -645,7 +645,7 @@ bool CCD3D12Texture::createResource(uint32_t width, uint32_t height) {
     if (FAILED(hr)) {
         // Log device removed reason for diagnosis
         HRESULT removedReason = d3dDevice->GetDeviceRemovedReason();
-        CC_LOG_ERROR("[DIAG] CreateCommittedResource(texture) FAILED. "
+        CC_LOG_ERROR("D3D12 CreateCommittedResource(texture) failed. "
                      "HRESULT=0x%08x, DeviceRemovedReason=0x%08x, "
                      "format=%u (DXGI=%u), %ux%u, depth=%u, layers=%u, mips=%u, usage=0x%x, flags=0x%x, samples=%u",
                      static_cast<unsigned>(hr), static_cast<unsigned>(removedReason),

@@ -24,6 +24,16 @@
 
 #pragma once
 
+// Verbose backend tracing is compiled out by default, including argument
+// evaluation. Enable it explicitly for focused backend profiling sessions.
+#if defined(CC_D3D12_ENABLE_DIAGNOSTIC_LOGS) && CC_D3D12_ENABLE_DIAGNOSTIC_LOGS
+    #define CC_D3D12_DIAGNOSTICS_ENABLED 1
+    #define CC_D3D12_DIAGNOSTIC_LOG(...) CC_LOG_INFO(__VA_ARGS__)
+#else
+    #define CC_D3D12_DIAGNOSTICS_ENABLED 0
+    #define CC_D3D12_DIAGNOSTIC_LOG(...) ((void)0)
+#endif
+
 #if defined(_MSC_VER) && !defined(NDEBUG)
 // D3D12 command recording is CPU-bound in draw-heavy Debug builds. Preserve
 // debug symbols and assertions while avoiding /Od and /RTC overhead here.

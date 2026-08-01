@@ -23,6 +23,7 @@
 ****************************************************************************/
 
 #include "D3D12DescriptorSet.h"
+#include "D3D12DebugOptimization.h"
 #include "D3D12Buffer.h"
 #include "D3D12DescriptorHeapPool.h"
 #include "D3D12DescriptorSetLayout.h"
@@ -492,7 +493,7 @@ void CCD3D12DescriptorSet::doInit(const DescriptorSetInfo &info) {
 
     refreshStaticDescriptorMetadata();
 
-    CC_LOG_DEBUG("D3D12 DescriptorSet initialized: %zu descriptors (CBV/SRV/UAV=%u, Sampler=%u)",
+    CC_D3D12_DIAGNOSTIC_LOG("D3D12 DescriptorSet initialized: %zu descriptors (CBV/SRV/UAV=%u, Sampler=%u)",
                  _impl->descriptors.size(), _impl->cbvSrvUavDescriptorCount, _impl->samplerDescriptorCount);
 }
 

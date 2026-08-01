@@ -23,6 +23,7 @@
 ****************************************************************************/
 
 #include "D3D12Device.h"
+#include "D3D12DebugOptimization.h"
 #include "D3D12Buffer.h"
 #include "D3D12CommandBuffer.h"
 #include "D3D12DescriptorHeapPool.h"
@@ -261,7 +262,7 @@ bool CCD3D12Device::doInit(const DeviceInfo &info) {
     _impl->cpuSamplerDescriptorHeapPool->initialize(
         D3D12DescriptorHeapPool::HeapType::SAMPLER, 2048, false);
 
-    CC_LOG_INFO("D3D12 descriptor heap pools initialized.");
+    CC_D3D12_DIAGNOSTIC_LOG("D3D12 descriptor heap pools initialized.");
 
     QueueInfo queueInfo;
     queueInfo.type = QueueType::GRAPHICS;
@@ -316,7 +317,7 @@ bool CCD3D12Device::doInit(const DeviceInfo &info) {
         _impl->dummyBuffer = static_cast<CCD3D12Buffer *>(createBuffer(bufInfo));
 
         if (_impl->dummyTexture && _impl->dummyBuffer) {
-            CC_LOG_INFO("[D3D12] Dummy resources created for null descriptor bindings");
+            CC_D3D12_DIAGNOSTIC_LOG("[D3D12] Dummy resources created for null descriptor bindings");
         } else {
             CC_LOG_WARNING("[D3D12] Failed to create dummy resources; null descriptors will be skipped");
         }
@@ -435,7 +436,7 @@ void CCD3D12Device::initializeShaderCacheSession() {
     Microsoft::WRL::ComPtr<ID3D12Device9> device9;
     HRESULT hr = _impl->d3dDevice.As(&device9);
     if (FAILED(hr) || !device9) {
-        CC_LOG_INFO("D3D12 Shader Cache Session unavailable: ID3D12Device9 not supported. HRESULT=0x%08x",
+        CC_D3D12_DIAGNOSTIC_LOG("D3D12 Shader Cache Session unavailable: ID3D12Device9 not supported. HRESULT=0x%08x",
                     static_cast<unsigned>(hr));
         return;
     }
@@ -451,13 +452,13 @@ void CCD3D12Device::initializeShaderCacheSession() {
 
     hr = device9->CreateShaderCacheSession(&desc, IID_PPV_ARGS(&_impl->shaderCacheSession));
     if (SUCCEEDED(hr) && _impl->shaderCacheSession) {
-        CC_LOG_INFO("D3D12 Shader Cache Session initialized for DXBC cache.");
+        CC_D3D12_DIAGNOSTIC_LOG("D3D12 Shader Cache Session initialized for DXBC cache.");
     } else {
         CC_LOG_WARNING("D3D12 Shader Cache Session initialization failed. HRESULT=0x%08x",
                        static_cast<unsigned>(hr));
     }
 #else
-    CC_LOG_INFO("D3D12 Shader Cache Session unavailable: SDK headers do not expose ID3D12Device9.");
+    CC_D3D12_DIAGNOSTIC_LOG("D3D12 Shader Cache Session unavailable: SDK headers do not expose ID3D12Device9.");
 #endif
 }
 
@@ -1138,7 +1139,7 @@ void CCD3D12Device::flushDeferredCubeUploads() {
         }
 
 #ifndef NDEBUG
-        CC_LOG_INFO("[D3D12-MIP-DIAG] flush deferred cube upload resource=%p regions=%u complete=%s",
+        CC_D3D12_DIAGNOSTIC_LOG("[D3D12-MIP-DIAG] flush deferred cube upload resource=%p regions=%u complete=%s",
                     pending.resource,
                     static_cast<uint32_t>(regions.size()),
                     pending.receivedCount == pending.layerData.size() ? "true" : "false");
@@ -1191,7 +1192,7 @@ void CCD3D12Device::discardDeferredCubeUploadsForTexture(Texture *texture) {
         _impl->deferredCubeUploads.end());
 #ifndef NDEBUG
     if (_impl->deferredCubeUploads.size() != beforeCount) {
-        CC_LOG_INFO("[D3D12-MIP-DIAG] discard deferred cube upload texture=%p removed=%zu",
+        CC_D3D12_DIAGNOSTIC_LOG("[D3D12-MIP-DIAG] discard deferred cube upload texture=%p removed=%zu",
                     texture,
                     beforeCount - _impl->deferredCubeUploads.size());
     }
@@ -1269,7 +1270,7 @@ bool CCD3D12Device::tryDeferCubeFaceUpload(const uint8_t *const *buffers, Textur
     }
 
 #ifndef NDEBUG
-    CC_LOG_INFO("[D3D12-MIP-DIAG] defer complete cube upload resource=%p size=%ux%u layers=%u regions=%u",
+    CC_D3D12_DIAGNOSTIC_LOG("[D3D12-MIP-DIAG] defer complete cube upload resource=%p size=%ux%u layers=%u regions=%u",
                 textureResource,
                 textureInfo.width,
                 textureInfo.height,
@@ -1315,7 +1316,7 @@ void CCD3D12Device::copyBuffersToTextureImmediate(const uint8_t *const *buffers,
     constexpr bool diagnoseMipUpload = false;
 #endif
     if (diagnoseMipUpload) {
-        CC_LOG_INFO("[D3D12-MIP-DIAG] device upload resource=%p size=%ux%u levels=%u layers=%u format=%u regions=%u",
+        CC_D3D12_DIAGNOSTIC_LOG("[D3D12-MIP-DIAG] device upload resource=%p size=%ux%u levels=%u layers=%u format=%u regions=%u",
                     textureResource, textureInfo.width, textureInfo.height, textureInfo.levelCount,
                     textureInfo.layerCount, static_cast<unsigned>(textureInfo.format), count);
     }
@@ -1372,7 +1373,7 @@ void CCD3D12Device::copyBuffersToTextureImmediate(const uint8_t *const *buffers,
                                         : baseLayer + region.texSubres.baseArrayLayer;
         const uint32_t subresource = backing->subresourceIndex(mipLevel, arrayLayer, 0);
         if (diagnoseMipUpload) {
-            CC_LOG_INFO("[D3D12-MIP-DIAG] region=%u mip=%u layer=%u extent=%ux%ux%u offset=%d,%d,%d",
+            CC_D3D12_DIAGNOSTIC_LOG("[D3D12-MIP-DIAG] region=%u mip=%u layer=%u extent=%ux%ux%u offset=%d,%d,%d",
                         regionIndex, mipLevel, arrayLayer,
                         region.texExtent.width, region.texExtent.height, region.texExtent.depth,
                         region.texOffset.x, region.texOffset.y, region.texOffset.z);
@@ -1464,7 +1465,7 @@ void CCD3D12Device::copyBuffersToTextureImmediate(const uint8_t *const *buffers,
         d3d12Texture->markMipmapsGenerated();
     }
     if (diagnoseMipUpload) {
-        CC_LOG_INFO("[D3D12-MIP-DIAG] generation resource=%p result=%s descriptorHeaps=%zu",
+        CC_D3D12_DIAGNOSTIC_LOG("[D3D12-MIP-DIAG] generation resource=%p result=%s descriptorHeaps=%zu",
                     textureResource,
                     shouldGenerateMipmaps ? (generatedMipmaps ? "success" : "failed") : "deferred",
                     mipDescriptorHeaps.size());
@@ -1522,7 +1523,7 @@ void CCD3D12Device::copyBuffersToTextureImmediate(const uint8_t *const *buffers,
     frameResources.fenceValue = _impl->fenceValue;
     _impl->pendingUploadCommandContexts.emplace_back(std::move(pendingContext));
     if (diagnoseMipUpload) {
-        CC_LOG_INFO("[D3D12-MIP-DIAG] upload submitted async resource=%p fence=%llu pendingContexts=%zu",
+        CC_D3D12_DIAGNOSTIC_LOG("[D3D12-MIP-DIAG] upload submitted async resource=%p fence=%llu pendingContexts=%zu",
                     textureResource,
                     static_cast<unsigned long long>(_impl->fenceValue),
                     _impl->pendingUploadCommandContexts.size());
@@ -1854,7 +1855,7 @@ bool CCD3D12Device::initializeD3D12Context() {
             CC_LOG_WARNING("Could not enable D3D12 debug layer.");
         }
     } else {
-        CC_LOG_INFO("D3D12 debug layer disabled; set CC_D3D12_DEBUG_LAYER=1 for API validation.");
+        CC_D3D12_DIAGNOSTIC_LOG("D3D12 debug layer disabled; set CC_D3D12_DEBUG_LAYER=1 for API validation.");
     }
 
     HRESULT hr = CreateDXGIFactory2(dxgiFactoryFlags, IID_PPV_ARGS(&_impl->dxgiFactory));
@@ -1898,7 +1899,7 @@ bool CCD3D12Device::initializeD3D12Context() {
                               adapterDesc.SharedSystemMemory > 0) ||
                              (adapterDesc.VendorId == 0x10DE) ||  // NVIDIA
                              (adapterDesc.VendorId == 0x1002);    // AMD
-            CC_LOG_INFO("Adapter[%u]: %s (VRAM=%llu MB, Shared=%llu MB, VendorID=0x%04x, Discrete=%s)",
+            CC_D3D12_DIAGNOSTIC_LOG("Adapter[%u]: %s (VRAM=%llu MB, Shared=%llu MB, VendorID=0x%04x, Discrete=%s)",
                          adapterIndex, adapterName,
                          static_cast<unsigned long long>(adapterDesc.DedicatedVideoMemory / (1024 * 1024)),
                          static_cast<unsigned long long>(adapterDesc.SharedSystemMemory / (1024 * 1024)),

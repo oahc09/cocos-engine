@@ -513,6 +513,27 @@ def test_dynamic_uniform_address_change_invalidates_descriptor_table_cache() -> 
     assert "slot.version = buffer ? buffer->getUniformDescriptorVersion() : 0" in force_update
 
 
+def test_release_build_has_no_unconditional_diagnostic_logging() -> None:
+    diagnostics = read("D3D12DebugOptimization.h")
+    assert "CC_D3D12_ENABLE_DIAGNOSTIC_LOGS" in diagnostics
+    assert "#define CC_D3D12_DIAGNOSTICS_ENABLED 0" in diagnostics
+    assert "#define CC_D3D12_DIAGNOSTIC_LOG(...) ((void)0)" in diagnostics
+
+    sources = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in ROOT.glob("*.cpp")
+    )
+    assert 'CC_LOG_INFO("[D3D12-PERF]' not in sources
+    assert 'CC_LOG_INFO("[D3D12-MIP-DIAG]' not in sources
+    assert 'CC_LOG_WARNING("[D3D12-MIP-DIAG]' not in sources
+    assert 'CC_LOG_ERROR("[DIAG' not in sources
+
+    swapchain = read("D3D12Swapchain.cpp")
+    present = function_body(swapchain, "bool CCD3D12Swapchain::present")
+    assert "#if CC_D3D12_DIAGNOSTICS_ENABLED" in present
+    assert "std::chrono::steady_clock::now()" in present
+
+
 def test_partial_texture_upload_uses_region_sized_footprints() -> None:
     texture_h = read("D3D12Texture.h")
     texture_cpp = read("D3D12Texture.cpp")

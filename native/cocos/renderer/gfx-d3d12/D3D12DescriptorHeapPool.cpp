@@ -23,6 +23,7 @@
 ****************************************************************************/
 
 #include "D3D12DescriptorHeapPool.h"
+#include "D3D12DebugOptimization.h"
 #include "D3D12Device.h"
 #include "base/Log.h"
 
@@ -105,7 +106,7 @@ void D3D12DescriptorHeapPool::initialize(HeapType heapType, uint32_t maxDescript
     _impl->descriptorSize = d3dDevice->GetDescriptorHandleIncrementSize(_impl->d3dHeapType);
 
     _impl->initialized = true;
-    CC_LOG_INFO("D3D12DescriptorHeapPool initialized: type=%s, maxPerHeap=%u, shaderVisible=%s",
+    CC_D3D12_DIAGNOSTIC_LOG("D3D12DescriptorHeapPool initialized: type=%s, maxPerHeap=%u, shaderVisible=%s",
                 heapType == HeapType::CBV_SRV_UAV ? "CBV_SRV_UAV" : "SAMPLER",
                 maxDescriptorsPerHeap, shaderVisible ? "true" : "false");
 }

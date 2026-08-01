@@ -23,6 +23,7 @@
 ****************************************************************************/
 
 #include "D3D12Shader.h"
+#include "D3D12DebugOptimization.h"
 #include "D3D12ShaderCacheScheduler.h"
 #include "D3D12ShaderCompileScheduler.h"
 #include "D3D12Device.h"
@@ -318,14 +319,14 @@ void recordDXBCHashComparison(const ccstd::string &shaderName,
     }
 
     if (createdReference) {
-        CC_LOG_INFO("[D3D12-PERF] ShaderDXBCHashReference name='%s' stage=%s normalizedKey=%s fullSourceKey=%s rawHash=%s stableHash=%s rawBytes=%u stableBytes=%u backend=%s",
+        CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] ShaderDXBCHashReference name='%s' stage=%s normalizedKey=%s fullSourceKey=%s rawHash=%s stableHash=%s rawBytes=%u stableBytes=%u backend=%s",
                     shaderName.c_str(), getShaderStageName(stage), normalizedKey.c_str(), fullSourceKey.c_str(),
                     rawHash.c_str(), stableHash.c_str(), static_cast<unsigned>(dxbc.size()),
                     static_cast<unsigned>(comparisonDXBC.size()), backend);
         return;
     }
 
-    CC_LOG_INFO("[D3D12-PERF] ShaderDXBCHashCompare name='%s' stage=%s normalizedKey=%s referenceFullSourceKey=%s fullSourceKey=%s referenceRawHash=%s rawHash=%s rawHashMatch=%u referenceStableHash=%s stableHash=%s stableHashMatch=%u stableMatch=%u rawBytes=%u stableBytes=%u backend=%s",
+    CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] ShaderDXBCHashCompare name='%s' stage=%s normalizedKey=%s referenceFullSourceKey=%s fullSourceKey=%s referenceRawHash=%s rawHash=%s rawHashMatch=%u referenceStableHash=%s stableHash=%s stableHashMatch=%u stableMatch=%u rawBytes=%u stableBytes=%u backend=%s",
                 shaderName.c_str(), getShaderStageName(stage), normalizedKey.c_str(),
                 referenceFullSourceKey.c_str(), fullSourceKey.c_str(), referenceRawHash.c_str(),
                 rawHash.c_str(), rawHashMatch ? 1U : 0U,
@@ -595,7 +596,7 @@ D3D12ShaderSourceOptimization optimizeD3D12ShaderSource(ShaderStageFlagBit stage
     if (source.find("##") != ccstd::string::npos) {
         result.source = source;
         if (preserveSourcePositions) {
-            CC_LOG_INFO("[D3D12-PERF] ShaderSourceOptimizeSkipped name='%s' stage=%s reason=token-paste sourceBytes=%u",
+            CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] ShaderSourceOptimizeSkipped name='%s' stage=%s reason=token-paste sourceBytes=%u",
                         shaderName.c_str(), getShaderStageName(stage), static_cast<unsigned>(source.size()));
         }
         return result;
@@ -638,7 +639,7 @@ D3D12ShaderSourceOptimization optimizeD3D12ShaderSource(ShaderStageFlagBit stage
     if (!result.changed) {
         result.source = source;
     } else if (preserveSourcePositions) {
-        CC_LOG_INFO("[D3D12-PERF] ShaderSourceOptimize name='%s' stage=%s removedDefines=%u originalBytes=%u optimizedBytes=%u",
+        CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] ShaderSourceOptimize name='%s' stage=%s removedDefines=%u originalBytes=%u optimizedBytes=%u",
                     shaderName.c_str(), getShaderStageName(stage),
                     result.removedDefines,
                     static_cast<unsigned>(source.size()),
@@ -800,7 +801,7 @@ ccstd::string buildD3D12StageDiagnosticGroupingSource(ShaderStageFlagBit stage,
     }
 
     if (removedDefines > 0) {
-        CC_LOG_INFO("[D3D12-PERF] ShaderDiagnosticKeyNormalize name='%s' stage=%s removedDefines=%u sourceBytes=%u keyBytes=%u",
+        CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] ShaderDiagnosticKeyNormalize name='%s' stage=%s removedDefines=%u sourceBytes=%u keyBytes=%u",
                     shaderName.c_str(), getShaderStageName(stage),
                     removedDefines,
                     static_cast<unsigned>(source.size()),
@@ -971,7 +972,7 @@ bool scheduleFileCachedDXBCPersistence(const ccstd::string &cacheKey, const std:
                 const auto writeStart = D3D12PerfClock::now();
                 const uint64_t queueWaitMs = elapsedMs(queuedAt);
                 const bool stored = storeFileCachedDXBC(cacheKey, dxbc);
-                CC_LOG_INFO("[D3D12-PERF] ShaderCacheFilePersist cacheKey=%s result=%s bytes=%u queueWaitMs=%llu writeMs=%llu",
+                CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] ShaderCacheFilePersist cacheKey=%s result=%s bytes=%u queueWaitMs=%llu writeMs=%llu",
                             cacheKey.c_str(), stored ? "stored" : "failed",
                             static_cast<unsigned>(dxbc.size()),
                             static_cast<unsigned long long>(queueWaitMs),
@@ -992,7 +993,7 @@ const char *storeCachedDXBC(const ccstd::string &cacheKey, const std::vector<uin
     const bool storedSession = storeD3D12ShaderCacheDXBC(cacheKey, cacheDXBC);
     const bool storedFile = storeFileCachedDXBC(cacheKey, cacheDXBC);
     if (stableDXBC.size() != dxbc.size()) {
-        CC_LOG_INFO("[D3D12-PERF] ShaderCacheCanonicalize key=%s rawBytes=%u stableBytes=%u",
+        CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] ShaderCacheCanonicalize key=%s rawBytes=%u stableBytes=%u",
                     cacheKey.c_str(), static_cast<unsigned>(dxbc.size()),
                     static_cast<unsigned>(stableDXBC.size()));
     }
@@ -1292,7 +1293,7 @@ void reopenD3D12ShaderCachePersistence() {
 void drainD3D12ShaderCachePersistence() {
     const auto drainStart = D3D12PerfClock::now();
     getD3D12ShaderCachePersistenceQueue().closeAndDrain();
-    CC_LOG_INFO("[D3D12-PERF] ShaderCacheFilePersistDrain waitMs=%llu",
+    CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] ShaderCacheFilePersistDrain waitMs=%llu",
                 static_cast<unsigned long long>(elapsedMs(drainStart)));
 }
 
@@ -1567,7 +1568,7 @@ bool CCD3D12Shader::compileGLSLToDXBC(ShaderStageFlagBit stage,
         }
         fileLookupMs = elapsedMs(fileLookupStart);
     }
-    CC_LOG_INFO("[D3D12-PERF] ShaderStageCacheLookup name='%s' stage=%s mode=%s sessionHit=%u sessionMs=%llu fileChecked=%u fileHit=%u v4Ms=%llu legacyV3Eligible=%u legacyV3Checked=%u legacyV3Hit=%u legacyMs=%llu migrationSessionStored=%u migrationFileQueued=%u migrationFileRejected=%u migrationStoreMs=%llu fileMs=%llu normalizedKey=%s fullSourceKey=%s normalized=%u",
+    CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] ShaderStageCacheLookup name='%s' stage=%s mode=%s sessionHit=%u sessionMs=%llu fileChecked=%u fileHit=%u v4Ms=%llu legacyV3Eligible=%u legacyV3Checked=%u legacyV3Hit=%u legacyMs=%llu migrationSessionStored=%u migrationFileQueued=%u migrationFileRejected=%u migrationStoreMs=%llu fileMs=%llu normalizedKey=%s fullSourceKey=%s normalized=%u",
                 shaderName.c_str(), getShaderStageName(stage), cacheOnly ? "cache-only" : "compile-on-miss",
                 sessionCacheHit ? 1U : 0U,
                 static_cast<unsigned long long>(sessionLookupMs), sessionCacheHit ? 0U : 1U,
@@ -1581,7 +1582,7 @@ bool CCD3D12Shader::compileGLSLToDXBC(ShaderStageFlagBit stage,
                 fullSourceKey.c_str(), diagnosticGroupingKey == fullSourceKey ? 0U : 1U);
     if (cacheHitBackend) {
         recordDXBCHashComparison(shaderName, stage, diagnosticGroupingKey, fullSourceKey, outDXBC, cacheHitBackend);
-        CC_LOG_INFO("[D3D12-PERF] ShaderStageCompileCacheHit name='%s' stage=%s profile=%s backend=%s totalMs=%llu glslBytes=%u dxbcBytes=%u cacheKey=%s",
+        CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] ShaderStageCompileCacheHit name='%s' stage=%s profile=%s backend=%s totalMs=%llu glslBytes=%u dxbcBytes=%u cacheKey=%s",
                     shaderName.c_str(), getShaderStageName(stage), profile, cacheHitBackend,
                     static_cast<unsigned long long>(elapsedMs(compileStart)),
                     static_cast<unsigned>(compileSource.size()),
@@ -1594,7 +1595,7 @@ bool CCD3D12Shader::compileGLSLToDXBC(ShaderStageFlagBit stage,
         if (cacheMiss) {
             *cacheMiss = true;
         }
-        CC_LOG_INFO("[D3D12-PERF] ShaderStageCacheWarmMiss name='%s' stage=%s fullSourceKey=%s totalMs=%llu",
+        CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] ShaderStageCacheWarmMiss name='%s' stage=%s fullSourceKey=%s totalMs=%llu",
                     shaderName.c_str(), getShaderStageName(stage), fullSourceKey.c_str(),
                     static_cast<unsigned long long>(elapsedMs(compileStart)));
         return false;
@@ -1606,7 +1607,7 @@ bool CCD3D12Shader::compileGLSLToDXBC(ShaderStageFlagBit stage,
         if (ok) {
             recordDXBCHashComparison(shaderName, stage, diagnosticGroupingKey, fullSourceKey, outDXBC, "in-flight");
         }
-        CC_LOG_INFO("[D3D12-PERF] ShaderStageCompileInFlightHit name='%s' stage=%s profile=%s ok=%u totalMs=%llu glslBytes=%u dxbcBytes=%u cacheKey=%s",
+        CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] ShaderStageCompileInFlightHit name='%s' stage=%s profile=%s ok=%u totalMs=%llu glslBytes=%u dxbcBytes=%u cacheKey=%s",
                     shaderName.c_str(), getShaderStageName(stage), profile, ok ? 1U : 0U,
                     static_cast<unsigned long long>(elapsedMs(compileStart)),
                     static_cast<unsigned>(compileSource.size()),
@@ -1629,7 +1630,7 @@ bool CCD3D12Shader::compileGLSLToDXBC(ShaderStageFlagBit stage,
     }
     if (lateCacheHit) {
         recordDXBCHashComparison(shaderName, stage, diagnosticGroupingKey, fullSourceKey, outDXBC, lateCacheBackend);
-        CC_LOG_INFO("[D3D12-PERF] ShaderStageCompileLateCacheHit name='%s' stage=%s backend=%s fullSourceKey=%s totalMs=%llu",
+        CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] ShaderStageCompileLateCacheHit name='%s' stage=%s backend=%s fullSourceKey=%s totalMs=%llu",
                     shaderName.c_str(), getShaderStageName(stage), lateCacheBackend, fullSourceKey.c_str(),
                     static_cast<unsigned long long>(elapsedMs(compileStart)));
         return inFlightCompletion.finish(true);
@@ -1637,7 +1638,7 @@ bool CCD3D12Shader::compileGLSLToDXBC(ShaderStageFlagBit stage,
 
     ScopedShaderCompilerPermit compilerPermit;
     if (compilerPermit.waitMs() > 0) {
-        CC_LOG_INFO("[D3D12-PERF] ShaderCompilerDemandWait name='%s' stage=%s waitMs=%llu limit=%u",
+        CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] ShaderCompilerDemandWait name='%s' stage=%s waitMs=%llu limit=%u",
                     shaderName.c_str(), getShaderStageName(stage),
                     static_cast<unsigned long long>(compilerPermit.waitMs()),
                     CC_D3D12_MAX_CONCURRENT_SHADER_COMPILES);
@@ -1827,17 +1828,17 @@ bool CCD3D12Shader::compileGLSLToDXBC(ShaderStageFlagBit stage,
                     recordDXBCHashComparison(shaderName, stage, diagnosticGroupingKey, fullSourceKey,
                                              outDXBC, "d3dcompile-raw");
                 }
-                CC_LOG_INFO("[D3D12-PERF] ShaderEntryCompileAttempt name='%s' stage=%s profile=%s candidate='%s' attempt=%u result=success hr=0x%08x durationMs=%llu",
+                CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] ShaderEntryCompileAttempt name='%s' stage=%s profile=%s candidate='%s' attempt=%u result=success hr=0x%08x durationMs=%llu",
                             shaderName.c_str(), getShaderStageName(stage), profile, candidate.c_str(), entryAttemptCount,
                             static_cast<unsigned>(hr), static_cast<unsigned long long>(entryAttemptMs));
-                CC_LOG_INFO("[D3D12-PERF] ShaderDXBCCanonicalize name='%s' stage=%s canonicalized=%u rawBytes=%u stableBytes=%u",
+                CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] ShaderDXBCCanonicalize name='%s' stage=%s canonicalized=%u rawBytes=%u stableBytes=%u",
                             shaderName.c_str(), getShaderStageName(stage), canonicalized ? 1U : 0U, rawDXBCBytes,
                             static_cast<unsigned>(outDXBC.size()));
                 return true;
             }
 
             failedEntryCompileMs += entryAttemptMs;
-            CC_LOG_INFO("[D3D12-PERF] ShaderEntryCompileAttempt name='%s' stage=%s profile=%s candidate='%s' attempt=%u result=failed hr=0x%08x durationMs=%llu",
+            CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] ShaderEntryCompileAttempt name='%s' stage=%s profile=%s candidate='%s' attempt=%u result=failed hr=0x%08x durationMs=%llu",
                         shaderName.c_str(), getShaderStageName(stage), profile, candidate.c_str(), entryAttemptCount,
                         static_cast<unsigned>(hr), static_cast<unsigned long long>(entryAttemptMs));
 
@@ -1858,10 +1859,10 @@ bool CCD3D12Shader::compileGLSLToDXBC(ShaderStageFlagBit stage,
         hlslToDxbcMs = elapsedMs(hlslToDxbcStart);
         const char *cacheStoreBackend = storeCachedDXBC(cacheKey, outDXBC);
         recordDXBCHashComparison(shaderName, stage, diagnosticGroupingKey, fullSourceKey, outDXBC, cacheStoreBackend);
-        CC_LOG_INFO("[D3D12-PERF] ShaderStageCompileCacheStore name='%s' stage=%s profile=%s backend=%s dxbcBytes=%u cacheKey=%s",
+        CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] ShaderStageCompileCacheStore name='%s' stage=%s profile=%s backend=%s dxbcBytes=%u cacheKey=%s",
                     shaderName.c_str(), getShaderStageName(stage), profile, cacheStoreBackend,
                     static_cast<unsigned>(outDXBC.size()), cacheKey.c_str());
-        CC_LOG_INFO("[D3D12-PERF] ShaderStageCompile name='%s' stage=%s profile=%s glslToSpirvMs=%llu spirvToHlslMs=%llu hlslToDxbcMs=%llu totalMs=%llu glslBytes=%u hlslBytes=%u dxbcBytes=%u entryAttempts=%u failedEntryMs=%llu selectedEntry='%s'",
+        CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] ShaderStageCompile name='%s' stage=%s profile=%s glslToSpirvMs=%llu spirvToHlslMs=%llu hlslToDxbcMs=%llu totalMs=%llu glslBytes=%u hlslBytes=%u dxbcBytes=%u entryAttempts=%u failedEntryMs=%llu selectedEntry='%s'",
                     shaderName.c_str(), getShaderStageName(stage), profile,
                     static_cast<unsigned long long>(glslToSpirvMs),
                     static_cast<unsigned long long>(spirvToHlslMs),
@@ -1893,10 +1894,10 @@ bool CCD3D12Shader::compileGLSLToDXBC(ShaderStageFlagBit stage,
         hlslToDxbcMs = elapsedMs(hlslToDxbcStart);
         const char *cacheStoreBackend = storeCachedDXBC(cacheKey, outDXBC);
         recordDXBCHashComparison(shaderName, stage, diagnosticGroupingKey, fullSourceKey, outDXBC, cacheStoreBackend);
-        CC_LOG_INFO("[D3D12-PERF] ShaderStageCompileCacheStore name='%s' stage=%s profile=%s backend=%s dxbcBytes=%u cacheKey=%s",
+        CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] ShaderStageCompileCacheStore name='%s' stage=%s profile=%s backend=%s dxbcBytes=%u cacheKey=%s",
                     shaderName.c_str(), getShaderStageName(stage), profile, cacheStoreBackend,
                     static_cast<unsigned>(outDXBC.size()), cacheKey.c_str());
-        CC_LOG_INFO("[D3D12-PERF] ShaderStageCompile name='%s' stage=%s profile=%s glslToSpirvMs=%llu spirvToHlslMs=%llu hlslToDxbcMs=%llu totalMs=%llu glslBytes=%u hlslBytes=%u dxbcBytes=%u fallbackEntries=%u entryAttempts=%u failedEntryMs=%llu selectedEntry='%s'",
+        CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] ShaderStageCompile name='%s' stage=%s profile=%s glslToSpirvMs=%llu spirvToHlslMs=%llu hlslToDxbcMs=%llu totalMs=%llu glslBytes=%u hlslBytes=%u dxbcBytes=%u fallbackEntries=%u entryAttempts=%u failedEntryMs=%llu selectedEntry='%s'",
                     shaderName.c_str(), getShaderStageName(stage), profile,
                     static_cast<unsigned long long>(glslToSpirvMs),
                     static_cast<unsigned long long>(spirvToHlslMs),
@@ -1911,7 +1912,7 @@ bool CCD3D12Shader::compileGLSLToDXBC(ShaderStageFlagBit stage,
     }
 
     hlslToDxbcMs = elapsedMs(hlslToDxbcStart);
-    CC_LOG_INFO("[D3D12-PERF] ShaderStageCompileFailed name='%s' stage=%s profile=%s glslToSpirvMs=%llu spirvToHlslMs=%llu hlslToDxbcMs=%llu totalMs=%llu glslBytes=%u hlslBytes=%u",
+    CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] ShaderStageCompileFailed name='%s' stage=%s profile=%s glslToSpirvMs=%llu spirvToHlslMs=%llu hlslToDxbcMs=%llu totalMs=%llu glslBytes=%u hlslBytes=%u",
                 shaderName.c_str(), getShaderStageName(stage), profile,
                 static_cast<unsigned long long>(glslToSpirvMs),
                 static_cast<unsigned long long>(spirvToHlslMs),
@@ -1960,7 +1961,7 @@ void CCD3D12Shader::scheduleStagePrecompile(ShaderStageFlagBit stage) {
             const uint64_t queueWaitMs = elapsedMs(scheduledAt);
             ScopedShaderPrecompileCounter precompileCounter;
             const uint32_t activePrecompiles = precompileCounter.active();
-            CC_LOG_INFO("[D3D12-PERF] ShaderStagePrecompileBegin name='%s' stage=%s dispatch=%s queueWaitMs=%llu backgroundWorkers=%u concurrencyLimit=%u active=%u peak=%u",
+            CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] ShaderStagePrecompileBegin name='%s' stage=%s dispatch=%s queueWaitMs=%llu backgroundWorkers=%u concurrencyLimit=%u active=%u peak=%u",
                         shaderName.c_str(), getShaderStageName(stage), demanded ? "demand" : "background",
                         static_cast<unsigned long long>(queueWaitMs),
                         CC_D3D12_BACKGROUND_SHADER_PRECOMPILE_WORKERS,
@@ -1976,7 +1977,7 @@ void CCD3D12Shader::scheduleStagePrecompile(ShaderStageFlagBit stage) {
             asyncResult->dxbc = std::move(compiledDXBC);
 
             const uint32_t remainingPrecompiles = precompileCounter.finish();
-            CC_LOG_INFO("[D3D12-PERF] ShaderStagePrecompile name='%s' stage=%s dispatch=%s outcome=%s sourceBytes=%u queueWaitMs=%llu executionMs=%llu totalMs=%llu activeAfter=%u peak=%u",
+            CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] ShaderStagePrecompile name='%s' stage=%s dispatch=%s outcome=%s sourceBytes=%u queueWaitMs=%llu executionMs=%llu totalMs=%llu activeAfter=%u peak=%u",
                         shaderName.c_str(), getShaderStageName(stage), demanded ? "demand" : "background",
                         ok ? "ready" : (cacheMiss ? "cache-miss" : "failed"),
                         static_cast<unsigned>(source.size()),
@@ -2086,7 +2087,7 @@ void CCD3D12Shader::doInit(const ShaderInfo &info) {
                 reflectMs = elapsedMs(reflectStart);
             }
 
-            CC_LOG_INFO("[D3D12-PERF] ShaderStageInit name='%s' stage=%s source=DXBC sourceBytes=%u dxbcBytes=%u reflectMs=%llu totalMs=%llu",
+            CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] ShaderStageInit name='%s' stage=%s source=DXBC sourceBytes=%u dxbcBytes=%u reflectMs=%llu totalMs=%llu",
                         info.name.c_str(), getShaderStageName(stage.stage),
                         static_cast<unsigned>(stage.source.size()),
                         static_cast<unsigned>(dxbcBuffer->size()),
@@ -2101,7 +2102,7 @@ void CCD3D12Shader::doInit(const ShaderInfo &info) {
                 stageRecord->failed = false;
             }
             scheduleStagePrecompile(stage.stage);
-            CC_LOG_INFO("[D3D12-PERF] ShaderStageInit name='%s' stage=%s source=GLSL-LAZY precompile=%s sourceBytes=%u dxbcBytes=0 reflectMs=0 totalMs=%llu",
+            CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] ShaderStageInit name='%s' stage=%s source=GLSL-LAZY precompile=%s sourceBytes=%u dxbcBytes=0 reflectMs=0 totalMs=%llu",
                         info.name.c_str(), getShaderStageName(stage.stage),
                         stageRecord && stageRecord->precompileStarted ? "scheduled" : "not-scheduled",
                         static_cast<unsigned>(stage.source.size()),
@@ -2109,9 +2110,9 @@ void CCD3D12Shader::doInit(const ShaderInfo &info) {
         }
     }
 
-    CC_LOG_INFO("D3D12Shader '%s' initialized with %u stages.",
+    CC_D3D12_DIAGNOSTIC_LOG("D3D12Shader '%s' initialized with %u stages.",
                 info.name.c_str(), static_cast<unsigned>(_stages.size()));
-    CC_LOG_INFO("[D3D12-PERF] ShaderInit name='%s' stages=%u totalMs=%llu",
+    CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] ShaderInit name='%s' stages=%u totalMs=%llu",
                 info.name.c_str(), static_cast<unsigned>(_stages.size()),
                 static_cast<unsigned long long>(elapsedMs(initStart)));
     _impl->startAcceptingStageRequests();
@@ -2229,7 +2230,7 @@ CCD3D12Shader::BytecodeBlob CCD3D12Shader::ensureStageBytecode(ShaderStageFlagBi
             }
             hasBytecode = !dxbcBuffer->empty();
         }
-        CC_LOG_INFO("[D3D12-PERF] ShaderStagePrecompileDemand name='%s' stage=%s dispatch=%s outcome=%s reflectMs=%llu waitMs=%llu",
+        CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] ShaderStagePrecompileDemand name='%s' stage=%s dispatch=%s outcome=%s reflectMs=%llu waitMs=%llu",
                     shaderName.c_str(), getShaderStageName(stage), ranInline ? "inline" : "wait-running",
                     hasBytecode ? "ready" : (cacheMiss ? "cache-miss" : "failed"),
                     static_cast<unsigned long long>(reflectMs),
@@ -2310,7 +2311,7 @@ CCD3D12Shader::BytecodeBlob CCD3D12Shader::ensureStageBytecode(ShaderStageFlagBi
         return {};
     }
 
-    CC_LOG_INFO("[D3D12-PERF] ShaderStageLazyCompile name='%s' stage=%s sourceBytes=%u dxbcBytes=%u reflectMs=%llu totalMs=%llu",
+    CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] ShaderStageLazyCompile name='%s' stage=%s sourceBytes=%u dxbcBytes=%u reflectMs=%llu totalMs=%llu",
                 shaderName.c_str(), getShaderStageName(stage),
                 static_cast<unsigned>(source.size()),
                 static_cast<unsigned>(dxbcBuffer->size()),

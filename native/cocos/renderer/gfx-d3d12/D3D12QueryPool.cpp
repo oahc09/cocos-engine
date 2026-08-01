@@ -23,6 +23,7 @@
 ****************************************************************************/
 
 #include "D3D12QueryPool.h"
+#include "D3D12DebugOptimization.h"
 #include "D3D12Device.h"
 #include "base/Log.h"
 
@@ -163,7 +164,7 @@ void CCD3D12QueryPool::doInit(const QueryPoolInfo &info) {
         return;
     }
 
-    CC_LOG_INFO("D3D12 QueryPool initialized: type=%u, maxQueries=%u", static_cast<unsigned>(_type), _maxQueryObjects);
+    CC_D3D12_DIAGNOSTIC_LOG("D3D12 QueryPool initialized: type=%u, maxQueries=%u", static_cast<unsigned>(_type), _maxQueryObjects);
 }
 
 void CCD3D12QueryPool::doDestroy() {
