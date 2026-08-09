@@ -79,7 +79,7 @@ void BufferAgent::doInit(const BufferViewInfo &info) {
         });
 }
 
-void BufferAgent::doResize(uint32_t size, uint32_t /*count*/) {
+bool BufferAgent::doResize(uint32_t size, uint32_t /*count*/) {
     auto *mq = DeviceAgent::getInstance()->getMessageQueue();
 
     if (_stagingBuffer) {
@@ -100,6 +100,7 @@ void BufferAgent::doResize(uint32_t size, uint32_t /*count*/) {
         {
             actor->resize(size);
         });
+    return true;
 }
 
 void BufferAgent::doDestroy() {

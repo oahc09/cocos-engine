@@ -173,7 +173,7 @@ void CCMTLBuffer::doDestroy() {
     CC_SAFE_DELETE(_gpuBuffer);
 }
 
-void CCMTLBuffer::doResize(uint32_t size, uint32_t count) {
+bool CCMTLBuffer::doResize(uint32_t size, uint32_t count) {
     if (hasFlag(_usage, BufferUsageBit::VERTEX) ||
         hasFlag(_usage, BufferUsageBit::INDEX) ||
         hasFlag(_usage, BufferUsageBit::UNIFORM)) {
@@ -196,6 +196,7 @@ void CCMTLBuffer::doResize(uint32_t size, uint32_t count) {
             _drawInfos.resize(_count);
         }
     }
+    return true;
 }
 
 void CCMTLBuffer::update(const void *buffer, uint32_t size) {

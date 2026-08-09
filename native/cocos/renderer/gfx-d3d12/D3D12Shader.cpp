@@ -68,7 +68,7 @@ using D3D12PerfClock = std::chrono::steady_clock;
 
 constexpr uint32_t CC_D3D12_DXBC_CACHE_VERSION = 8;
 constexpr uint32_t CC_D3D12_MIGRATABLE_DXBC_CACHE_VERSION = 3;
-constexpr uint32_t CC_D3D12_BACKGROUND_SHADER_PRECOMPILE_WORKERS = 3;
+constexpr uint32_t CC_D3D12_BACKGROUND_SHADER_PRECOMPILE_WORKERS = 1;
 constexpr uint32_t CC_D3D12_MAX_CONCURRENT_SHADER_COMPILES =
     CC_D3D12_BACKGROUND_SHADER_PRECOMPILE_WORKERS + 1;
 constexpr uint64_t FNV1A64_OFFSET = 14695981039346656037ULL;
@@ -271,6 +271,14 @@ void recordDXBCHashComparison(const ccstd::string &shaderName,
                               const std::vector<uint8_t> &dxbc,
                               const char *backend,
                               const std::vector<uint8_t> *knownStableDXBC = nullptr) {
+    // The hash comparison and the global stableDXBC reference map exist solely
+    // to feed CC_D3D12_DIAGNOSTIC_LOG outputs. When diagnostics are compiled
+    // out (default), skip the entire body so no shader bytecode is retained,
+    // no D3DStripShader call is made, and the global map stays empty.
+    if (!CC_D3D12_DIAGNOSTICS_ENABLED) {
+        return;
+    }
+
     // Hash comparison is useful only when the diagnostic grouping actually
     // collapses multiple complete source identities.
     if (normalizedKey == fullSourceKey) {
@@ -2218,6 +2226,17 @@ CCD3D12Shader::BytecodeBlob CCD3D12Shader::ensureStageBytecode(ShaderStageFlagBi
                 cacheMiss = asyncResult->cacheMiss;
                 if (taskOK && asyncResult->ok && !asyncResult->dxbc.empty() && dxbcBuffer->empty()) {
                     *dxbcBuffer = std::move(asyncResult->dxbc);
+                    // DXBC is now installed; the HLSL source string in the
+                    // stage record is no longer referenced (subsequent
+                    // ensureStageBytecode calls return early when the DXBC
+                    // buffer is non-empty). Release it to avoid retaining the
+                    // full per-stage HLSL source for the shader's lifetime.
+                    // The fragment source must be kept: VS/PS linkage repair
+                    // (getFragmentBytecodeForVertexLinkage) recompiles it.
+                    if (stage != ShaderStageFlagBit::FRAGMENT) {
+                        stageRecord->source.clear();
+                        stageRecord->source.shrink_to_fit();
+                    }
                     if (stage == ShaderStageFlagBit::VERTEX) {
                         const auto reflectStart = D3D12PerfClock::now();
                         impl->vertexInputSignature.clear();
@@ -2298,6 +2317,13 @@ CCD3D12Shader::BytecodeBlob CCD3D12Shader::ensureStageBytecode(ShaderStageFlagBi
         std::lock_guard<std::mutex> lock(impl->compileMutex);
         if (impl->acceptingStageRequests && impl->generation == stageGeneration) {
             *dxbcBuffer = std::move(compiledDXBC);
+            // DXBC installed: release the HLSL source retained in the stage
+            // record. The bytecode is the authoritative artifact from here on.
+            // Keep the fragment source for possible VS/PS linkage repair.
+            if (stage != ShaderStageFlagBit::FRAGMENT) {
+                stageRecord->source.clear();
+                stageRecord->source.shrink_to_fit();
+            }
             if (stage == ShaderStageFlagBit::VERTEX && !dxbcBuffer->empty()) {
                 const auto reflectStart = D3D12PerfClock::now();
                 impl->vertexInputSignature.clear();

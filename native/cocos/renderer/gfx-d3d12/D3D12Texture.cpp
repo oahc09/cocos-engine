@@ -24,6 +24,7 @@
 
 #include "D3D12Texture.h"
 #include "D3D12Device.h"
+#include "D3D12MemAlloc.h"
 #include "D3D12Swapchain.h"
 #include "base/Log.h"
 #include "gfx-base/GFXDef.h"
@@ -391,6 +392,10 @@ void CCD3D12Texture::doDestroy() {
     _baseMipUploadedLayers.clear();
     _mipmapsGenerated = false;
     if (_impl) {
+        // Drop the backing shared_ptr. If no other shared_ptr references
+        // remain (views, command buffers), D3D12ResourceBacking's destructor
+        // releases resource first, then d3d12maAllocation — the correct
+        // D3D12MA teardown order enforced by reverse declaration order.
         _impl->backing.reset();
     }
     _isSwapchainTexture = false;
@@ -634,30 +639,52 @@ bool CCD3D12Texture::createResource(uint32_t width, uint32_t height) {
         optimizedClearValue = &clearValue;
     }
 
+    // Create the new resource before replacing the old backing. The old
+    // backing shared_ptr stays alive until all consumers (views, command
+    // buffers) release their references — this naturally defers the old
+    // D3D12MA allocation release until no GPU work references it.
+    Microsoft::WRL::ComPtr<D3D12MA::Allocation> allocation;
     Microsoft::WRL::ComPtr<ID3D12Resource> resource;
-    HRESULT hr = d3dDevice->CreateCommittedResource(
-        &heapProperties,
-        D3D12_HEAP_FLAG_NONE,
-        &resourceDesc,
-        D3D12_RESOURCE_STATE_COMMON,
-        optimizedClearValue,
-        IID_PPV_ARGS(&resource));
-    if (FAILED(hr)) {
-        // Log device removed reason for diagnosis
-        HRESULT removedReason = d3dDevice->GetDeviceRemovedReason();
-        CC_LOG_ERROR("D3D12 CreateCommittedResource(texture) failed. "
-                     "HRESULT=0x%08x, DeviceRemovedReason=0x%08x, "
-                     "format=%u (DXGI=%u), %ux%u, depth=%u, layers=%u, mips=%u, usage=0x%x, flags=0x%x, samples=%u",
-                     static_cast<unsigned>(hr), static_cast<unsigned>(removedReason),
-                     static_cast<unsigned>(_info.format), static_cast<unsigned>(resourceFormat),
-                     width, height,
-                     static_cast<unsigned>(_info.depth),
-                     static_cast<unsigned>(_info.layerCount),
-                     static_cast<unsigned>(_info.levelCount),
-                     static_cast<uint32_t>(_info.usage),
-                     static_cast<unsigned>(flags),
-                     toD3D12SampleCount(_info.samples));
-        return false;
+    auto *allocator = device->getMemoryAllocator();
+    HRESULT hr = E_FAIL;
+    if (allocator) {
+        D3D12MA::ALLOCATION_DESC allocDesc{};
+        allocDesc.Flags = D3D12MA::ALLOCATION_FLAG_NONE;
+        allocDesc.HeapType = D3D12_HEAP_TYPE_DEFAULT;
+        allocDesc.ExtraHeapFlags = D3D12_HEAP_FLAG_NONE;
+        hr = allocator->CreateResource(&allocDesc, &resourceDesc, D3D12_RESOURCE_STATE_COMMON,
+                                       optimizedClearValue, allocation.ReleaseAndGetAddressOf(),
+                                       IID_PPV_ARGS(&resource));
+        if (FAILED(hr) || !allocation) {
+            resource.Reset();
+            allocation.Reset();
+        }
+    }
+    if (!allocation) {
+        hr = d3dDevice->CreateCommittedResource(
+            &heapProperties,
+            D3D12_HEAP_FLAG_NONE,
+            &resourceDesc,
+            D3D12_RESOURCE_STATE_COMMON,
+            optimizedClearValue,
+            IID_PPV_ARGS(&resource));
+        if (FAILED(hr)) {
+            // Log device removed reason for diagnosis
+            HRESULT removedReason = d3dDevice->GetDeviceRemovedReason();
+            CC_LOG_ERROR("D3D12 CreateCommittedResource(texture) failed. "
+                         "HRESULT=0x%08x, DeviceRemovedReason=0x%08x, "
+                         "format=%u (DXGI=%u), %ux%u, depth=%u, layers=%u, mips=%u, usage=0x%x, flags=0x%x, samples=%u",
+                         static_cast<unsigned>(hr), static_cast<unsigned>(removedReason),
+                         static_cast<unsigned>(_info.format), static_cast<unsigned>(resourceFormat),
+                         width, height,
+                         static_cast<unsigned>(_info.depth),
+                         static_cast<unsigned>(_info.layerCount),
+                         static_cast<unsigned>(_info.levelCount),
+                         static_cast<uint32_t>(_info.usage),
+                         static_cast<unsigned>(flags),
+                         toD3D12SampleCount(_info.samples));
+            return false;
+        }
     }
 
     const uint32_t mipLevels = std::max(_info.levelCount, 1U);
@@ -666,6 +693,7 @@ bool CCD3D12Texture::createResource(uint32_t width, uint32_t height) {
     auto newBacking = std::make_shared<D3D12ResourceBacking>();
     const auto oldBacking = _impl->backing;
     newBacking->resource = std::move(resource);
+    newBacking->d3d12maAllocation = std::move(allocation);
     newBacking->deviceEpoch = device->getDeviceEpoch();
     newBacking->generation = oldBacking ? oldBacking->generation + 1 : 1;
     newBacking->mipLevels = mipLevels;

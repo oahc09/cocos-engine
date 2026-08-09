@@ -1993,6 +1993,8 @@ if(CC_USE_D3D12)
         cocos/renderer/gfx-d3d12/D3D12Framebuffer.cpp
         cocos/renderer/gfx-d3d12/D3D12InputAssembler.h
         cocos/renderer/gfx-d3d12/D3D12InputAssembler.cpp
+        cocos/renderer/gfx-d3d12/D3D12MemAlloc.h
+        cocos/renderer/gfx-d3d12/D3D12MemAlloc.cpp
         cocos/renderer/gfx-d3d12/D3D12PipelineLayout.h
         cocos/renderer/gfx-d3d12/D3D12PipelineLayout.cpp
         cocos/renderer/gfx-d3d12/D3D12PipelineState.h

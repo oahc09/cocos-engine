@@ -71,14 +71,17 @@ void Buffer::destroy() {
     _offset = _size = _stride = _count = 0U;
 }
 
-void Buffer::resize(uint32_t size) {
+bool Buffer::resize(uint32_t size) {
     if (size != _size) {
         uint32_t count = size / _stride;
-        doResize(size, count);
-
-        _size = size;
-        _count = count;
+        if (doResize(size, count)) {
+            _size = size;
+            _count = count;
+        } else {
+            return false;
+        }
     }
+    return true;
 }
 
 void Buffer::write(const uint8_t *value, uint32_t offset, uint32_t size) const {

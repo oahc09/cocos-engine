@@ -82,6 +82,7 @@ public:
             for (const auto &task : _queue) {
                 if (task->status == TaskStatus::QUEUED) {
                     task->status = TaskStatus::CANCELLED;
+                    task->task = {};
                     task->completedCondition.notify_all();
                 }
             }
@@ -197,6 +198,7 @@ public:
                 _queue.erase(iter);
             }
             task->status = TaskStatus::CANCELLED;
+            task->task = {};
             task->completedCondition.notify_all();
             return;
         }
@@ -238,6 +240,7 @@ private:
             std::lock_guard<std::mutex> lock(_mutex);
             task->result = result;
             task->status = TaskStatus::COMPLETED;
+            task->task = {};
         }
         task->completedCondition.notify_all();
     }

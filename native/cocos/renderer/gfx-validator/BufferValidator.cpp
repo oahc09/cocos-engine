@@ -102,7 +102,7 @@ void BufferValidator::doInit(const BufferViewInfo &info) {
     _actor->initialize(actorInfo);
 }
 
-void BufferValidator::doResize(uint32_t size, uint32_t /*count*/) {
+bool BufferValidator::doResize(uint32_t size, uint32_t /*count*/) {
     // Already been destroyed?
     CC_ASSERT(isInited());
 
@@ -110,14 +110,17 @@ void BufferValidator::doResize(uint32_t size, uint32_t /*count*/) {
     CC_ASSERT(!_isBufferView);
     CC_ASSERT(size);
 
+    /////////// execute ///////////
+
+    if (!_actor->resize(size)) {
+        return false;
+    }
+
     for (auto *view : _views) {
         view->onExpire();
     }
     _views.clear();
-
-    /////////// execute ///////////
-
-    _actor->resize(size);
+    return true;
 }
 
 void BufferValidator::doDestroy() {

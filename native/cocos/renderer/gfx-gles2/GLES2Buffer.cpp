@@ -77,7 +77,7 @@ void GLES2Buffer::doDestroy() {
     CC_SAFE_DELETE(_gpuBufferView);
 }
 
-void GLES2Buffer::doResize(uint32_t size, uint32_t count) {
+bool GLES2Buffer::doResize(uint32_t size, uint32_t count) {
     GLES2Device::getInstance()->getMemoryStatus().bufferSize -= _size;
     CC_PROFILE_MEMORY_DEC(Buffer, _size);
     _gpuBuffer->size = size;
@@ -85,6 +85,7 @@ void GLES2Buffer::doResize(uint32_t size, uint32_t count) {
     cmdFuncGLES2ResizeBuffer(GLES2Device::getInstance(), _gpuBuffer);
     GLES2Device::getInstance()->getMemoryStatus().bufferSize += size;
     CC_PROFILE_MEMORY_INC(Buffer, size);
+    return true;
 }
 
 void GLES2Buffer::update(const void *buffer, uint32_t size) {

@@ -209,6 +209,7 @@ D3D12DescriptorHeapPool::Allocation D3D12DescriptorHeapPool::allocate(uint32_t c
     heapDesc.Flags = _impl->shaderVisible ? D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE : D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
     heapDesc.NodeMask = 0;
 
+    const bool overflow = !_impl->heaps.empty();
     HeapEntry newEntry;
     HRESULT hr = d3dDevice->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&newEntry.heap));
     if (FAILED(hr)) {
@@ -223,6 +224,7 @@ D3D12DescriptorHeapPool::Allocation D3D12DescriptorHeapPool::allocate(uint32_t c
     }
     newEntry.capacity = heapCapacity;
     newEntry.usedCount = requiredCapacity;
+    device->recordDescriptorHeapCreate(_impl->shaderVisible, overflow);
 
     uint32_t newHeapIndex = static_cast<uint32_t>(_impl->heaps.size());
     _impl->heaps.push_back(std::move(newEntry));
@@ -250,40 +252,69 @@ void D3D12DescriptorHeapPool::deallocate(const Allocation &alloc) {
         return;
     }
 
-    // Add to free list for potential reuse
-    typename Impl::FreeBlock block;
     // Recover offset from CPU handle
-    if (alloc.heapIndex < static_cast<uint32_t>(_impl->heaps.size())) {
-        auto &heap = _impl->heaps[alloc.heapIndex];
-        D3D12_CPU_DESCRIPTOR_HANDLE heapStart = heap.cpuStart;
-        uint64_t offsetBytes = reinterpret_cast<uint64_t>(alloc.cpuHandle) - heapStart.ptr;
-        uint32_t offset = static_cast<uint32_t>(offsetBytes / _impl->descriptorSize);
-
-        block.heapIndex = alloc.heapIndex;
-        block.offset = offset;
-        block.count = alloc.numDescriptors;
-        _impl->freeList.push_back(block);
-
-        std::sort(_impl->freeList.begin(), _impl->freeList.end(),
-                  [](const Impl::FreeBlock &lhs, const Impl::FreeBlock &rhs) {
-                      return lhs.heapIndex < rhs.heapIndex ||
-                             (lhs.heapIndex == rhs.heapIndex && lhs.offset < rhs.offset);
-                  });
-        ccstd::vector<Impl::FreeBlock> merged;
-        merged.reserve(_impl->freeList.size());
-        for (const auto &freeBlock : _impl->freeList) {
-            if (!merged.empty() && merged.back().heapIndex == freeBlock.heapIndex &&
-                merged.back().offset + merged.back().count >= freeBlock.offset) {
-                const uint32_t mergedEnd = std::max(
-                    merged.back().offset + merged.back().count,
-                    freeBlock.offset + freeBlock.count);
-                merged.back().count = mergedEnd - merged.back().offset;
-            } else {
-                merged.push_back(freeBlock);
-            }
-        }
-        _impl->freeList.swap(merged);
+    if (alloc.heapIndex >= static_cast<uint32_t>(_impl->heaps.size())) {
+        return;
     }
+    auto &heap = _impl->heaps[alloc.heapIndex];
+    D3D12_CPU_DESCRIPTOR_HANDLE heapStart = heap.cpuStart;
+    uint64_t offsetBytes = reinterpret_cast<uint64_t>(alloc.cpuHandle) - heapStart.ptr;
+    uint32_t offset = static_cast<uint32_t>(offsetBytes / _impl->descriptorSize);
+
+    typename Impl::FreeBlock block;
+    block.heapIndex = alloc.heapIndex;
+    block.offset = offset;
+    block.count = alloc.numDescriptors;
+
+    // Keep the free list sorted by (heapIndex, offset) and merge adjacent
+    // blocks in place. The previous implementation push_back'd the new block,
+    // std::sort'd the whole list, then rebuilt a merged vector every call,
+    // which allocated a temporary vector on each deallocate. lower_bound keeps
+    // the invariant O(log N) and lets us merge only with the immediate
+    // neighbours without a scratch vector.
+    auto less = [](const Impl::FreeBlock &lhs, const Impl::FreeBlock &rhs) {
+        return lhs.heapIndex < rhs.heapIndex ||
+               (lhs.heapIndex == rhs.heapIndex && lhs.offset < rhs.offset);
+    };
+    auto it = std::lower_bound(_impl->freeList.begin(), _impl->freeList.end(), block, less);
+
+    // Try to fold into the predecessor if it is adjacent.
+    if (it != _impl->freeList.begin()) {
+        auto prev = std::prev(it);
+        if (prev->heapIndex == block.heapIndex &&
+            prev->offset + prev->count >= block.offset) {
+            const uint32_t mergedEnd = std::max(
+                prev->offset + prev->count,
+                block.offset + block.count);
+            prev->count = mergedEnd - prev->offset;
+            // The new block was absorbed; check whether prev is now also
+            // adjacent to its successor and fold them as well.
+            if (it != _impl->freeList.end() &&
+                it->heapIndex == prev->heapIndex &&
+                prev->offset + prev->count >= it->offset) {
+                const uint32_t endAfter = std::max(
+                    prev->offset + prev->count,
+                    it->offset + it->count);
+                prev->count = endAfter - prev->offset;
+                _impl->freeList.erase(it);
+            }
+            return;
+        }
+    }
+
+    // Try to fold into the successor if it is adjacent.
+    if (it != _impl->freeList.end() &&
+        it->heapIndex == block.heapIndex &&
+        block.offset + block.count >= it->offset) {
+        const uint32_t mergedEnd = std::max(
+            block.offset + block.count,
+            it->offset + it->count);
+        it->offset = block.offset;
+        it->count = mergedEnd - block.offset;
+        return;
+    }
+
+    _impl->freeList.insert(it, block);
 }
 
 void D3D12DescriptorHeapPool::reset() {
@@ -294,6 +325,10 @@ void D3D12DescriptorHeapPool::reset() {
     _impl->hasAllocationRange = false;
     _impl->allocationRangeStart = 0;
     _impl->allocationRangeEnd = 0;
+
+    // Keep the per-frame high-water heaps for reuse. The caller only resets a
+    // frame-local pool after its fence has completed, so this cannot retain a
+    // table still consumed by the GPU.
 }
 
 void D3D12DescriptorHeapPool::beginFrameAllocationRange(uint32_t offset, uint32_t count) {

@@ -1638,7 +1638,8 @@ bool CCD3D12DescriptorSet::getDescriptorSemanticSignature(uint32_t index, uint32
 }
 
 void CCD3D12DescriptorSet::collectBoundD3D12Resources(
-    ccstd::vector<void *> &resources) const {
+    ccstd::vector<void *> &resources,
+    ccstd::vector<std::shared_ptr<void>> &bufferBackings) const {
     for (const auto &boundBuffer : _buffers) {
         if (!boundBuffer.ptr) {
             continue;
@@ -1646,6 +1647,9 @@ void CCD3D12DescriptorSet::collectBoundD3D12Resources(
         auto *buffer = static_cast<CCD3D12Buffer *>(boundBuffer.ptr);
         if (void *resource = buffer->getD3D12ResourceHandle()) {
             resources.push_back(resource);
+            if (auto backing = buffer->getD3D12BufferBacking()) {
+                bufferBackings.push_back(std::move(backing));
+            }
         }
     }
     for (const auto &boundTexture : _textures) {
@@ -1669,6 +1673,9 @@ uint64_t CCD3D12DescriptorSet::getSamplerSignature() const {
 }
 
 void CCD3D12DescriptorSet::restoreDynamicOffsetDescriptors() {
+    if (auto *device = CCD3D12Device::getInstance()) {
+        device->recordDynamicDescriptorRewrite(true);
+    }
     if (!_impl || _impl->appliedDynamicOffsetCount == 0) {
         return;
     }
@@ -1681,6 +1688,9 @@ void CCD3D12DescriptorSet::restoreDynamicOffsetDescriptors() {
 }
 
 void CCD3D12DescriptorSet::applyDynamicOffsets(uint32_t dynamicOffsetCount, const uint32_t *dynamicOffsets) {
+    if (auto *device = CCD3D12Device::getInstance()) {
+        device->recordDynamicDescriptorRewrite(false);
+    }
     if (!_impl || !_layout || dynamicOffsetCount == 0 || !dynamicOffsets) {
         return;
     }

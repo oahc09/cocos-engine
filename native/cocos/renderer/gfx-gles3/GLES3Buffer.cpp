@@ -84,7 +84,7 @@ void GLES3Buffer::doDestroy() {
     }
 }
 
-void GLES3Buffer::doResize(uint32_t size, uint32_t count) {
+bool GLES3Buffer::doResize(uint32_t size, uint32_t count) {
     GLES3Device::getInstance()->getMemoryStatus().bufferSize -= _size;
     CC_PROFILE_MEMORY_DEC(Buffer, _size);
 
@@ -94,6 +94,7 @@ void GLES3Buffer::doResize(uint32_t size, uint32_t count) {
 
     GLES3Device::getInstance()->getMemoryStatus().bufferSize += size;
     CC_PROFILE_MEMORY_INC(Buffer, size);
+    return true;
 }
 
 void GLES3Buffer::update(const void *buffer, uint32_t size) {

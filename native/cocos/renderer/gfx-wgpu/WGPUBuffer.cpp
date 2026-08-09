@@ -99,10 +99,10 @@ void CCWGPUBuffer::doDestroy() {
     _internalChanged = true;
 }
 
-void CCWGPUBuffer::doResize(uint32_t size, uint32_t count) {
+bool CCWGPUBuffer::doResize(uint32_t size, uint32_t count) {
     if (_isBufferView) {
         printf("Resize is not support on buffer view!");
-        return;
+        return false;
     }
     if (_gpuBufferObject->wgpuBuffer) {
         CCWGPUDevice::getInstance()->moveToTrash(_gpuBufferObject->wgpuBuffer);
@@ -128,6 +128,7 @@ void CCWGPUBuffer::doResize(uint32_t size, uint32_t count) {
     CCWGPUDevice::getInstance()->getMemoryStatus().bufferSize += _size;
 
     _internalChanged = true;
+    return true;
 } // namespace gfx
 
 void bufferUpdateCallback(WGPUBufferMapAsyncStatus status, void *userdata) {

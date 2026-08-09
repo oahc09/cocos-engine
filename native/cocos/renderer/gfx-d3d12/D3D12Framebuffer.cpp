@@ -297,9 +297,12 @@ void CCD3D12Framebuffer::doInit(const FramebufferInfo &info) {
     _impl->deviceEpoch = device->getDeviceEpoch();
 
     const uint32_t colorCount = static_cast<uint32_t>(_colorTextures.size());
-    if (colorCount > D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT) {
-        CC_LOG_ERROR("D3D12Framebuffer: %u color attachments exceed the D3D12 limit of %u.",
-                     colorCount, D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT);
+    // MAX_ATTACHMENTS is the engine-wide bound used by CommandBuffer's stack
+    // arrays. D3D12 supports more RTVs, but accepting them here would make
+    // beginRenderPass access those fixed-size arrays out of bounds.
+    if (colorCount > MAX_ATTACHMENTS) {
+        CC_LOG_ERROR("D3D12Framebuffer: %u color attachments exceed the engine limit of %u.",
+                     colorCount, MAX_ATTACHMENTS);
         return;
     }
     const auto *renderPassColors =

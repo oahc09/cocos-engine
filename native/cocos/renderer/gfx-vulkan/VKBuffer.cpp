@@ -76,7 +76,7 @@ void CCVKBuffer::doDestroy() {
     _gpuBuffer = nullptr;
 }
 
-void CCVKBuffer::doResize(uint32_t size, uint32_t count) {
+bool CCVKBuffer::doResize(uint32_t size, uint32_t count) {
     createBuffer(size, count);
 
     // Hold reference to keep the old bufferView alive during DescriptorHub::update and IAHub::update.
@@ -84,6 +84,7 @@ void CCVKBuffer::doResize(uint32_t size, uint32_t count) {
     createBufferView(size);
     CCVKDevice::getInstance()->gpuDescriptorHub()->update(oldBufferView, _gpuBufferView);
     CCVKDevice::getInstance()->gpuIAHub()->update(oldBufferView, _gpuBufferView);
+    return true;
 }
 
 void CCVKBuffer::update(const void *buffer, uint32_t size) {

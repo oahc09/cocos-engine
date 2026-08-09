@@ -105,7 +105,8 @@ public:
     uint32_t getDescriptorSemanticCount() const;
     bool getDescriptorSemanticSignature(uint32_t index, uint32_t &kind,
                                         uint64_t &value0, uint64_t &value1) const;
-    void collectBoundD3D12Resources(ccstd::vector<void *> &resources) const;
+    void collectBoundD3D12Resources(ccstd::vector<void *> &resources,
+                                  ccstd::vector<std::shared_ptr<void>> &bufferBackings) const;
     const ccstd::vector<uint32_t> &getSamplerTableKey() const;
     uint64_t getSamplerSignature() const;
     void applyDynamicOffsets(uint32_t dynamicOffsetCount, const uint32_t *dynamicOffsets);

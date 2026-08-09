@@ -32,6 +32,8 @@
 namespace cc {
 namespace gfx {
 
+struct D3D12BufferBacking;
+
 class CCD3D12CommandBuffer;
 
 class CC_DLL CCD3D12Buffer final : public Buffer {
@@ -62,14 +64,20 @@ public:
     void setCurrentState(D3D12_RESOURCE_STATES state);
     void flushPendingUpdate(CCD3D12CommandBuffer *commandBuffer);
 
+    // Returns the immutable buffer backing owner. Holding the shared_ptr
+    // keeps both the D3D12MA allocation and the D3D12 resource alive even
+    // after the parent buffer is destroyed/resized.
+    std::shared_ptr<D3D12BufferBacking> getD3D12BufferBacking() const;
+
 protected:
     void doInit(const BufferInfo &info) override;
     void doInit(const BufferViewInfo &info) override;
-    void doResize(uint32_t size, uint32_t count) override;
+    bool doResize(uint32_t size, uint32_t count) override;
     void doDestroy() override;
 
 private:
     bool createResource(uint32_t size);
+    bool ensureUploadResource(uint32_t frameIndex);
     bool isTransientUniformEligible() const;
     bool canUseTransientUniformUpload() const;
 

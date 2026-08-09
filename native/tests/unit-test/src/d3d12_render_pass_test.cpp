@@ -32,9 +32,65 @@
     #include "cocos/renderer/gfx-d3d12/D3D12Swapchain.h"
     #include "cocos/renderer/gfx-d3d12/D3D12Device.h"
     #include "cocos/renderer/gfx-d3d12/D3D12Texture.h"
+    #include "cocos/renderer/gfx-validator/BufferValidator.h"
+    #include "cocos/renderer/gfx-validator/ValidationUtils.h"
 
 namespace cc {
 namespace gfx {
+
+namespace {
+
+class ResizeResultBuffer final : public Buffer {
+public:
+    void update(const void * /*buffer*/, uint32_t /*size*/) override {}
+    void setResizeResult(bool result) { _resizeResult = result; }
+
+protected:
+    void doInit(const BufferInfo & /*info*/) override {}
+    void doInit(const BufferViewInfo & /*info*/) override {}
+    bool doResize(uint32_t /*size*/, uint32_t /*count*/) override { return _resizeResult; }
+    void doDestroy() override {}
+
+private:
+    bool _resizeResult{true};
+};
+
+} // namespace
+
+TEST(GFXBufferResizeTest, PreservesLogicalSizeWhenBackendResizeFails) {
+    ResizeResultBuffer buffer;
+    BufferInfo info{};
+    info.usage = BufferUsageBit::VERTEX;
+    info.memUsage = MemoryUsageBit::DEVICE;
+    info.size = 64;
+    info.stride = 4;
+    buffer.initialize(info);
+
+    buffer.setResizeResult(false);
+    EXPECT_FALSE(buffer.resize(128));
+
+    EXPECT_EQ(buffer.getSize(), 64U);
+    EXPECT_EQ(buffer.getCount(), 16U);
+}
+
+TEST(GFXBufferResizeTest, ValidatorPropagatesBackendResizeFailure) {
+    auto *actor = ccnew ResizeResultBuffer;
+    BufferValidator buffer(actor);
+    DeviceResourceTracker<Buffer>::push(static_cast<Buffer *>(&buffer));
+    BufferInfo info{};
+    info.usage = BufferUsageBit::VERTEX;
+    info.memUsage = MemoryUsageBit::DEVICE;
+    info.size = 64;
+    info.stride = 4;
+    buffer.initialize(info);
+
+    actor->setResizeResult(false);
+    EXPECT_FALSE(buffer.resize(128));
+    EXPECT_EQ(buffer.getSize(), 64U);
+    EXPECT_EQ(actor->getSize(), 64U);
+
+    buffer.destroy();
+}
 
 TEST(D3D12ResourceStateTest, TracksSparseSubresourcesAndCollapsesUniformState) {
     D3D12ResourceState states(4, D3D12_RESOURCE_STATE_COMMON);
@@ -1275,14 +1331,16 @@ TEST(D3D12DescriptorSetTest, TextureResizeRefreshesSrvDescriptor) {
     descriptorSet->update();
     const uint64_t oldVersion = descriptorSet->getVersion();
     ccstd::vector<void *> oldResources;
-    descriptorSet->collectBoundD3D12Resources(oldResources);
+    ccstd::vector<std::shared_ptr<void>> oldBufferBackings;
+    descriptorSet->collectBoundD3D12Resources(oldResources, oldBufferBackings);
     ASSERT_EQ(oldResources.size(), 1U);
 
     texture->resize(16, 16);
     descriptorSet->update();
 
     ccstd::vector<void *> newResources;
-    descriptorSet->collectBoundD3D12Resources(newResources);
+    ccstd::vector<std::shared_ptr<void>> newBufferBackings;
+    descriptorSet->collectBoundD3D12Resources(newResources, newBufferBackings);
     ASSERT_EQ(newResources.size(), 1U);
     EXPECT_NE(newResources[0], oldResources[0]);
     EXPECT_GT(descriptorSet->getVersion(), oldVersion);

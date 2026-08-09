@@ -23,6 +23,7 @@
 ****************************************************************************/
 
 #include "D3D12ResourceState.h"
+#include "D3D12MemAlloc.h"
 
 #include <algorithm>
 
@@ -83,6 +84,17 @@ void D3D12ResourceState::setAll(D3D12_RESOURCE_STATES state) {
     _uniformState = state;
     _overrides.clear();
 }
+
+// Defined out-of-line so the compiler has D3D12MA::Allocation as a complete
+// type (from D3D12MemAlloc.h) when generating the ComPtr destructor that
+// calls Release(). Members are destroyed in reverse declaration order:
+// resource first, then d3d12maAllocation.
+D3D12ResourceBacking::~D3D12ResourceBacking() = default;
+
+// Buffer backing destructor — same principle: defined out-of-line where
+// D3D12MA::Allocation is a complete type. Reverse declaration order
+// guarantees uploadResources → resource → uploadAllocations → d3d12maAllocation.
+D3D12BufferBacking::~D3D12BufferBacking() = default;
 
 uint32_t D3D12ResourceBacking::subresourceCount() const {
     return std::max(mipLevels, 1U) * std::max(arraySize, 1U) * std::max(planeCount, 1U);

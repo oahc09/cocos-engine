@@ -47,7 +47,7 @@ protected:
     void doInit(const BufferInfo &info) override;
     void doInit(const BufferViewInfo &info) override;
     void doDestroy() override;
-    void doResize(uint32_t size, uint32_t count) override;
+    bool doResize(uint32_t size, uint32_t count) override;
 
     GLES2GPUBuffer *_gpuBuffer = nullptr;
     GLES2GPUBufferView *_gpuBufferView = nullptr;

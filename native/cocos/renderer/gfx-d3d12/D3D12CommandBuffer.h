@@ -138,6 +138,7 @@ private:
     void applyDynamicPipelineState();
     void retainDescriptorSetResources(class CCD3D12DescriptorSet *descriptorSet);
     void retainRecordingResource(ID3D12Resource *resource);
+    void retainRecordingResource(ID3D12Resource *resource, std::shared_ptr<void> backing);
     void retainRecordingDeviceObject(ID3D12DeviceChild *object);
     void transitionColorAttachment(uint32_t attachment, D3D12_RESOURCE_STATES state);
     void bindSubpassRenderTargets(uint32_t subpass);

@@ -28,6 +28,7 @@
     #define NOMINMAX
 #endif
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <unordered_map>
@@ -35,6 +36,8 @@
 
 #include <d3d12.h>
 #include <wrl/client.h>
+
+#include "D3D12MemAlloc.h"
 
 namespace cc {
 namespace gfx {
@@ -58,6 +61,11 @@ private:
 };
 
 struct D3D12ResourceBacking final {
+    // Unified backing owner: holds both the D3D12MA allocation and the D3D12
+    // resource. C++ destroys members in reverse declaration order, so
+    // resource is destroyed FIRST (released), then d3d12maAllocation SECOND
+    // — the correct D3D12MA teardown sequence.
+    Microsoft::WRL::ComPtr<D3D12MA::Allocation> d3d12maAllocation;
     Microsoft::WRL::ComPtr<ID3D12Resource> resource;
     D3D12ResourceState states;
     uint64_t deviceEpoch{0};
@@ -67,11 +75,39 @@ struct D3D12ResourceBacking final {
     uint32_t planeCount{1};
     bool valid{true};
 
+    ~D3D12ResourceBacking();
+
     uint32_t subresourceCount() const;
     uint32_t subresourceIndex(uint32_t mip, uint32_t arraySlice, uint32_t plane) const;
 };
 
 using D3D12ResourceBackingPtr = std::shared_ptr<D3D12ResourceBacking>;
+
+// Buffer frame-slot count. Must match D3D12_MAX_FRAMES_IN_FLIGHT (D3D12Device.h).
+// Duplicated here to avoid a circular include dependency.
+inline constexpr uint32_t kD3D12BufferFrameSlotCount = 2;
+
+struct D3D12BufferBacking final {
+    // Immutable buffer backing owner: holds ALL D3D12MA allocations and D3D12
+    // resources for one buffer generation. C++ destroys members in reverse
+    // declaration order, so resources are released FIRST, allocations SECOND
+    // — the correct D3D12MA teardown sequence.
+    //
+    // Declaration order (destruction is reverse):
+    //   1. d3d12maAllocation   → destroyed LAST
+    //   2. uploadAllocations[] → destroyed SECOND-TO-LAST
+    //   3. resource            → destroyed THIRD
+    //   4. uploadResources[]   → destroyed FIRST
+    // This guarantees every resource is released before its allocation.
+    Microsoft::WRL::ComPtr<D3D12MA::Allocation> d3d12maAllocation;
+    std::array<Microsoft::WRL::ComPtr<D3D12MA::Allocation>, kD3D12BufferFrameSlotCount> uploadAllocations;
+    Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+    std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, kD3D12BufferFrameSlotCount> uploadResources;
+
+    ~D3D12BufferBacking();
+};
+
+using D3D12BufferBackingPtr = std::shared_ptr<D3D12BufferBacking>;
 
 struct D3D12ResourceStateSnapshot final {
     D3D12ResourceBackingPtr backing;

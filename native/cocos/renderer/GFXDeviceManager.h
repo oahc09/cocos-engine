@@ -84,6 +84,8 @@ public:
         if (Device::instance) return Device::instance;
 
         Device *device = nullptr;
+        const char *gfxApiEnv = std::getenv("CC_GFX_API");
+        CC_LOG_INFO("Env.CC_GFX_API:%s", gfxApiEnv ? gfxApiEnv : "");
 
 #ifdef CC_USE_D3D12
         if (isRequestedGFXAPI("D3D12")) {

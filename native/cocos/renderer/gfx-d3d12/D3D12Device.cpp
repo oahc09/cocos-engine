@@ -31,6 +31,7 @@
 #include "D3D12DescriptorSetLayout.h"
 #include "D3D12Framebuffer.h"
 #include "D3D12InputAssembler.h"
+#include "D3D12MemAlloc.h"
 #include "D3D12PipelineLayout.h"
 #include "D3D12PipelineState.h"
 #include "D3D12QueryPool.h"
@@ -66,11 +67,21 @@ CCD3D12Device *CCD3D12Device::instance = nullptr;
 D3D12TransientUniformFrameState CCD3D12Device::activeTransientUniformFrameState{};
 
 namespace {
-constexpr uint32_t TRANSIENT_UNIFORM_SLOT_COUNT = 4096U;
+// 4096 slots/frame reserved a 1MB UPLOAD arena per frame even when only a
+// few hundred dynamic uniform bindings were live. 64 still covers the
+// common per-frame demand, and overflow transparently falls back to
+// allocateUploadBuffer rather than failing the binding.
+constexpr uint32_t TRANSIENT_UNIFORM_SLOT_COUNT = 64U;
 std::atomic<uint64_t> NEXT_D3D12_DEVICE_EPOCH{1};
 
 constexpr float D3D12_POC_CLEAR_COLOR[4] = {0.1F, 0.2F, 0.8F, 1.0F};
-constexpr uint32_t D3D12_GPU_DESCRIPTORS_PER_FRAME = 65536;
+// 65536 descriptors/frame reserved a 2MB shader-visible heap per frame even
+// when only a few thousand CBV/SRV/UAV slots were live. 512 cuts the primary
+// shader-visible heap commit to ~32KB per frame slot. Overflow heaps remain
+// local to their slot and are reused after that slot's fence completes.
+// Going below 512 caused excessive extra heap creation on this scene,
+// increasing memory instead.
+constexpr uint32_t D3D12_GPU_DESCRIPTORS_PER_FRAME = 512;
 
 bool isEnvironmentFlagEnabled(const char *name) {
     char value[16]{};
@@ -148,19 +159,33 @@ struct CCD3D12Device::Impl {
         std::unique_ptr<D3D12DescriptorHeapPool> samplerDescriptorHeapPool;
         ccstd::vector<UploadPage> uploadPages;
         UploadPage transientUniformSlotArena;
+        uint32_t nextTransientUniformSlotIndex{0};
         Microsoft::WRL::ComPtr<ID3D12Fence> fence;
         uint64_t fenceValue{0};
     };
     std::array<FrameResources, D3D12_MAX_FRAMES_IN_FLIGHT> frameResources;
     uint32_t activeFrameResource{D3D12_MAX_FRAMES_IN_FLIGHT - 1U};
-    uint32_t nextTransientUniformSlotIndex{0};
 
-    // GPU-visible descriptor heap pools for shader access.
-    std::unique_ptr<D3D12DescriptorHeapPool> gpuDescriptorHeapPool;
+    // GPU-visible descriptor heaps are frame-local. Overflow heaps can be
+    // recycled when that frame slot's fence completes without invalidating a
+    // descriptor table still referenced by another frame.
+    std::array<std::unique_ptr<D3D12DescriptorHeapPool>, D3D12_MAX_FRAMES_IN_FLIGHT> gpuDescriptorHeapPools;
 
     // Persistent CPU-only staging pools. Unlike GPU pools, these are not reset per frame.
     std::unique_ptr<D3D12DescriptorHeapPool> cpuDescriptorHeapPool;
     std::unique_ptr<D3D12DescriptorHeapPool> cpuSamplerDescriptorHeapPool;
+    bool perfCountersEnabled{false};
+    std::atomic<uint64_t> descriptorFlushes{0};
+    std::atomic<uint64_t> descriptorCopies{0};
+    std::atomic<uint64_t> copiedDescriptors{0};
+    std::atomic<uint64_t> dynamicDescriptorRewrites{0};
+    std::atomic<uint64_t> dynamicDescriptorRestores{0};
+    std::atomic<uint64_t> setDescriptorHeaps{0};
+    std::atomic<uint64_t> rootDescriptorTableBinds{0};
+    std::atomic<uint64_t> descriptorHeapCreates{0};
+    std::atomic<uint64_t> descriptorHeapOverflows{0};
+    std::atomic<uint64_t> transientUniformSlotAllocations{0};
+    std::atomic<uint64_t> transientUniformSlotFallbacks{0};
     // Non-owning actors: Validator owns backend resources with raw pointers,
     // so intrusive ownership here would delete an actor when the queue drains.
     // CCD3D12Buffer::doDestroy unregisters itself before releasing resources.
@@ -212,6 +237,27 @@ struct CCD3D12Device::Impl {
     std::mutex shaderCacheMutex;
 #endif
 
+    // Long-lived shared UPLOAD heap for small HOST buffers (vertex/index).
+    // Each small buffer sub-allocates from this heap instead of creating a
+    // 64KB-minimum committed resource, eliminating per-buffer alignment waste.
+    struct SharedUploadPool {
+        Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+        uint8_t *mappedData{nullptr};
+        uint64_t capacity{0};
+        uint64_t used{0};
+        bool initialized{false};
+    };
+    SharedUploadPool sharedUploadPool;
+
+    // The DXGI adapter selected at init time. Kept alive so D3D12MA can query
+    // the video-memory budget (Allocator::GetBudget uses the adapter).
+    Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+    // Placed-resource memory allocator (D3D12MemoryAllocator v3.2.0, MIT).
+    // Created in doInit after the D3D12 device, released in doDestroy before
+    // the device. Null if creation failed; callers fall back to committed
+    // resources in that case.
+    Microsoft::WRL::ComPtr<D3D12MA::Allocator> memoryAllocator;
+
 };
 
 CCD3D12Device *CCD3D12Device::getInstance() {
@@ -237,26 +283,36 @@ CCD3D12Device::~CCD3D12Device() {
 bool CCD3D12Device::doInit(const DeviceInfo &info) {
     (void)info;
 
+    _impl->perfCountersEnabled = isEnvironmentFlagEnabled("CC_D3D12_PERF_COUNTERS");
     if (!initializeD3D12Context()) {
         CC_LOG_ERROR("Failed to initialize D3D12 context.");
         return false;
     }
     initializeShaderCacheSession();
 
-    _impl->gpuDescriptorHeapPool = std::make_unique<D3D12DescriptorHeapPool>();
-    _impl->gpuDescriptorHeapPool->initialize(
-        D3D12DescriptorHeapPool::HeapType::CBV_SRV_UAV,
-        D3D12_GPU_DESCRIPTORS_PER_FRAME * D3D12_MAX_FRAMES_IN_FLIGHT, true);
+    for (auto &gpuDescriptorHeapPool : _impl->gpuDescriptorHeapPools) {
+        gpuDescriptorHeapPool = std::make_unique<D3D12DescriptorHeapPool>();
+        gpuDescriptorHeapPool->initialize(
+            D3D12DescriptorHeapPool::HeapType::CBV_SRV_UAV,
+            D3D12_GPU_DESCRIPTORS_PER_FRAME, true);
+    }
 
     for (auto &frameResources : _impl->frameResources) {
         frameResources.samplerDescriptorHeapPool = std::make_unique<D3D12DescriptorHeapPool>();
+        // Sampler tables are commonly shared across many draws. Keep a full
+        // D3D12 sampler heap per frame slot so high sampler-count materials do
+        // not turn into hundreds of small heap objects.
         frameResources.samplerDescriptorHeapPool->initialize(
             D3D12DescriptorHeapPool::HeapType::SAMPLER, 2048, true);
     }
 
     _impl->cpuDescriptorHeapPool = std::make_unique<D3D12DescriptorHeapPool>();
+    // CPU staging allocations live for the lifetime of DescriptorSet objects.
+    // A small heap causes severe descriptor-object fragmentation as content
+    // loads, so use a moderate 2048-descriptor granularity instead of one
+    // 64-descriptor heap per few sets.
     _impl->cpuDescriptorHeapPool->initialize(
-        D3D12DescriptorHeapPool::HeapType::CBV_SRV_UAV, 16384, false);
+        D3D12DescriptorHeapPool::HeapType::CBV_SRV_UAV, 2048, false);
 
     _impl->cpuSamplerDescriptorHeapPool = std::make_unique<D3D12DescriptorHeapPool>();
     _impl->cpuSamplerDescriptorHeapPool->initialize(
@@ -268,7 +324,7 @@ bool CCD3D12Device::doInit(const DeviceInfo &info) {
     queueInfo.type = QueueType::GRAPHICS;
     _queue = createQueue(queueInfo);
 
-    QueryPoolInfo queryPoolInfo{QueryType::OCCLUSION, DEFAULT_MAX_QUERY_OBJECTS, true};
+    QueryPoolInfo queryPoolInfo{QueryType::OCCLUSION, 64, true};
     _queryPool = createQueryPool(queryPoolInfo);
 
     CommandBufferInfo cmdBuffInfo;
@@ -404,9 +460,11 @@ void CCD3D12Device::doDestroy() {
             frameResources.samplerDescriptorHeapPool.reset();
         }
     }
-    if (_impl->gpuDescriptorHeapPool) {
-        _impl->gpuDescriptorHeapPool->shutdown();
-        _impl->gpuDescriptorHeapPool.reset();
+    for (auto &gpuDescriptorHeapPool : _impl->gpuDescriptorHeapPools) {
+        if (gpuDescriptorHeapPool) {
+            gpuDescriptorHeapPool->shutdown();
+            gpuDescriptorHeapPool.reset();
+        }
     }
 
     if (_impl->fenceEvent) {
@@ -423,8 +481,41 @@ void CCD3D12Device::doDestroy() {
         _impl->shaderCacheSession.Reset();
     }
 #endif
+    // Release the memory allocator before the device. All GPU resources are
+    // already destroyed at this point (GFX object lifetime ends before device
+    // destroy), so no allocation can outlive the allocator's heaps.
+    if (_impl->memoryAllocator) {
+        D3D12MA::Budget localBudget{};
+        D3D12MA::Budget nonLocalBudget{};
+        _impl->memoryAllocator->GetBudget(&localBudget, &nonLocalBudget);
+        const UINT totalAllocations = localBudget.Stats.AllocationCount +
+                                      nonLocalBudget.Stats.AllocationCount;
+        if (totalAllocations != 0) {
+            CC_LOG_ERROR("D3D12MA: %u allocations still outstanding at allocator teardown "
+                         "(Local=%u NonLocal=%u). Allocator intentionally leaked to prevent "
+                         "use-after-free when outstanding Allocation::Release() calls access "
+                         "the destroyed allocator heap.",
+                         totalAllocations,
+                         localBudget.Stats.AllocationCount,
+                         nonLocalBudget.Stats.AllocationCount);
+            // Do NOT destroy the allocator — outstanding allocations would
+            // access freed heap memory when they are eventually released.
+            _impl->memoryAllocator.Detach();
+        } else {
+            _impl->memoryAllocator.Reset();
+        }
+    }
+    _impl->adapter.Reset();
     _impl->d3dDevice.Reset();
     _impl->dxgiFactory.Reset();
+
+    if (_impl->sharedUploadPool.resource) {
+        _impl->sharedUploadPool.resource.Reset();
+        _impl->sharedUploadPool.mappedData = nullptr;
+        _impl->sharedUploadPool.capacity = 0;
+        _impl->sharedUploadPool.used = 0;
+        _impl->sharedUploadPool.initialized = false;
+    }
 }
 
 void CCD3D12Device::initializeShaderCacheSession() {
@@ -445,8 +536,15 @@ void CCD3D12Device::initializeShaderCacheSession() {
     desc.Identifier = D3D12_COCOS_DXBC_SHADER_CACHE_GUID;
     desc.Mode = D3D12_SHADER_CACHE_MODE_DISK;
     desc.Flags = static_cast<D3D12_SHADER_CACHE_FLAGS>(0);
-    desc.MaximumInMemoryCacheSizeBytes = 8U * 1024U * 1024U;
-    desc.MaximumInMemoryCacheEntries = 4096U;
+    // 8MB drove a large driver-side private-memory reservation even though the
+    // authoritative copy lives on disk (MaximumValueFileSizeBytes=256MB). After
+    // the startup shader-compile burst, DXBC lookups are rare, so a 512KB
+    // in-memory cache is enough to hot-hit the working set while letting the
+    // driver release the remaining resident cache memory. The disk cache
+    // remains authoritative so cache misses fall through to disk, never to
+    // recompilation.
+    desc.MaximumInMemoryCacheSizeBytes = 128U * 1024U;
+    desc.MaximumInMemoryCacheEntries = 128U;
     desc.MaximumValueFileSizeBytes = 256U * 1024U * 1024U;
     desc.Version = D3D12_COCOS_DXBC_SHADER_CACHE_VERSION;
 
@@ -566,19 +664,20 @@ void CCD3D12Device::acquire(Swapchain *const *swapchains, uint32_t count) {
         }
     }
 
-    if (_impl->gpuDescriptorHeapPool) {
-        _impl->gpuDescriptorHeapPool->beginFrameAllocationRange(
-            nextFrameResource * D3D12_GPU_DESCRIPTORS_PER_FRAME,
-            D3D12_GPU_DESCRIPTORS_PER_FRAME);
+    auto &gpuDescriptorHeapPool = _impl->gpuDescriptorHeapPools[nextFrameResource];
+    if (gpuDescriptorHeapPool) {
+        gpuDescriptorHeapPool->reset();
     }
     if (frameResources.samplerDescriptorHeapPool) {
         frameResources.samplerDescriptorHeapPool->reset();
     }
-    if (!frameResources.uploadPages.empty()) {
-        for (auto &page : frameResources.uploadPages) {
-            page.offset = 0;
-        }
+    for (auto &page : frameResources.uploadPages) {
+        page.offset = 0;
     }
+    // This frame resource is fence-safe to reuse. Slot ownership is therefore
+    // frame-local; retaining the previous cursor permanently disables the
+    // arena after the first TRANSIENT_UNIFORM_SLOT_COUNT distinct buffers.
+    frameResources.nextTransientUniformSlotIndex = 0;
     frameResources.fence.Reset();
     frameResources.fenceValue = 0;
     _impl->activeFrameResource = nextFrameResource;
@@ -656,12 +755,13 @@ D3D12UploadAllocation CCD3D12Device::getOrCreateTransientUniformSlot(uint32_t &s
     }
 
     constexpr uint32_t INVALID_SLOT = std::numeric_limits<uint32_t>::max();
+    auto &frameResources = _impl->frameResources[_impl->activeFrameResource];
     if (slotIndex == INVALID_SLOT &&
-        _impl->nextTransientUniformSlotIndex >= TRANSIENT_UNIFORM_SLOT_COUNT) {
+        frameResources.nextTransientUniformSlotIndex >= TRANSIENT_UNIFORM_SLOT_COUNT) {
         return allocation;
     }
 
-    auto &arena = _impl->frameResources[_impl->activeFrameResource].transientUniformSlotArena;
+    auto &arena = frameResources.transientUniformSlotArena;
     if (!arena.resource) {
         D3D12_HEAP_PROPERTIES heapProperties{};
         heapProperties.Type = D3D12_HEAP_TYPE_UPLOAD;
@@ -702,7 +802,7 @@ D3D12UploadAllocation CCD3D12Device::getOrCreateTransientUniformSlot(uint32_t &s
     }
 
     if (slotIndex == INVALID_SLOT) {
-        slotIndex = _impl->nextTransientUniformSlotIndex++;
+        slotIndex = frameResources.nextTransientUniformSlotIndex++;
     }
     if (slotIndex >= TRANSIENT_UNIFORM_SLOT_COUNT) {
         return allocation;
@@ -722,6 +822,7 @@ D3D12UploadAllocation CCD3D12Device::getOrCreateTransientUniformSlot(uint32_t &s
     allocation.gpuAddress = arena.resource->GetGPUVirtualAddress() + offset;
     allocation.size = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
     allocation.isValid = true;
+    recordTransientUniformSlotAllocation();
     return allocation;
 }
 
@@ -736,7 +837,12 @@ D3D12UploadAllocation CCD3D12Device::allocateUploadBuffer(uint64_t size, uint64_
         return ((value + align - 1) / align) * align;
     };
 
-    constexpr uint64_t DEFAULT_UPLOAD_PAGE_SIZE = 1024ULL * 1024ULL;
+    // 1MB pages were retained per frame even when only a few KB of uploads
+    // happened. 256KB halves the steady-state UPLOAD commit while still serving
+    // typical per-frame constant-buffer / small texture copies; larger uploads
+    // transparently create a right-sized committed page via the std::max below.
+    // Pages are reused after their owning frame fence completes.
+    constexpr uint64_t DEFAULT_UPLOAD_PAGE_SIZE = 256ULL * 1024ULL;
     const uint64_t requiredSize = alignUp(size, alignment);
 
     auto &uploadPages = _impl->frameResources[_impl->activeFrameResource].uploadPages;
@@ -802,6 +908,80 @@ D3D12UploadAllocation CCD3D12Device::allocateUploadBuffer(uint64_t size, uint64_
 
     uploadPages.emplace_back(std::move(page));
     return allocation;
+}
+
+D3D12SharedUploadAllocation CCD3D12Device::allocateSharedUploadOffset(uint64_t size, uint64_t alignment) {
+    D3D12SharedUploadAllocation alloc;
+    if (!_impl || !_impl->d3dDevice || size == 0) {
+        return alloc;
+    }
+
+    if (alignment == 0) {
+        alignment = 1;
+    }
+
+    auto &pool = _impl->sharedUploadPool;
+    if (!pool.initialized) {
+        // D3D12 committed resources have a 64KB minimum physical allocation
+        // regardless of the requested Width, so a 32KB pool and a 64KB pool
+        // cost the same physical memory. Using 64KB doubles the sub-allocation
+        // headroom at zero cost, allowing more small HOST buffers (including
+        // small UNIFORM HOST buffers up to the size threshold in D3D12Buffer)
+        // to share one committed resource instead of each paying the 64KB
+        // minimum alignment waste.
+        constexpr uint64_t SHARED_UPLOAD_POOL_SIZE = 64ULL * 1024ULL;
+
+        D3D12_HEAP_PROPERTIES heapProperties{};
+        heapProperties.Type = D3D12_HEAP_TYPE_UPLOAD;
+        heapProperties.CreationNodeMask = 1;
+        heapProperties.VisibleNodeMask = 1;
+
+        D3D12_RESOURCE_DESC resourceDesc{};
+        resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        resourceDesc.Width = SHARED_UPLOAD_POOL_SIZE;
+        resourceDesc.Height = 1;
+        resourceDesc.DepthOrArraySize = 1;
+        resourceDesc.MipLevels = 1;
+        resourceDesc.Format = DXGI_FORMAT_UNKNOWN;
+        resourceDesc.SampleDesc.Count = 1;
+        resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+        HRESULT hr = _impl->d3dDevice->CreateCommittedResource(
+            &heapProperties, D3D12_HEAP_FLAG_NONE, &resourceDesc,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+            IID_PPV_ARGS(&pool.resource));
+        if (FAILED(hr)) {
+            CC_LOG_ERROR("SharedUploadPool CreateCommittedResource failed. HRESULT=0x%08x",
+                         static_cast<unsigned>(hr));
+            return alloc;
+        }
+
+        D3D12_RANGE readRange{};
+        void *mapped = nullptr;
+        hr = pool.resource->Map(0, &readRange, &mapped);
+        if (FAILED(hr) || !mapped) {
+            CC_LOG_ERROR("SharedUploadPool Map failed. HRESULT=0x%08x",
+                         static_cast<unsigned>(hr));
+            pool.resource.Reset();
+            return alloc;
+        }
+        pool.mappedData = static_cast<uint8_t *>(mapped);
+        pool.capacity = SHARED_UPLOAD_POOL_SIZE;
+        pool.used = 0;
+        pool.initialized = true;
+    }
+
+    const uint64_t alignedOffset = (pool.used + alignment - 1) & ~(alignment - 1);
+    if (alignedOffset + size > pool.capacity) {
+        return alloc; // Not enough space; caller falls back to committed resource
+    }
+    pool.used = alignedOffset + size;
+
+    alloc.resource = pool.resource.Get();
+    alloc.mappedData = pool.mappedData + alignedOffset;
+    alloc.offset = alignedOffset;
+    alloc.isValid = true;
+    return alloc;
 }
 
 void CCD3D12Device::enqueueBufferUpdate(CCD3D12Buffer *buffer) {
@@ -1050,6 +1230,20 @@ void CCD3D12Device::present() {
 
     // Transient descriptor/upload pages are reclaimed lazily in acquire()
     // after the queue fence proves the previous submission has completed.
+    if (_impl->perfCountersEnabled) {
+        CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] descriptor flush=%llu copy=%llu descriptors=%llu dynamicRewrite=%llu dynamicRestore=%llu setHeaps=%llu rootTable=%llu heapCreate=%llu overflow=%llu transientSlot=%llu transientFallback=%llu",
+                    static_cast<unsigned long long>(_impl->descriptorFlushes.exchange(0)),
+                    static_cast<unsigned long long>(_impl->descriptorCopies.exchange(0)),
+                    static_cast<unsigned long long>(_impl->copiedDescriptors.exchange(0)),
+                    static_cast<unsigned long long>(_impl->dynamicDescriptorRewrites.exchange(0)),
+                    static_cast<unsigned long long>(_impl->dynamicDescriptorRestores.exchange(0)),
+                    static_cast<unsigned long long>(_impl->setDescriptorHeaps.exchange(0)),
+                    static_cast<unsigned long long>(_impl->rootDescriptorTableBinds.exchange(0)),
+                    static_cast<unsigned long long>(_impl->descriptorHeapCreates.exchange(0)),
+                    static_cast<unsigned long long>(_impl->descriptorHeapOverflows.exchange(0)),
+                    static_cast<unsigned long long>(_impl->transientUniformSlotAllocations.exchange(0)),
+                    static_cast<unsigned long long>(_impl->transientUniformSlotFallbacks.exchange(0)));
+    }
 }
 
 CommandBuffer *CCD3D12Device::createCommandBuffer(const CommandBufferInfo &info, bool hasAgent) {
@@ -1840,6 +2034,24 @@ void CCD3D12Device::initCapabilities() {
 }
 
 bool CCD3D12Device::initializeD3D12Context() {
+    // Unified rollback for partial initialization failures. Resets every
+    // D3D12/adapter/factory resource that this function may have created so
+    // that a failed doInit() does not leak GPU handles.
+    auto cleanupContext = [this]() {
+        if (_impl->fenceEvent) {
+            CloseHandle(_impl->fenceEvent);
+            _impl->fenceEvent = nullptr;
+        }
+        _impl->frameFence.Reset();
+        _impl->commandList.Reset();
+        _impl->commandAllocator.Reset();
+        _impl->graphicsQueue.Reset();
+        _impl->memoryAllocator.Reset();
+        _impl->adapter.Reset();
+        _impl->d3dDevice.Reset();
+        _impl->dxgiFactory.Reset();
+    };
+
     UINT dxgiFactoryFlags = 0;
 
     // SDK Layers validate every D3D12 call and are prohibitively expensive in
@@ -1861,6 +2073,7 @@ bool CCD3D12Device::initializeD3D12Context() {
     HRESULT hr = CreateDXGIFactory2(dxgiFactoryFlags, IID_PPV_ARGS(&_impl->dxgiFactory));
     if (FAILED(hr)) {
         CC_LOG_ERROR("CreateDXGIFactory2 failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+        cleanupContext();
         return false;
     }
 
@@ -1930,6 +2143,8 @@ bool CCD3D12Device::initializeD3D12Context() {
         if (bestAdapter) {
             hr = D3D12CreateDevice(bestAdapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&_impl->d3dDevice));
             if (SUCCEEDED(hr)) {
+                // Keep the adapter alive for D3D12MA budget queries.
+                _impl->adapter = bestAdapter;
                 char name[128] = {};
                 wcstombs(name, bestDesc.Description, sizeof(name) - 1);
                 CC_LOG_INFO("D3D12: selected adapter '%s' (VRAM=%llu MB, VendorID=0x%04x)",
@@ -1941,10 +2156,25 @@ bool CCD3D12Device::initializeD3D12Context() {
     }
 
     if (!_impl->d3dDevice) {
-        CC_LOG_WARNING("No adapter worked, trying WARP (default adapter)...");
-        hr = D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&_impl->d3dDevice));
-        if (FAILED(hr)) {
-            CC_LOG_ERROR("D3D12CreateDevice failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+        CC_LOG_WARNING("No hardware adapter worked, trying WARP software adapter...");
+        Microsoft::WRL::ComPtr<IDXGIFactory4> factory4;
+        hr = _impl->dxgiFactory.As(&factory4);
+        if (SUCCEEDED(hr)) {
+            Microsoft::WRL::ComPtr<IDXGIAdapter1> warpAdapter;
+            hr = factory4->EnumWarpAdapter(IID_PPV_ARGS(&warpAdapter));
+            if (SUCCEEDED(hr)) {
+                hr = D3D12CreateDevice(warpAdapter.Get(), D3D_FEATURE_LEVEL_11_0,
+                                       IID_PPV_ARGS(&_impl->d3dDevice));
+                if (SUCCEEDED(hr)) {
+                    _impl->adapter = warpAdapter;
+                    CC_LOG_INFO("D3D12: using WARP software adapter.");
+                }
+            }
+        }
+        if (!_impl->d3dDevice) {
+            CC_LOG_ERROR("D3D12CreateDevice failed for all adapters (including WARP). "
+                         "HRESULT=0x%08x", static_cast<unsigned>(hr));
+            cleanupContext();
             return false;
         }
     }
@@ -1973,40 +2203,73 @@ bool CCD3D12Device::initializeD3D12Context() {
     hr = _impl->d3dDevice->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&_impl->graphicsQueue));
     if (FAILED(hr)) {
         CC_LOG_ERROR("CreateCommandQueue failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+        cleanupContext();
         return false;
     }
 
     hr = _impl->d3dDevice->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&_impl->commandAllocator));
     if (FAILED(hr)) {
         CC_LOG_ERROR("CreateCommandAllocator failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+        cleanupContext();
         return false;
     }
 
     hr = _impl->d3dDevice->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, _impl->commandAllocator.Get(), nullptr, IID_PPV_ARGS(&_impl->commandList));
     if (FAILED(hr)) {
         CC_LOG_ERROR("CreateCommandList failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+        cleanupContext();
         return false;
     }
 
     hr = _impl->commandList->Close();
     if (FAILED(hr)) {
         CC_LOG_ERROR("Initial command list close failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+        cleanupContext();
         return false;
     }
 
     hr = _impl->d3dDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_impl->frameFence));
     if (FAILED(hr)) {
         CC_LOG_ERROR("CreateFence failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+        cleanupContext();
         return false;
     }
 
     _impl->fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
     if (!_impl->fenceEvent) {
         CC_LOG_ERROR("CreateEvent for D3D12 fence failed.");
+        cleanupContext();
         return false;
     }
 
     _impl->fenceValue = 0;
+
+    // Create the D3D12MemoryAllocator (placed-resource sub-allocation). This
+    // phase only creates the allocator; no allocation path uses it yet. The
+    // allocator is created last so that any earlier failure is caught by the
+    // cleanupContext guard above without leaking the allocator. D3D12MA v3.2.0
+    // requires a non-null pAdapter (CreateAllocator returns E_INVALIDARG
+    // otherwise), so skip creation if no adapter is available.
+    if (_impl->adapter) {
+        D3D12MA::ALLOCATOR_DESC allocDesc{};
+        allocDesc.Flags = D3D12MA::ALLOCATOR_FLAG_NONE;
+        allocDesc.pDevice = _impl->d3dDevice.Get();
+        allocDesc.PreferredBlockSize = 0;
+        allocDesc.pAllocationCallbacks = nullptr;
+        allocDesc.pAdapter = _impl->adapter.Get();
+        hr = D3D12MA::CreateAllocator(&allocDesc, _impl->memoryAllocator.ReleaseAndGetAddressOf());
+        if (FAILED(hr) || !_impl->memoryAllocator) {
+            CC_LOG_WARNING("D3D12MemoryAllocator: CreateAllocator failed. HRESULT=0x%08x; "
+                           "falling back to committed resources for all allocations.",
+                           static_cast<unsigned>(hr));
+            _impl->memoryAllocator.Reset();
+        } else {
+            CC_LOG_INFO("D3D12MemoryAllocator v3.2.0 initialized.");
+        }
+    } else {
+        CC_LOG_WARNING("D3D12MemoryAllocator: no adapter available, "
+                       "falling back to committed resources.");
+    }
 
     return true;
 }
@@ -2139,7 +2402,7 @@ void *CCD3D12Device::getOrCreateEmptyRootSignature() {
 }
 
 D3D12DescriptorHeapPool *CCD3D12Device::getGPUDescriptorHeapPool() const {
-    return _impl ? _impl->gpuDescriptorHeapPool.get() : nullptr;
+    return _impl ? _impl->gpuDescriptorHeapPools[_impl->activeFrameResource].get() : nullptr;
 }
 
 D3D12DescriptorHeapPool *CCD3D12Device::getSamplerDescriptorHeapPool() const {
@@ -2153,6 +2416,20 @@ D3D12DescriptorHeapPool *CCD3D12Device::getCPUDescriptorHeapPool() const {
 D3D12DescriptorHeapPool *CCD3D12Device::getCPUSamplerDescriptorHeapPool() const {
     return _impl ? _impl->cpuSamplerDescriptorHeapPool.get() : nullptr;
 }
+
+D3D12MA::Allocator *CCD3D12Device::getMemoryAllocator() const {
+    return _impl ? _impl->memoryAllocator.Get() : nullptr;
+}
+
+bool CCD3D12Device::isPerfCounterEnabled() const { return _impl && _impl->perfCountersEnabled; }
+void CCD3D12Device::recordDescriptorFlush() { if (isPerfCounterEnabled()) _impl->descriptorFlushes.fetch_add(1, std::memory_order_relaxed); }
+void CCD3D12Device::recordDescriptorCopy(uint32_t count) { if (isPerfCounterEnabled()) { _impl->descriptorCopies.fetch_add(1, std::memory_order_relaxed); _impl->copiedDescriptors.fetch_add(count, std::memory_order_relaxed); } }
+void CCD3D12Device::recordDynamicDescriptorRewrite(bool restore) { if (isPerfCounterEnabled()) (restore ? _impl->dynamicDescriptorRestores : _impl->dynamicDescriptorRewrites).fetch_add(1, std::memory_order_relaxed); }
+void CCD3D12Device::recordSetDescriptorHeaps() { if (isPerfCounterEnabled()) _impl->setDescriptorHeaps.fetch_add(1, std::memory_order_relaxed); }
+void CCD3D12Device::recordRootDescriptorTableBind() { if (isPerfCounterEnabled()) _impl->rootDescriptorTableBinds.fetch_add(1, std::memory_order_relaxed); }
+void CCD3D12Device::recordDescriptorHeapCreate(bool shaderVisible, bool overflow) { if (isPerfCounterEnabled()) { _impl->descriptorHeapCreates.fetch_add(1, std::memory_order_relaxed); if (shaderVisible && overflow) _impl->descriptorHeapOverflows.fetch_add(1, std::memory_order_relaxed); } }
+void CCD3D12Device::recordTransientUniformSlotAllocation() { if (isPerfCounterEnabled()) _impl->transientUniformSlotAllocations.fetch_add(1, std::memory_order_relaxed); }
+void CCD3D12Device::recordTransientUniformSlotFallback() { if (isPerfCounterEnabled()) _impl->transientUniformSlotFallbacks.fetch_add(1, std::memory_order_relaxed); }
 
 } // namespace gfx
 } // namespace cc

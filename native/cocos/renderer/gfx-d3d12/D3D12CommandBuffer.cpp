@@ -95,6 +95,19 @@ void retainCommandListResource(ccstd::vector<Microsoft::WRL::ComPtr<ID3D12Resour
     resources.push_back(std::move(retained));
 }
 
+void retainCommandListBufferBacking(
+    ccstd::vector<std::shared_ptr<void>> &backings,
+    std::unordered_set<const void *> &backingSet,
+    std::shared_ptr<void> backing) {
+    if (!backing) {
+        return;
+    }
+    if (!backingSet.emplace(backing.get()).second) {
+        return;
+    }
+    backings.push_back(std::move(backing));
+}
+
 void retainCommandListDeviceObject(
     ccstd::vector<Microsoft::WRL::ComPtr<ID3D12DeviceChild>> &objects,
     std::unordered_set<ID3D12DeviceChild *> &retainedObjects,
@@ -790,6 +803,13 @@ struct CCD3D12CommandBuffer::Impl {
         ccstd::vector<Microsoft::WRL::ComPtr<ID3D12DeviceChild>> pendingDeviceObjects;
         std::unordered_set<ID3D12DeviceChild *> pendingDeviceObjectSet;
         ccstd::vector<Microsoft::WRL::ComPtr<ID3D12DescriptorHeap>> pendingDescriptorHeaps;
+        // Buffer backing owners retained for fence completion. Holding the
+        // shared_ptr keeps both the D3D12MA allocation and the D3D12 resource
+        // alive until the GPU finishes with the command list. Without this,
+        // buffer destroy/resize could free the heap range while the GPU still
+        // references it.
+        ccstd::vector<std::shared_ptr<void>> pendingBufferBackings;
+        std::unordered_set<const void *> pendingBufferBackingSet;
         ccstd::vector<std::shared_ptr<CommandRecordingContext>> executedBundles;
         D3D12ResourceStateJournal resourceStateJournal;
         bool closedSuccessfully{false};
@@ -969,6 +989,10 @@ struct CCD3D12CommandBuffer::Impl {
     ccstd::vector<Microsoft::WRL::ComPtr<ID3D12DeviceChild>> pendingDeviceObjects;
     std::unordered_set<ID3D12DeviceChild *> pendingDeviceObjectSet;
     ccstd::vector<Microsoft::WRL::ComPtr<ID3D12DescriptorHeap>> pendingDescriptorHeaps;
+    // Buffer backing owners retained during recording. Moved to the
+    // CommandRecordingContext in end() so they stay alive until fence.
+    ccstd::vector<std::shared_ptr<void>> pendingBufferBackings;
+    std::unordered_set<const void *> pendingBufferBackingSet;
     ccstd::vector<PendingDefaultBufferCopy> pendingDefaultBufferCopies;
     ccstd::vector<PendingDefaultBufferTransition> pendingDefaultBufferTransitions;
     std::unordered_map<ID3D12Resource *, uint32_t> pendingDefaultBufferTransitionIndices;
@@ -1256,6 +1280,8 @@ void CCD3D12CommandBuffer::finishBufferUpdateBatch() {
     _impl->pendingDefaultBufferCopies.clear();
     _impl->pendingDefaultBufferTransitions.clear();
     _impl->pendingDefaultBufferTransitionIndices.clear();
+    _impl->bufferUpdatePreCopyBarriers.clear();
+    _impl->bufferUpdatePostCopyBarriers.clear();
 }
 
 void CCD3D12CommandBuffer::invalidateDescriptorTables() {
@@ -1319,6 +1345,8 @@ void CCD3D12CommandBuffer::begin(RenderPass *renderPass, uint32_t subpass, Frame
     activeContext.pendingDeviceObjects.clear();
     activeContext.pendingDeviceObjectSet.clear();
     activeContext.pendingDescriptorHeaps.clear();
+    activeContext.pendingBufferBackings.clear();
+    activeContext.pendingBufferBackingSet.clear();
     activeContext.resourceStateJournal.clear();
     auto &executedBundles = activeContext.executedBundles;
     if (!executedBundles.empty()) {
@@ -1361,6 +1389,8 @@ void CCD3D12CommandBuffer::begin(RenderPass *renderPass, uint32_t subpass, Frame
     _impl->pendingDeviceObjects.clear();
     _impl->pendingDeviceObjectSet.clear();
     _impl->pendingDescriptorHeaps.clear();
+    _impl->pendingBufferBackings.clear();
+    _impl->pendingBufferBackingSet.clear();
     // Clear pending descriptor sets
     for (uint32_t i = 0; i < D3D12_MAX_BOUND_SETS; ++i) {
         _impl->pendingSets[i] = {};
@@ -1441,6 +1471,9 @@ void CCD3D12CommandBuffer::end() {
     context.pendingDeviceObjects = std::move(_impl->pendingDeviceObjects);
     context.pendingDeviceObjectSet = std::move(_impl->pendingDeviceObjectSet);
     context.pendingDescriptorHeaps = std::move(_impl->pendingDescriptorHeaps);
+    context.pendingBufferBackings = std::move(_impl->pendingBufferBackings);
+    context.pendingBufferBackingSet.clear();
+    _impl->pendingBufferBackingSet.clear();
     _impl->isRecording = false;
 }
 
@@ -1662,6 +1695,17 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
         }
     }
 
+    const uint32_t colorCount = d3d12Fbo->getColorTextureCount();
+    // Framebuffers created through CCD3D12Framebuffer reject this already.
+    // Keep the recording side defensive because an invalid actor must not
+    // overrun the fixed MAX_ATTACHMENTS stack arrays below.
+    if (colorCount > MAX_ATTACHMENTS) {
+        CC_LOG_ERROR("D3D12CommandBuffer::beginRenderPass - framebuffer has %u color attachments; maximum is %u.",
+                     colorCount, MAX_ATTACHMENTS);
+        _impl->skipRenderPass = true;
+        return;
+    }
+
     const uint32_t fboWidth = d3d12Fbo->getWidth();
     const uint32_t fboHeight = d3d12Fbo->getHeight();
     _impl->activeRenderPass = renderPass;
@@ -1670,8 +1714,6 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
 
     // The framebuffer owns immutable attachment snapshots and native backings;
     // no texture actor needs to remain alive while this pass is recorded.
-    const uint32_t colorCount = d3d12Fbo->getColorTextureCount();
-
     // Transition non-swapchain color attachments to RENDER_TARGET
     for (uint32_t i = 0; i < colorCount; ++i) {
         auto *resource = static_cast<ID3D12Resource *>(d3d12Fbo->getColorResource(i));
@@ -1800,7 +1842,17 @@ void CCD3D12CommandBuffer::beginRenderPass(RenderPass *renderPass, Framebuffer *
         }
     }
 
-    // Set viewport from render area
+    // Set viewport from render area.
+    // D3D12 requires viewport width > 0 and height > 0. If the safe render
+    // area is empty (e.g. zero-size shadow framebuffer or degenerate render
+    // area), skip the entire pass instead of recording an invalid viewport.
+    if (!hasSafeRenderArea) {
+        CC_LOG_WARNING("D3D12 beginRenderPass: empty render area (%ld,%ld)-(%ld,%ld); skipping pass.",
+                       safeRenderArea.left, safeRenderArea.top, safeRenderArea.right, safeRenderArea.bottom);
+        _impl->skipRenderPass = true;
+        return;
+    }
+
     D3D12_VIEWPORT vp{};
     vp.TopLeftX = static_cast<float>(safeRenderArea.left);
     vp.TopLeftY = static_cast<float>(safeRenderArea.top);
@@ -1825,6 +1877,30 @@ void CCD3D12CommandBuffer::endRenderPass() {
         return;
     }
     if (_impl->skipRenderPass) {
+        // bindSubpassRenderTargets may have been called before the skip was
+        // decided (e.g. zero-size viewport check). Unbind so subsequent
+        // passes do not inherit stale RT/DS bindings.
+        if (_impl->commandList) {
+            _impl->commandList->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
+        }
+        // The PRESENT -> RENDER_TARGET barrier for a swapchain pass is
+        // recorded before skip conditions are evaluated. If the pass is
+        // skipped, transition the back buffer back to PRESENT so Present()
+        // succeeds, and clear the swapchain fields so a later offscreen
+        // endRenderPass does not emit a spurious back-buffer transition.
+        if (_impl->commandList && _impl->activeSwapchainBackBuffer) {
+            D3D12_RESOURCE_BARRIER barrier{};
+            if (makeTrackedTextureTransition(
+                    _impl->activeResourceStateJournal(),
+                    _impl->activeSwapchainBacking,
+                    _impl->activeSwapchainBackBuffer, 0,
+                    D3D12_RESOURCE_STATE_PRESENT, barrier)) {
+                _impl->commandList->ResourceBarrier(1, &barrier);
+            }
+            _impl->activeSwapchain = nullptr;
+            _impl->activeSwapchainBackBuffer = nullptr;
+            _impl->activeSwapchainBacking.reset();
+        }
         _impl->skipRenderPass = false;
         _impl->inRenderPass = false;
         _impl->activeRenderPass = nullptr;
@@ -1982,6 +2058,23 @@ void CCD3D12CommandBuffer::retainRecordingResource(ID3D12Resource *resource) {
         resource);
 }
 
+void CCD3D12CommandBuffer::retainRecordingResource(ID3D12Resource *resource,
+                                                    std::shared_ptr<void> backing) {
+    if (!_impl) {
+        return;
+    }
+    retainCommandListResource(
+        _impl->pendingUploadResources,
+        _impl->pendingUploadResourceSet,
+        resource);
+    if (backing) {
+        retainCommandListBufferBacking(
+            _impl->pendingBufferBackings,
+            _impl->pendingBufferBackingSet,
+            std::move(backing));
+    }
+}
+
 void CCD3D12CommandBuffer::retainRecordingDeviceObject(ID3D12DeviceChild *object) {
     if (!_impl) {
         return;
@@ -1998,9 +2091,15 @@ void CCD3D12CommandBuffer::retainDescriptorSetResources(
         return;
     }
     ccstd::vector<void *> resources;
-    descriptorSet->collectBoundD3D12Resources(resources);
+    ccstd::vector<std::shared_ptr<void>> bufferBackings;
+    descriptorSet->collectBoundD3D12Resources(resources, bufferBackings);
     for (void *resource : resources) {
         retainRecordingResource(static_cast<ID3D12Resource *>(resource));
+    }
+    for (auto &backing : bufferBackings) {
+        retainCommandListBufferBacking(
+            _impl->pendingBufferBackings, _impl->pendingBufferBackingSet,
+            std::move(backing));
     }
 }
 
@@ -2508,6 +2607,7 @@ bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental() {
             count, destination, source,
             sampler ? D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER
                     : D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        device->recordDescriptorCopy(count);
         return true;
     };
 
@@ -3303,6 +3403,7 @@ bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental() {
             return false;
         }
         _impl->commandList->SetDescriptorHeaps(boundHeapCount, boundHeaps);
+        device->recordSetDescriptorHeaps();
         _impl->boundCbvSrvUavHeap = cbvHeap;
         _impl->boundSamplerHeap = samplerHeap;
         invalidateDescriptorTables();
@@ -3320,6 +3421,7 @@ bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental() {
         if (!bound.valid || bound.gpuHandle != range.gpuHandle) {
             _impl->commandList->SetGraphicsRootDescriptorTable(
                 static_cast<UINT>(rootIndex), {range.gpuHandle});
+            device->recordRootDescriptorTableBind();
             bound = {range.gpuHandle, true};
         }
         return true;
@@ -3359,6 +3461,9 @@ bool CCD3D12CommandBuffer::flushDescriptorSetsIncremental() {
 }
 
 bool CCD3D12CommandBuffer::flushDescriptorSets() {
+    if (auto *device = CCD3D12Device::getInstance()) {
+        device->recordDescriptorFlush();
+    }
     if (flushDescriptorSetsIncremental()) {
         return true;
     }
@@ -3516,6 +3621,7 @@ bool CCD3D12CommandBuffer::flushDescriptorSets() {
             dstStart.ptr = reinterpret_cast<SIZE_T>(cbvAlloc.cpuHandle) +
                            static_cast<SIZE_T>(cbvOffset) * cbvDescriptorSize;
             d3dDevice->CopyDescriptorsSimple(binding.cbvCount, dstStart, srcStart, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            device->recordDescriptorCopy(binding.cbvCount);
             cbvEntries[cbvEntryCount++] = {
                 static_cast<UINT>(binding.cbvRootIndex),
                 {cbvAlloc.gpuHandle + static_cast<uint64_t>(cbvOffset) * cbvDescriptorSize},
@@ -3536,6 +3642,7 @@ bool CCD3D12CommandBuffer::flushDescriptorSets() {
             dstStart.ptr = reinterpret_cast<SIZE_T>(samplerAlloc.cpuHandle) +
                            static_cast<SIZE_T>(samplerOffset) * samplerDescriptorSize;
             d3dDevice->CopyDescriptorsSimple(binding.samplerCount, dstStart, srcStart, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+            device->recordDescriptorCopy(binding.samplerCount);
             samplerEntries[samplerEntryCount++] = {
                 static_cast<UINT>(binding.samplerRootIndex),
                 {samplerAlloc.gpuHandle + static_cast<uint64_t>(samplerOffset) * samplerDescriptorSize},
@@ -3714,7 +3821,11 @@ bool CCD3D12CommandBuffer::appendLocalRootCbvBatchCommand(
                                                 : rootAddressBytes + sizeof(D3D12_DRAW_ARGUMENTS);
         _impl->localRootCbvBatchCommandStride =
             (packedPayloadBytes + sizeof(uint64_t) - 1U) & ~(sizeof(uint64_t) - 1U);
-        constexpr uint32_t COMMAND_CAPACITY = 4096U;
+        // 4096 reserved a full 256KB-320KB upload slice per batch even when only
+        // a handful of draws were issued. 1024 still covers typical frame draw
+        // counts in a single indirect batch, and overflow transparently falls
+        // back to a fresh flush + reallocation via flushLocalRootCbvBatch().
+        constexpr uint32_t COMMAND_CAPACITY = 1024U;
         _impl->localRootCbvBatchCommandCapacity = COMMAND_CAPACITY;
 
         auto *device = CCD3D12Device::getInstance();
@@ -3826,20 +3937,23 @@ void CCD3D12CommandBuffer::bindInputAssembler(InputAssembler *ia) {
     _impl->boundIA = ia;
     for (Buffer *buffer : ia->getVertexBuffers()) {
         if (buffer) {
+            auto *d3d12Buf = static_cast<CCD3D12Buffer *>(buffer);
             retainRecordingResource(
-                static_cast<ID3D12Resource *>(
-                    static_cast<CCD3D12Buffer *>(buffer)->getD3D12ResourceHandle()));
+                static_cast<ID3D12Resource *>(d3d12Buf->getD3D12ResourceHandle()),
+                d3d12Buf->getD3D12BufferBacking());
         }
     }
     if (Buffer *indexBuffer = ia->getIndexBuffer()) {
+        auto *d3d12Buf = static_cast<CCD3D12Buffer *>(indexBuffer);
         retainRecordingResource(
-            static_cast<ID3D12Resource *>(
-                static_cast<CCD3D12Buffer *>(indexBuffer)->getD3D12ResourceHandle()));
+            static_cast<ID3D12Resource *>(d3d12Buf->getD3D12ResourceHandle()),
+            d3d12Buf->getD3D12BufferBacking());
     }
     if (Buffer *indirectBuffer = ia->getIndirectBuffer()) {
+        auto *d3d12Buf = static_cast<CCD3D12Buffer *>(indirectBuffer);
         retainRecordingResource(
-            static_cast<ID3D12Resource *>(
-                static_cast<CCD3D12Buffer *>(indirectBuffer)->getD3D12ResourceHandle()));
+            static_cast<ID3D12Resource *>(d3d12Buf->getD3D12ResourceHandle()),
+            d3d12Buf->getD3D12BufferBacking());
     }
     if (sameLogicalInputAssembler && !bufferViewsChanged) {
         return;
@@ -4251,6 +4365,9 @@ void CCD3D12CommandBuffer::draw(const DrawInfo &info) {
             ID3D12Resource *resource = static_cast<ID3D12Resource *>(d3d12Buf->getD3D12ResourceHandle());
             if (resource) {
                 retainCommandListResource(_impl->pendingUploadResources, _impl->pendingUploadResourceSet, resource);
+                retainCommandListBufferBacking(
+                    _impl->pendingBufferBackings, _impl->pendingBufferBackingSet,
+                    d3d12Buf->getD3D12BufferBacking());
                 auto *device = CCD3D12Device::getInstance();
                 if (info.indexCount > 0) {
                     auto *sig = static_cast<ID3D12CommandSignature *>(device->getDrawIndexedIndirectSignature());
@@ -4316,8 +4433,15 @@ void CCD3D12CommandBuffer::updateBuffer(Buffer *buff, const void *data, uint32_t
         Microsoft::WRL::ComPtr<ID3D12Resource> retained;
         retained = resource;
         _impl->pendingUploadResources.push_back(std::move(retained));
+        // Backing owner also retained to prevent D3D12MA heap range release.
+        if (auto backing = d3d12Buffer->getD3D12BufferBacking()) {
+            _impl->pendingBufferBackings.push_back(std::move(backing));
+        }
     } else {
         retainCommandListResource(_impl->pendingUploadResources, _impl->pendingUploadResourceSet, resource);
+        retainCommandListBufferBacking(
+            _impl->pendingBufferBackings, _impl->pendingBufferBackingSet,
+            d3d12Buffer->getD3D12BufferBacking());
     }
 
     if (!d3d12Buffer->isD3D12UploadHeap()) {
@@ -5313,6 +5437,8 @@ void CCD3D12CommandBuffer::retireD3D12CommandRecordingContext(
     context->pendingDeviceObjects.clear();
     context->pendingDeviceObjectSet.clear();
     context->pendingDescriptorHeaps.clear();
+    context->pendingBufferBackings.clear();
+    context->pendingBufferBackingSet.clear();
     context->executedBundles.clear();
     context->resourceStateJournal.clear();
     context->lastSubmittedFence.Reset();

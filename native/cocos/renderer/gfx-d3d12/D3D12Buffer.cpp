@@ -25,6 +25,8 @@
 #include "D3D12Buffer.h"
 #include "D3D12CommandBuffer.h"
 #include "D3D12Device.h"
+#include "D3D12MemAlloc.h"
+#include "D3D12ResourceState.h"
 #include "base/Log.h"
 
     #ifndef NOMINMAX
@@ -46,8 +48,11 @@ std::atomic<uint64_t> BUFFER_RESOURCE_GENERATION{1};
 }
 
 struct CCD3D12Buffer::Impl {
-    Microsoft::WRL::ComPtr<ID3D12Resource> resource;
-    std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, D3D12_MAX_FRAMES_IN_FLIGHT> uploadResources;
+    // Immutable backing owner — shared_ptr to D3D12BufferBacking which holds
+    // ALL D3D12MA allocations and D3D12 resources. Resize creates a NEW
+    // backing and swaps this pointer; the old backing stays alive until all
+    // consumers (command buffers, BufferViews) drop their references.
+    std::shared_ptr<D3D12BufferBacking> backing;
     uint32_t activeUploadResource{0};
     uint64_t resourceVersion{1};
     bool uploadHeap{true};
@@ -68,6 +73,15 @@ struct CCD3D12Buffer::Impl {
     uint64_t uniformContentVersion{0};
     uint64_t uploadedContentVersion{std::numeric_limits<uint64_t>::max()};
     uint64_t uniformDescriptorVersion{1};
+    // Base byte offset of this backing resource. Shared UPLOAD allocations use
+    // a non-zero base; BufferView instances keep their own relative offsets.
+    uint64_t resourceBaseOffset{0};
+    // True when this HOST buffer sub-allocates from the device's shared
+    // UPLOAD heap instead of owning a dedicated committed resource. The
+    // resource pointer is non-owning (the device owns the heap). If a
+    // cross-frame write triggers ensureUploadResource, the buffer switches
+    // to a dedicated committed resource and this flag is cleared.
+    bool usingSharedUploadPool{false};
 };
 
 CCD3D12Buffer::CCD3D12Buffer() {
@@ -121,7 +135,9 @@ void CCD3D12Buffer::doInit(const BufferViewInfo &info) {
     }
 
     _impl = buffer->_impl;
-    _resourceOffset = parentOffset + viewOffset;
+    // Keep the offset relative to the shared backing. The backing may later
+    // migrate from a shared UPLOAD allocation to a dedicated resource.
+    _resourceOffset = buffer->_resourceOffset + viewOffset;
     _viewValid = true;
     BUFFER_RESOURCE_GENERATION.fetch_add(1, std::memory_order_relaxed);
 
@@ -134,31 +150,22 @@ void CCD3D12Buffer::doInit(const BufferViewInfo &info) {
     }
 }
 
-void CCD3D12Buffer::doResize(uint32_t size, uint32_t count) {
+bool CCD3D12Buffer::doResize(uint32_t size, uint32_t count) {
     (void)count;
     if (_isBufferView) {
-        return;
+        return false;
     }
-    createResource(size);
+    return createResource(size);
 }
 
 void CCD3D12Buffer::doDestroy() {
     if (auto *device = CCD3D12Device::getInstance()) {
         device->discardPendingBufferUpdate(this);
     }
-    if (_impl && !_isBufferView) {
-        _impl->pendingData.clear();
-        _impl->uniformShadowData.clear();
-        _impl->updateQueued = false;
-        _impl->transientUniformResource = nullptr;
-        _impl->transientUniformGPUAddress = 0;
-        _impl->transientUniformEpoch = std::numeric_limits<uint64_t>::max();
-        _impl->transientUniformSlotEpoch = std::numeric_limits<uint64_t>::max();
-        _impl->uniformContentVersion = 0;
-        _impl->uploadedContentVersion = std::numeric_limits<uint64_t>::max();
-        _impl->uniformDescriptorVersion = 1;
-        _impl->hasBufferViews = false;
-    }
+    // Do NOT modify shared Impl fields. BufferView instances share _impl
+    // with the parent; clearing resources here would destroy their backing.
+    // The Impl destructor releases resources before allocations via C++
+    // reverse-declaration order when the last shared_ptr drops.
     BUFFER_RESOURCE_GENERATION.fetch_add(1, std::memory_order_relaxed);
     _impl.reset();
     _resourceOffset = 0;
@@ -180,7 +187,8 @@ void CCD3D12Buffer::update(const void *buffer, uint32_t size) {
     }
 
     const uint32_t copySize = std::min(size, _size);
-    const uint64_t resourceOffset = getD3D12ResourceOffset();
+    uint64_t resourceOffset = getD3D12ResourceOffset();
+    const uint64_t shadowOffset = _resourceOffset;
     const bool retainUniformShadow =
         hasFlag(_usage, BufferUsageBit::UNIFORM) &&
         !hasFlag(_usage, BufferUsageBit::INDEX) &&
@@ -191,9 +199,9 @@ void CCD3D12Buffer::update(const void *buffer, uint32_t size) {
         if (_impl->uniformShadowData.size() != _impl->uniformBackingSize) {
             _impl->uniformShadowData.assign(_impl->uniformBackingSize, 0);
         }
-        if (resourceOffset <= _impl->uniformShadowData.size() &&
-            copySize <= _impl->uniformShadowData.size() - resourceOffset) {
-            std::memcpy(_impl->uniformShadowData.data() + resourceOffset, buffer, copySize);
+        if (shadowOffset <= _impl->uniformShadowData.size() &&
+            copySize <= _impl->uniformShadowData.size() - shadowOffset) {
+            std::memcpy(_impl->uniformShadowData.data() + shadowOffset, buffer, copySize);
             ++_impl->uniformContentVersion;
         }
     }
@@ -207,25 +215,19 @@ void CCD3D12Buffer::update(const void *buffer, uint32_t size) {
         if (device && getD3D12ConstantBufferSize() <=
                           D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT &&
             _impl->transientUniformSlotEpoch != epoch) {
-            if (_impl->transientUniformSlotIndex != INVALID_SLOT && frameState.isValid &&
-                frameState.resource && frameState.mappedData && frameState.gpuAddress != 0) {
-                const uint64_t offset = static_cast<uint64_t>(_impl->transientUniformSlotIndex) *
-                                        D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
-                allocation.resource = frameState.resource;
-                allocation.mappedData = frameState.mappedData + offset;
-                allocation.offset = offset;
-                allocation.gpuAddress = frameState.gpuAddress + offset;
-                allocation.size = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
-                allocation.isValid = true;
-            } else {
-                allocation = device->getOrCreateTransientUniformSlot(
-                    _impl->transientUniformSlotIndex);
-            }
+            // Slot indices belong to one fence-protected frame resource. A
+            // buffer may keep an index only for the current epoch; reusing a
+            // historical index would prevent the frame-local arena from ever
+            // reclaiming capacity and can alias a slot assigned this frame.
+            _impl->transientUniformSlotIndex = INVALID_SLOT;
+            allocation = device->getOrCreateTransientUniformSlot(
+                _impl->transientUniformSlotIndex);
             if (allocation.isValid) {
                 _impl->transientUniformSlotEpoch = epoch;
             }
         }
         if (!allocation.isValid && device) {
+            device->recordTransientUniformSlotFallback();
             allocation = device->allocateUploadBuffer(
                 getD3D12ConstantBufferSize(),
                 D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
@@ -269,12 +271,23 @@ void CCD3D12Buffer::update(const void *buffer, uint32_t size) {
     void *mappedData = nullptr;
     if (auto *device = CCD3D12Device::getInstance()) {
         const uint32_t frameIndex = device->getActiveFrameResourceIndex();
-        if (frameIndex != _impl->activeUploadResource && _impl->uploadResources[frameIndex]) {
+        if (frameIndex != _impl->activeUploadResource) {
+            // Lazily create the per-frame upload resource on first cross-frame
+            // write. Static HOST buffers (updated once) never allocate the
+            // second slot, halving their UPLOAD committed-resource footprint.
+            if (!ensureUploadResource(frameIndex)) {
+                CC_LOG_ERROR("D3D12 buffer update could not allocate the frame-local upload resource.");
+                return;
+            }
             _impl->activeUploadResource = frameIndex;
-            _impl->resource = _impl->uploadResources[frameIndex];
-            resource = _impl->resource.Get();
+            _impl->backing->resource = _impl->backing->uploadResources[frameIndex];
+            resource = _impl->backing->resource.Get();
             ++_impl->resourceVersion;
             BUFFER_RESOURCE_GENERATION.fetch_add(1, std::memory_order_relaxed);
+            // ensureUploadResource may migrate from the shared UPLOAD pool
+            // to dedicated committed resources, resetting _resourceOffset
+            // to 0. Re-read so the Map/Unmap below uses the correct offset.
+            resourceOffset = getD3D12ResourceOffset();
         }
     }
     D3D12_RANGE readRange{};
@@ -305,6 +318,10 @@ void CCD3D12Buffer::flushPendingUpdate(CCD3D12CommandBuffer *commandBuffer) {
     if (!canUseTransientUniformUpload()) {
         _impl->pendingData.clear();
     }
+}
+
+std::shared_ptr<D3D12BufferBacking> CCD3D12Buffer::getD3D12BufferBacking() const {
+    return _impl ? _impl->backing : nullptr;
 }
 
 bool CCD3D12Buffer::isTransientUniformEligible() const {
@@ -340,7 +357,7 @@ bool CCD3D12Buffer::updateTransientUniform(const void *data, uint32_t size) {
     }
 
     const uint32_t copySize = std::min(size, _size);
-    const uint64_t resourceOffset = getD3D12ResourceOffset();
+    const uint64_t resourceOffset = _resourceOffset;
     if (_impl->uniformBackingSize == 0 ||
         resourceOffset > _impl->uniformBackingSize ||
         copySize > _impl->uniformBackingSize - resourceOffset) {
@@ -430,29 +447,29 @@ bool CCD3D12Buffer::ensureTransientUniformUpload() {
 }
 
 void *CCD3D12Buffer::getD3D12ResourceHandle() const {
-    if (!_impl || (_isBufferView && !_viewValid)) {
+    if (!_impl || !_impl->backing || (_isBufferView && !_viewValid)) {
         return nullptr;
     }
-    return _impl->resource.Get();
+    return _impl->backing->resource.Get();
 }
 
 uint64_t CCD3D12Buffer::getD3D12GPUVirtualAddress() const {
-    if (!_impl || (_isBufferView && !_viewValid)) {
+    if (!_impl || !_impl->backing || (_isBufferView && !_viewValid)) {
         return 0;
     }
 
-    auto *resource = _impl->resource.Get();
+    auto *resource = _impl->backing->resource.Get();
     if (!resource) {
         return 0;
     }
-    return static_cast<uint64_t>(resource->GetGPUVirtualAddress() + _resourceOffset);
+    return static_cast<uint64_t>(resource->GetGPUVirtualAddress() + getD3D12ResourceOffset());
 }
 
 uint64_t CCD3D12Buffer::getD3D12ResourceVersion() const {
     if (!_impl || (_isBufferView && !_viewValid)) {
         return 0;
     }
-    return _impl->resource ? _impl->resourceVersion : 0;
+    return (_impl && _impl->backing && _impl->backing->resource) ? _impl->resourceVersion : 0;
 }
 
 uint64_t CCD3D12Buffer::getD3D12GlobalResourceGeneration() {
@@ -491,7 +508,9 @@ uint32_t CCD3D12Buffer::getD3D12ConstantBufferSize() const {
 }
 
 uint64_t CCD3D12Buffer::getD3D12ResourceOffset() const {
-    return _impl && (!_isBufferView || _viewValid) ? _resourceOffset : 0;
+    return _impl && (!_isBufferView || _viewValid)
+               ? _impl->resourceBaseOffset + _resourceOffset
+               : 0;
 }
 
 bool CCD3D12Buffer::isD3D12UploadHeap() const {
@@ -561,8 +580,69 @@ bool CCD3D12Buffer::createResource(uint32_t size) {
         return false;
     }
 
+    // HOST buffers use the UPLOAD heap. UNIFORM HOST buffers > 1KB stay
+    // on DEFAULT heap (their data is uploaded via pendingData + command list
+    // copy), but tiny UNIFORM HOST buffers (≤1KB) are allowed onto the UPLOAD
+    // heap so they can sub-allocate from the shared UPLOAD pool. For static
+    // uniform bindings the buffer's own resource is never read (the transient
+    // uniform slot provides the GPU address), so pooling eliminates a
+    // 64KB-minimum DEFAULT committed resource per buffer. Dynamic bindings
+    // migrate to dedicated per-frame UPLOAD resources on first cross-frame
+    // write via ensureUploadResource.
     const bool useUploadHeap = hasFlag(_memUsage, MemoryUsageBit::HOST) &&
-                               !hasFlag(_usage, BufferUsageBit::UNIFORM);
+                               (!hasFlag(_usage, BufferUsageBit::UNIFORM) ||
+                                size <= 1024U);
+
+    // Save old resources for deferred release. New resources are created
+    // first; old ones are released only after success. If creation fails,
+    // the buffer and all sharing BufferViews keep their old backing.
+    auto newBacking = std::make_shared<D3D12BufferBacking>();
+
+    const uint64_t alignedSize = static_cast<uint64_t>((size + 255U) & ~255U);
+
+    // Small HOST (vertex/index/uniform) buffers sub-allocate from a long-lived
+    // shared UPLOAD heap instead of creating individual 64KB-minimum committed
+    // resources. This eliminates per-buffer alignment waste that dominates
+    // memory for small buffers. If a cross-frame write later requires a
+    // dedicated resource (ensureUploadResource), the buffer transparently
+    // migrates out of the shared pool.
+    if (useUploadHeap && alignedSize <= 16ULL * 1024ULL) {
+        D3D12SharedUploadAllocation sharedAlloc = device->allocateSharedUploadOffset(
+            alignedSize, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+        if (sharedAlloc.isValid) {
+            newBacking->resource = static_cast<ID3D12Resource *>(sharedAlloc.resource);
+            // Atomic swap: replace old backing with new. Old backing stays
+            // alive until all consumers (command buffers) drop references.
+            _impl->backing = std::move(newBacking);
+            _impl->usingSharedUploadPool = true;
+            _impl->activeUploadResource = 0U;
+            _impl->resourceBaseOffset = sharedAlloc.offset;
+            _resourceOffset = 0;
+            ++_impl->resourceVersion;
+            BUFFER_RESOURCE_GENERATION.fetch_add(1, std::memory_order_relaxed);
+            if (_impl->updateQueued) {
+                device->discardPendingBufferUpdate(this);
+            }
+            _impl->pendingData.clear();
+            _impl->uniformShadowData.clear();
+            _impl->uniformBackingSize = alignedSize;
+            _impl->updateQueued = false;
+            _impl->transientUniformResource = nullptr;
+            _impl->transientUniformGPUAddress = 0;
+            _impl->transientUniformEpoch = std::numeric_limits<uint64_t>::max();
+            _impl->transientUniformSlotEpoch = std::numeric_limits<uint64_t>::max();
+            _impl->uniformContentVersion = 0;
+            _impl->uploadedContentVersion = std::numeric_limits<uint64_t>::max();
+            ++_impl->uniformDescriptorVersion;
+            device->notifyTransientUniformUpload();
+            _viewValid = true;
+            _impl->uploadHeap = true;
+            _impl->currentState = D3D12_RESOURCE_STATE_GENERIC_READ;
+            _impl->stateEpoch = device->getBufferStateEpoch();
+            return true;
+        }
+        // Shared pool full or unavailable: fall through to committed resource.
+    }
 
     D3D12_HEAP_PROPERTIES heapProperties{};
     heapProperties.Type = useUploadHeap ? D3D12_HEAP_TYPE_UPLOAD : D3D12_HEAP_TYPE_DEFAULT;
@@ -574,7 +654,7 @@ bool CCD3D12Buffer::createResource(uint32_t size) {
     D3D12_RESOURCE_DESC resourceDesc{};
     resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
     resourceDesc.Alignment = 0;
-    resourceDesc.Width = static_cast<UINT64>((size + 255U) & ~255U);
+    resourceDesc.Width = static_cast<UINT64>(alignedSize);
     resourceDesc.Height = 1;
     resourceDesc.DepthOrArraySize = 1;
     resourceDesc.MipLevels = 1;
@@ -584,28 +664,63 @@ bool CCD3D12Buffer::createResource(uint32_t size) {
     resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
 
+    Microsoft::WRL::ComPtr<D3D12MA::Allocation> allocation;
     Microsoft::WRL::ComPtr<ID3D12Resource> resource;
-    const uint32_t resourceCount = useUploadHeap ? D3D12_MAX_FRAMES_IN_FLIGHT : 1U;
-    for (uint32_t i = 0; i < resourceCount; ++i) {
-        HRESULT hr = d3dDevice->CreateCommittedResource(
+    // HOST (UPLOAD-heap) buffers: create only the first-slot resource
+    // upfront. The second slot is created lazily by ensureUploadResource() when
+    // a cross-frame write is detected. Static HOST buffers (updated once) never
+    // allocate the second slot, saving one 64KB-minimum committed resource each.
+    // Dynamic buffers pay the same total cost, just deferred to first cross-frame
+    // update. This is safe because every access to backing->uploadResources[i]
+    // either goes through ensureUploadResource (which creates on demand) or
+    // accesses slot 0 (always created here).
+    const D3D12_RESOURCE_STATES initialState =
+        useUploadHeap ? D3D12_RESOURCE_STATE_GENERIC_READ : D3D12_RESOURCE_STATE_COMMON;
+    auto *allocator = device->getMemoryAllocator();
+    HRESULT hr = E_FAIL;
+    if (allocator) {
+        D3D12MA::ALLOCATION_DESC allocDesc{};
+        allocDesc.Flags = D3D12MA::ALLOCATION_FLAG_NONE;
+        allocDesc.HeapType = useUploadHeap ? D3D12_HEAP_TYPE_UPLOAD : D3D12_HEAP_TYPE_DEFAULT;
+        allocDesc.ExtraHeapFlags = D3D12_HEAP_FLAG_NONE;
+        hr = allocator->CreateResource(&allocDesc, &resourceDesc, initialState,
+                                       nullptr, allocation.ReleaseAndGetAddressOf(),
+                                       IID_PPV_ARGS(&resource));
+        if (FAILED(hr) || !allocation) {
+            resource.Reset();
+            allocation.Reset();
+        }
+    }
+    if (!allocation) {
+        hr = d3dDevice->CreateCommittedResource(
             &heapProperties,
             D3D12_HEAP_FLAG_NONE,
             &resourceDesc,
-            useUploadHeap ? D3D12_RESOURCE_STATE_GENERIC_READ : D3D12_RESOURCE_STATE_COMMON,
+            initialState,
             nullptr,
             IID_PPV_ARGS(&resource));
         if (FAILED(hr)) {
             CC_LOG_ERROR("CreateCommittedResource(buffer) failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
             return false;
         }
-        if (useUploadHeap) {
-            _impl->uploadResources[i] = resource;
-            resource.Reset();
-        }
+    }
+    // Populate the new backing with the created resources. Upload-heap
+    // buffers store the resource in slot 0; DEFAULT-heap buffers store
+    // it as the main resource.
+    newBacking->d3d12maAllocation = std::move(allocation);
+    if (useUploadHeap) {
+        newBacking->uploadResources[0] = resource;
+        newBacking->uploadAllocations[0] = newBacking->d3d12maAllocation;
+        newBacking->resource = newBacking->uploadResources[0];
+    } else {
+        newBacking->resource = std::move(resource);
     }
 
-    _impl->activeUploadResource = useUploadHeap ? device->getActiveFrameResourceIndex() : 0U;
-    _impl->resource = useUploadHeap ? _impl->uploadResources[_impl->activeUploadResource] : resource;
+    // Atomic swap: replace old backing with new. Old backing stays alive
+    // until all consumers (command buffers, BufferViews) drop references.
+    _impl->backing = std::move(newBacking);
+    _impl->usingSharedUploadPool = false;
+    _impl->activeUploadResource = 0U;
     ++_impl->resourceVersion;
     BUFFER_RESOURCE_GENERATION.fetch_add(1, std::memory_order_relaxed);
     if (_impl->updateQueued) {
@@ -623,11 +738,180 @@ bool CCD3D12Buffer::createResource(uint32_t size) {
     _impl->uploadedContentVersion = std::numeric_limits<uint64_t>::max();
     ++_impl->uniformDescriptorVersion;
     device->notifyTransientUniformUpload();
+    _impl->resourceBaseOffset = 0;
     _resourceOffset = 0;
     _viewValid = true;
     _impl->uploadHeap = useUploadHeap;
     _impl->currentState = useUploadHeap ? D3D12_RESOURCE_STATE_GENERIC_READ : D3D12_RESOURCE_STATE_COMMON;
     _impl->stateEpoch = device->getBufferStateEpoch();
+    return true;
+}
+
+bool CCD3D12Buffer::ensureUploadResource(uint32_t frameIndex) {
+    if (!_impl || !_impl->uploadHeap || frameIndex >= D3D12_MAX_FRAMES_IN_FLIGHT) {
+        return false;
+    }
+
+    auto *device = CCD3D12Device::getInstance();
+    auto *d3dDevice = static_cast<ID3D12Device *>(device ? device->getD3D12DeviceHandle() : nullptr);
+    if (!d3dDevice || _impl->uniformBackingSize == 0) {
+        return false;
+    }
+
+    // COW: if the backing is shared (e.g., retained by a command buffer's
+    // fence context), create a private copy before modifying. The old backing
+    // keeps the previous upload resources alive for in-flight GPU work.
+    if (_impl->backing.use_count() > 1) {
+        _impl->backing = std::make_shared<D3D12BufferBacking>(*_impl->backing);
+    }
+
+    // If this buffer is still sub-allocated from the shared UPLOAD pool, the
+    // first cross-frame write requires migrating to dedicated per-frame
+    // committed resources. Slot 0 is created here with the current data
+    // copied from the shared pool, then the requested frameIndex slot is
+    // created below. After migration, the shared resource reference is
+    // released (the device pool still owns it).
+    if (_impl->usingSharedUploadPool) {
+        D3D12_HEAP_PROPERTIES heapProperties{};
+        heapProperties.Type = D3D12_HEAP_TYPE_UPLOAD;
+        heapProperties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+        heapProperties.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+        heapProperties.CreationNodeMask = 1;
+        heapProperties.VisibleNodeMask = 1;
+
+        D3D12_RESOURCE_DESC resourceDesc{};
+        resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        resourceDesc.Alignment = 0;
+        resourceDesc.Width = _impl->uniformBackingSize;
+        resourceDesc.Height = 1;
+        resourceDesc.DepthOrArraySize = 1;
+        resourceDesc.MipLevels = 1;
+        resourceDesc.Format = DXGI_FORMAT_UNKNOWN;
+        resourceDesc.SampleDesc.Count = 1;
+        resourceDesc.SampleDesc.Quality = 0;
+        resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+        Microsoft::WRL::ComPtr<D3D12MA::Allocation> alloc0;
+        Microsoft::WRL::ComPtr<ID3D12Resource> uploadRes0;
+        auto *allocator = device->getMemoryAllocator();
+        HRESULT hr = E_FAIL;
+        if (allocator) {
+            D3D12MA::ALLOCATION_DESC allocDesc{};
+            allocDesc.Flags = D3D12MA::ALLOCATION_FLAG_NONE;
+            allocDesc.HeapType = D3D12_HEAP_TYPE_UPLOAD;
+            allocDesc.ExtraHeapFlags = D3D12_HEAP_FLAG_NONE;
+            hr = allocator->CreateResource(&allocDesc, &resourceDesc,
+                                           D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                           alloc0.ReleaseAndGetAddressOf(),
+                                           IID_PPV_ARGS(&uploadRes0));
+            if (FAILED(hr) || !alloc0) {
+                uploadRes0.Reset();
+                alloc0.Reset();
+            }
+        }
+        if (!alloc0) {
+            hr = d3dDevice->CreateCommittedResource(
+                &heapProperties, D3D12_HEAP_FLAG_NONE, &resourceDesc,
+                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                IID_PPV_ARGS(&uploadRes0));
+            if (FAILED(hr)) {
+                CC_LOG_ERROR("ensureUploadResource migration: CreateCommittedResource(0) failed. HRESULT=0x%08x",
+                             static_cast<unsigned>(hr));
+                return false;
+            }
+        }
+        _impl->backing->uploadResources[0] = std::move(uploadRes0);
+        _impl->backing->uploadAllocations[0] = std::move(alloc0);
+
+        // Copy current data from the shared pool into the new dedicated slot 0
+        // so the GPU can keep reading valid data while the CPU writes to the
+        // frameIndex slot.
+        D3D12_RANGE readRange{};
+        void *dstMapped = nullptr;
+        hr = _impl->backing->uploadResources[0]->Map(0, &readRange, &dstMapped);
+        if (SUCCEEDED(hr) && dstMapped) {
+            auto *sharedResource = _impl->backing->resource.Get();
+            D3D12_RANGE srcReadRange{0, 0};
+            void *srcMapped = nullptr;
+            hr = sharedResource->Map(0, &srcReadRange, &srcMapped);
+            if (SUCCEEDED(hr) && srcMapped) {
+                std::memcpy(dstMapped,
+                            static_cast<uint8_t *>(srcMapped) + _impl->resourceBaseOffset,
+                            _impl->uniformBackingSize);
+                D3D12_RANGE noWrite{0, 0};
+                sharedResource->Unmap(0, &noWrite);
+            }
+            D3D12_RANGE writeRange{0, _impl->uniformBackingSize};
+            _impl->backing->uploadResources[0]->Unmap(0, &writeRange);
+        }
+
+        _impl->backing->resource = _impl->backing->uploadResources[0];
+        _impl->resourceBaseOffset = 0;
+        // Do NOT reset _resourceOffset here: it is a per-instance member, and
+        // a BufferView keeps its relative offset within the shared backing.
+        // The parent buffer's offset is already 0. Resetting a view's offset
+        // would collapse its GPU VA and write position to the resource start.
+        _impl->usingSharedUploadPool = false;
+        ++_impl->resourceVersion;
+        BUFFER_RESOURCE_GENERATION.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    if (_impl->backing->uploadResources[frameIndex]) {
+        return true;
+    }
+
+    D3D12_HEAP_PROPERTIES heapProperties{};
+    heapProperties.Type = D3D12_HEAP_TYPE_UPLOAD;
+    heapProperties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+    heapProperties.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+    heapProperties.CreationNodeMask = 1;
+    heapProperties.VisibleNodeMask = 1;
+
+    D3D12_RESOURCE_DESC resourceDesc{};
+    resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    resourceDesc.Alignment = 0;
+    resourceDesc.Width = _impl->uniformBackingSize;
+    resourceDesc.Height = 1;
+    resourceDesc.DepthOrArraySize = 1;
+    resourceDesc.MipLevels = 1;
+    resourceDesc.Format = DXGI_FORMAT_UNKNOWN;
+    resourceDesc.SampleDesc.Count = 1;
+    resourceDesc.SampleDesc.Quality = 0;
+    resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+    Microsoft::WRL::ComPtr<D3D12MA::Allocation> allocN;
+    Microsoft::WRL::ComPtr<ID3D12Resource> uploadResN;
+    auto *allocator = device->getMemoryAllocator();
+    HRESULT hr = E_FAIL;
+    if (allocator) {
+        D3D12MA::ALLOCATION_DESC allocDesc{};
+        allocDesc.Flags = D3D12MA::ALLOCATION_FLAG_NONE;
+        allocDesc.HeapType = D3D12_HEAP_TYPE_UPLOAD;
+        allocDesc.ExtraHeapFlags = D3D12_HEAP_FLAG_NONE;
+        hr = allocator->CreateResource(&allocDesc, &resourceDesc,
+                                       D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                       allocN.ReleaseAndGetAddressOf(),
+                                       IID_PPV_ARGS(&uploadResN));
+        if (FAILED(hr) || !allocN) {
+            uploadResN.Reset();
+            allocN.Reset();
+        }
+    }
+    if (!allocN) {
+        hr = d3dDevice->CreateCommittedResource(
+            &heapProperties, D3D12_HEAP_FLAG_NONE, &resourceDesc,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+            IID_PPV_ARGS(&uploadResN));
+        if (FAILED(hr)) {
+            CC_LOG_ERROR("ensureUploadResource: CreateCommittedResource failed. HRESULT=0x%08x",
+                         static_cast<unsigned>(hr));
+            return false;
+        }
+    }
+    _impl->backing->uploadResources[frameIndex] = std::move(uploadResN);
+    _impl->backing->uploadAllocations[frameIndex] = std::move(allocN);
     return true;
 }
 

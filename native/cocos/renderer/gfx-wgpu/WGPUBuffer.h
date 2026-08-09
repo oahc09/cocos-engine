@@ -61,7 +61,7 @@ protected:
     void doInit(const BufferInfo &info) override;
     void doInit(const BufferViewInfo &info) override;
     void doDestroy() override;
-    void doResize(uint32_t size, uint32_t count) override;
+    bool doResize(uint32_t size, uint32_t count) override;
 
     CCWGPUBufferObject *_gpuBufferObject = nullptr;
 

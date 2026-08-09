@@ -33,7 +33,8 @@ void EmptyBuffer::doInit(const BufferInfo &info) {
 void EmptyBuffer::doInit(const BufferViewInfo &info) {
 }
 
-void EmptyBuffer::doResize(uint32_t size, uint32_t count) {
+bool EmptyBuffer::doResize(uint32_t size, uint32_t count) {
+    return true;
 }
 
 void EmptyBuffer::doDestroy() {

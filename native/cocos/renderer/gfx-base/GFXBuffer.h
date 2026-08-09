@@ -39,7 +39,7 @@ public:
 
     void initialize(const BufferInfo &info);
     void initialize(const BufferViewInfo &info);
-    void resize(uint32_t size);
+    bool resize(uint32_t size);
     void destroy();
 
     template <typename T>
@@ -66,7 +66,7 @@ public:
 protected:
     virtual void doInit(const BufferInfo &info) = 0;
     virtual void doInit(const BufferViewInfo &info) = 0;
-    virtual void doResize(uint32_t size, uint32_t count) = 0;
+    virtual bool doResize(uint32_t size, uint32_t count) = 0;
     virtual void doDestroy() = 0;
 
     static uint8_t *getBufferStagingAddress(Buffer *buffer);

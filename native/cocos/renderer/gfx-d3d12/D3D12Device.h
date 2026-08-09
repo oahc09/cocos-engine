@@ -29,12 +29,23 @@
 #include <memory>
 #include <vector>
 
+// Forward declaration of the vendored D3D12MemoryAllocator (MIT license).
+// The full header is only included by D3D12Device.cpp.
+namespace D3D12MA {
+class Allocator;
+}
+
 namespace cc {
 namespace gfx {
 
 // Keep every transient D3D12 resource class aligned with the swapchain image
 // count so CPU recording can stay one full frame ahead of the GPU.
-constexpr uint32_t D3D12_MAX_FRAMES_IN_FLIGHT{3};
+// Reduced from 3 to 2 to cut per-frame resource tripling to doubling:
+// frameResources (sampler pool / upload pages / transient uniform arena),
+// command recording contexts, HOST-vertex upload resources, and the GPU
+// descriptor heap budget all shrink by 1/N. Double-buffering is the standard
+// D3D12 minimum and remains safe for queue fence-protected reuse.
+constexpr uint32_t D3D12_MAX_FRAMES_IN_FLIGHT{2};
 
 class D3D12DescriptorHeapPool;
 
@@ -50,6 +61,17 @@ struct D3D12UploadAllocation {
     uint64_t offset{0};
     uint64_t gpuAddress{0};
     uint64_t size{0};
+    bool isValid{false};
+};
+
+// Allocation from the long-lived shared UPLOAD heap. Small HOST buffers
+// (vertex/index) sub-allocate from this heap instead of creating individual
+// 64KB-minimum committed resources, eliminating the per-buffer alignment
+// waste. The resource pointer is non-owning (the device owns the heap).
+struct D3D12SharedUploadAllocation {
+    void *resource{nullptr};
+    uint8_t *mappedData{nullptr};
+    uint64_t offset{0};
     bool isValid{false};
 };
 
@@ -104,6 +126,21 @@ public:
     D3D12DescriptorHeapPool *getCPUDescriptorHeapPool() const;
     D3D12DescriptorHeapPool *getCPUSamplerDescriptorHeapPool() const;
 
+    // Placed-resource memory allocator (D3D12MemoryAllocator). May be null if
+    // creation failed; callers must fall back to committed resources.
+    D3D12MA::Allocator *getMemoryAllocator() const;
+
+    // Runtime profiling is opt-in through CC_D3D12_PERF_COUNTERS=1.
+    bool isPerfCounterEnabled() const;
+    void recordDescriptorFlush();
+    void recordDescriptorCopy(uint32_t count);
+    void recordDynamicDescriptorRewrite(bool restore);
+    void recordSetDescriptorHeaps();
+    void recordRootDescriptorTableBind();
+    void recordDescriptorHeapCreate(bool shaderVisible, bool overflow);
+    void recordTransientUniformSlotAllocation();
+    void recordTransientUniformSlotFallback();
+
     // Dummy resources for null descriptor bindings (safe SRV/UAV fallback)
     class CCD3D12Texture *getDummyTexture() const;
     class CCD3D12Buffer *getDummyBuffer() const;
@@ -131,6 +168,7 @@ public:
     void notifyTransientUniformUpload();
     D3D12UploadAllocation getOrCreateTransientUniformSlot(uint32_t &slotIndex);
     D3D12UploadAllocation allocateUploadBuffer(uint64_t size, uint64_t alignment);
+    D3D12SharedUploadAllocation allocateSharedUploadOffset(uint64_t size, uint64_t alignment);
     void enqueueBufferUpdate(CCD3D12Buffer *buffer);
     void discardPendingBufferUpdate(CCD3D12Buffer *buffer);
     void flushPendingBufferUpdates(CCD3D12CommandBuffer *commandBuffer);
