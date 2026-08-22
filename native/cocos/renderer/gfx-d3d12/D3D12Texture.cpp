@@ -61,12 +61,16 @@ DXGI_FORMAT mapD3D12Format(Format format) {
     switch (format) {
         case Format::R8:
             return DXGI_FORMAT_R8_UNORM;
+        case Format::R8SN:
+            return DXGI_FORMAT_R8_SNORM;
         case Format::R8UI:
             return DXGI_FORMAT_R8_UINT;
         case Format::R8I:
             return DXGI_FORMAT_R8_SINT;
         case Format::RG8:
             return DXGI_FORMAT_R8G8_UNORM;
+        case Format::RG8SN:
+            return DXGI_FORMAT_R8G8_SNORM;
         case Format::RG8UI:
             return DXGI_FORMAT_R8G8_UINT;
         case Format::RG8I:
@@ -77,6 +81,8 @@ DXGI_FORMAT mapD3D12Format(Format format) {
             return DXGI_FORMAT_B8G8R8A8_UNORM;
         case Format::SRGB8_A8:
             return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+        case Format::RGBA8SN:
+            return DXGI_FORMAT_R8G8B8A8_SNORM;
         case Format::RGBA8UI:
             return DXGI_FORMAT_R8G8B8A8_UINT;
         case Format::RGBA8I:
@@ -235,6 +241,39 @@ UINT toD3D12SampleCount(SampleCount samples) {
 
 DXGI_FORMAT toD3D12Format(Format format) {
     return mapD3D12Format(format);
+}
+
+DXGI_FORMAT getD3D12TextureResourceFormat(Format format) {
+    switch (format) {
+        case Format::DEPTH:
+            return DXGI_FORMAT_R32_TYPELESS;
+        case Format::DEPTH_STENCIL:
+            return DXGI_FORMAT_R24G8_TYPELESS;
+        default:
+            return toD3D12Format(format);
+    }
+}
+
+DXGI_FORMAT getD3D12ShaderResourceFormat(Format format) {
+    switch (format) {
+        case Format::DEPTH:
+            return DXGI_FORMAT_R32_FLOAT;
+        case Format::DEPTH_STENCIL:
+            return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+        default:
+            return toD3D12Format(format);
+    }
+}
+
+DXGI_FORMAT getD3D12DepthStencilViewFormat(Format format) {
+    switch (format) {
+        case Format::DEPTH:
+            return DXGI_FORMAT_D32_FLOAT;
+        case Format::DEPTH_STENCIL:
+            return DXGI_FORMAT_D24_UNORM_S8_UINT;
+        default:
+            return DXGI_FORMAT_UNKNOWN;
+    }
 }
 
 bool getD3D12TextureUploadFootprint(
@@ -566,12 +605,7 @@ bool CCD3D12Texture::createResource(uint32_t width, uint32_t height) {
         CC_LOG_WARNING("Unsupported D3D12 texture format: %u", static_cast<unsigned>(_info.format));
         return false;
     }
-    DXGI_FORMAT resourceFormat = viewFormat;
-    if (_info.format == Format::DEPTH) {
-        resourceFormat = DXGI_FORMAT_R32_TYPELESS;
-    } else if (_info.format == Format::DEPTH_STENCIL) {
-        resourceFormat = DXGI_FORMAT_R24G8_TYPELESS;
-    }
+    const DXGI_FORMAT resourceFormat = getD3D12TextureResourceFormat(_info.format);
 
     D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE;
     if (hasFlag(_info.usage, TextureUsageBit::COLOR_ATTACHMENT)) {

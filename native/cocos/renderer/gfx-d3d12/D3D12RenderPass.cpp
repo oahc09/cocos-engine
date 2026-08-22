@@ -24,6 +24,7 @@
 
 #include "D3D12RenderPass.h"
 #include "D3D12DebugOptimization.h"
+#include "D3D12Texture.h"
 #include "base/Log.h"
 #include "gfx-base/GFXDef.h"
 
@@ -34,85 +35,6 @@
 
 namespace cc {
 namespace gfx {
-
-namespace {
-uint32_t toDXGIFormatUint32(Format format) {
-    DXGI_FORMAT dxgi = DXGI_FORMAT_UNKNOWN;
-    switch (format) {
-        case Format::A8:             dxgi = DXGI_FORMAT_A8_UNORM; break;
-        case Format::L8:             dxgi = DXGI_FORMAT_R8_UNORM; break;
-        case Format::R8:             dxgi = DXGI_FORMAT_R8_UNORM; break;
-        case Format::R8SN:           dxgi = DXGI_FORMAT_R8_SNORM; break;
-        case Format::R8UI:           dxgi = DXGI_FORMAT_R8_UINT; break;
-        case Format::R8I:            dxgi = DXGI_FORMAT_R8_SINT; break;
-        case Format::R16F:           dxgi = DXGI_FORMAT_R16_FLOAT; break;
-        case Format::R16UI:          dxgi = DXGI_FORMAT_R16_UINT; break;
-        case Format::R16I:           dxgi = DXGI_FORMAT_R16_SINT; break;
-        case Format::R32F:           dxgi = DXGI_FORMAT_R32_FLOAT; break;
-        case Format::R32UI:          dxgi = DXGI_FORMAT_R32_UINT; break;
-        case Format::R32I:           dxgi = DXGI_FORMAT_R32_SINT; break;
-        case Format::RG8:            dxgi = DXGI_FORMAT_R8G8_UNORM; break;
-        case Format::RG8SN:          dxgi = DXGI_FORMAT_R8G8_SNORM; break;
-        case Format::RG8UI:          dxgi = DXGI_FORMAT_R8G8_UINT; break;
-        case Format::RG8I:           dxgi = DXGI_FORMAT_R8G8_SINT; break;
-        case Format::RG16F:          dxgi = DXGI_FORMAT_R16G16_FLOAT; break;
-        case Format::RG16UI:         dxgi = DXGI_FORMAT_R16G16_UINT; break;
-        case Format::RG16I:          dxgi = DXGI_FORMAT_R16G16_SINT; break;
-        case Format::RG32F:          dxgi = DXGI_FORMAT_R32G32_FLOAT; break;
-        case Format::RG32UI:         dxgi = DXGI_FORMAT_R32G32_UINT; break;
-        case Format::RG32I:          dxgi = DXGI_FORMAT_R32G32_SINT; break;
-        case Format::RGB8:           dxgi = DXGI_FORMAT_R8G8B8A8_UNORM; break; // padded
-        case Format::RGB8SN:         dxgi = DXGI_FORMAT_R8G8B8A8_SNORM; break;
-        case Format::RGB8UI:         dxgi = DXGI_FORMAT_R8G8B8A8_UINT; break;
-        case Format::RGB8I:          dxgi = DXGI_FORMAT_R8G8B8A8_SINT; break;
-        case Format::RGB16F:         dxgi = DXGI_FORMAT_R16G16B16A16_FLOAT; break;
-        case Format::RGB16UI:        dxgi = DXGI_FORMAT_R16G16B16A16_UINT; break;
-        case Format::RGB16I:         dxgi = DXGI_FORMAT_R16G16B16A16_SINT; break;
-        case Format::RGB32F:         dxgi = DXGI_FORMAT_R32G32B32_FLOAT; break;
-        case Format::RGB32UI:        dxgi = DXGI_FORMAT_R32G32B32_UINT; break;
-        case Format::RGB32I:         dxgi = DXGI_FORMAT_R32G32B32_SINT; break;
-        case Format::RGBA8:          dxgi = DXGI_FORMAT_R8G8B8A8_UNORM; break;
-        case Format::BGRA8:          dxgi = DXGI_FORMAT_B8G8R8A8_UNORM; break;
-        case Format::SRGB8_A8:       dxgi = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB; break;
-        case Format::RGBA8SN:        dxgi = DXGI_FORMAT_R8G8B8A8_SNORM; break;
-        case Format::RGBA8UI:        dxgi = DXGI_FORMAT_R8G8B8A8_UINT; break;
-        case Format::RGBA8I:         dxgi = DXGI_FORMAT_R8G8B8A8_SINT; break;
-        case Format::RGBA16F:        dxgi = DXGI_FORMAT_R16G16B16A16_FLOAT; break;
-        case Format::RGBA16UI:       dxgi = DXGI_FORMAT_R16G16B16A16_UINT; break;
-        case Format::RGBA16I:        dxgi = DXGI_FORMAT_R16G16B16A16_SINT; break;
-        case Format::RGBA32F:        dxgi = DXGI_FORMAT_R32G32B32A32_FLOAT; break;
-        case Format::RGBA32UI:       dxgi = DXGI_FORMAT_R32G32B32A32_UINT; break;
-        case Format::RGBA32I:        dxgi = DXGI_FORMAT_R32G32B32A32_SINT; break;
-        case Format::R5G6B5:         dxgi = DXGI_FORMAT_B5G6R5_UNORM; break;
-        case Format::R11G11B10F:     dxgi = DXGI_FORMAT_R11G11B10_FLOAT; break;
-        case Format::RGB5A1:         dxgi = DXGI_FORMAT_B5G5R5A1_UNORM; break;
-        case Format::RGBA4:          dxgi = DXGI_FORMAT_B4G4R4A4_UNORM; break;
-        case Format::RGB10A2:        dxgi = DXGI_FORMAT_R10G10B10A2_UNORM; break;
-        case Format::RGB10A2UI:      dxgi = DXGI_FORMAT_R10G10B10A2_UINT; break;
-        case Format::RGB9E5:         dxgi = DXGI_FORMAT_R9G9B9E5_SHAREDEXP; break;
-        case Format::DEPTH:          dxgi = DXGI_FORMAT_D32_FLOAT; break;
-        case Format::DEPTH_STENCIL:  dxgi = DXGI_FORMAT_D24_UNORM_S8_UINT; break;
-        case Format::BC1:            dxgi = DXGI_FORMAT_BC1_UNORM; break;
-        case Format::BC1_ALPHA:      dxgi = DXGI_FORMAT_BC1_UNORM; break;
-        case Format::BC1_SRGB:       dxgi = DXGI_FORMAT_BC1_UNORM_SRGB; break;
-        case Format::BC1_SRGB_ALPHA: dxgi = DXGI_FORMAT_BC1_UNORM_SRGB; break;
-        case Format::BC2:            dxgi = DXGI_FORMAT_BC2_UNORM; break;
-        case Format::BC2_SRGB:       dxgi = DXGI_FORMAT_BC2_UNORM_SRGB; break;
-        case Format::BC3:            dxgi = DXGI_FORMAT_BC3_UNORM; break;
-        case Format::BC3_SRGB:       dxgi = DXGI_FORMAT_BC3_UNORM_SRGB; break;
-        case Format::BC4:            dxgi = DXGI_FORMAT_BC4_UNORM; break;
-        case Format::BC4_SNORM:      dxgi = DXGI_FORMAT_BC4_SNORM; break;
-        case Format::BC5:            dxgi = DXGI_FORMAT_BC5_UNORM; break;
-        case Format::BC5_SNORM:      dxgi = DXGI_FORMAT_BC5_SNORM; break;
-        case Format::BC6H_UF16:      dxgi = DXGI_FORMAT_BC6H_UF16; break;
-        case Format::BC6H_SF16:      dxgi = DXGI_FORMAT_BC6H_SF16; break;
-        case Format::BC7:            dxgi = DXGI_FORMAT_BC7_UNORM; break;
-        case Format::BC7_SRGB:       dxgi = DXGI_FORMAT_BC7_UNORM_SRGB; break;
-        default:                     dxgi = DXGI_FORMAT_UNKNOWN; break;
-    }
-    return static_cast<uint32_t>(dxgi);
-}
-} // namespace
 
 struct CCD3D12RenderPass::Impl {
     // Store DXGI_FORMAT values as uint32_t to avoid including dxgiformat.h in header
@@ -137,7 +59,7 @@ void CCD3D12RenderPass::doInit(const RenderPassInfo &info) {
     // Process color attachments — use base class _colorAttachments which is already populated
     _impl->rtvFormats.clear();
     for (const auto &attachment : _colorAttachments) {
-        uint32_t dxgiFmt = toDXGIFormatUint32(attachment.format);
+        const uint32_t dxgiFmt = static_cast<uint32_t>(toD3D12Format(attachment.format));
         if (dxgiFmt == 0 && attachment.format != Format::UNKNOWN) {
             // 0 is DXGI_FORMAT_UNKNOWN
             CC_LOG_WARNING("D3D12RenderPass: unsupported color attachment format %u",
@@ -149,7 +71,7 @@ void CCD3D12RenderPass::doInit(const RenderPassInfo &info) {
 
     // Process depth-stencil attachment
     if (_depthStencilAttachment.format != Format::UNKNOWN) {
-        _impl->dsvFormat = toDXGIFormatUint32(_depthStencilAttachment.format);
+        _impl->dsvFormat = static_cast<uint32_t>(toD3D12Format(_depthStencilAttachment.format));
         if (_impl->dsvFormat == 0) {
             CC_LOG_WARNING("D3D12RenderPass: unsupported depth-stencil format %u",
                            static_cast<unsigned>(_depthStencilAttachment.format));

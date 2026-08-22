@@ -40,6 +40,9 @@ namespace gfx {
 class Swapchain;
 
 DXGI_FORMAT toD3D12Format(Format format);
+DXGI_FORMAT getD3D12TextureResourceFormat(Format format);
+DXGI_FORMAT getD3D12ShaderResourceFormat(Format format);
+DXGI_FORMAT getD3D12DepthStencilViewFormat(Format format);
 DXGI_FORMAT toD3D12VertexFormat(Format format);
 SampleCount getD3D12EffectiveSampleCount(SampleCount samples);
 bool getD3D12TextureUploadFootprint(

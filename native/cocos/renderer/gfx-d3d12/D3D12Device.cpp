@@ -1969,12 +1969,7 @@ void CCD3D12Device::initFormatFeatures() {
         if (dxgiFormat == DXGI_FORMAT_UNKNOWN) continue;
 
         const auto nativeSupport = queryFormatSupport(dxgiFormat);
-        auto sampledSupport = nativeSupport;
-        if (format == Format::DEPTH) {
-            sampledSupport = queryFormatSupport(DXGI_FORMAT_R32_FLOAT);
-        } else if (format == Format::DEPTH_STENCIL) {
-            sampledSupport = queryFormatSupport(DXGI_FORMAT_R24_UNORM_X8_TYPELESS);
-        }
+        const auto sampledSupport = queryFormatSupport(getD3D12ShaderResourceFormat(format));
 
         const auto support1 = nativeSupport.Support1;
         if (support1 & (D3D12_FORMAT_SUPPORT1_RENDER_TARGET | D3D12_FORMAT_SUPPORT1_DEPTH_STENCIL)) {

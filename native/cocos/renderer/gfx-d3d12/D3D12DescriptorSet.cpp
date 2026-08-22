@@ -47,47 +47,6 @@ namespace {
 
 std::atomic<uint64_t> DESCRIPTOR_SET_ID{1};
 
-// Map engine Format to DXGI_FORMAT for SRV/UAV descriptors
-DXGI_FORMAT toSRVFormat(Format format, DXGI_FORMAT resourceFormat) {
-    if (format == Format::DEPTH) {
-        return DXGI_FORMAT_R32_FLOAT;
-    }
-    if (format == Format::DEPTH_STENCIL) {
-        return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
-    }
-    if (resourceFormat != DXGI_FORMAT_UNKNOWN) {
-        return resourceFormat;
-    }
-
-    switch (format) {
-        case Format::R8:          return DXGI_FORMAT_R8_UNORM;
-        case Format::R8SN:        return DXGI_FORMAT_R8_SNORM;
-        case Format::R8UI:        return DXGI_FORMAT_R8_UINT;
-        case Format::R8I:         return DXGI_FORMAT_R8_SINT;
-        case Format::R16F:        return DXGI_FORMAT_R16_FLOAT;
-        case Format::R16UI:       return DXGI_FORMAT_R16_UINT;
-        case Format::R16I:        return DXGI_FORMAT_R16_SINT;
-        case Format::R32F:        return DXGI_FORMAT_R32_FLOAT;
-        case Format::R32UI:       return DXGI_FORMAT_R32_UINT;
-        case Format::R32I:        return DXGI_FORMAT_R32_SINT;
-        case Format::RG8:         return DXGI_FORMAT_R8G8_UNORM;
-        case Format::RG8SN:       return DXGI_FORMAT_R8G8_SNORM;
-        case Format::RG16F:       return DXGI_FORMAT_R16G16_FLOAT;
-        case Format::RG32F:       return DXGI_FORMAT_R32G32_FLOAT;
-        case Format::RGB32F:      return DXGI_FORMAT_R32G32B32_FLOAT;
-        case Format::RGBA8:       return DXGI_FORMAT_R8G8B8A8_UNORM;
-        case Format::BGRA8:       return DXGI_FORMAT_B8G8R8A8_UNORM;
-        case Format::RGBA8SN:     return DXGI_FORMAT_R8G8B8A8_SNORM;
-        case Format::RGBA8UI:     return DXGI_FORMAT_R8G8B8A8_UINT;
-        case Format::RGBA8I:      return DXGI_FORMAT_R8G8B8A8_SINT;
-        case Format::RGBA16F:     return DXGI_FORMAT_R16G16B16A16_FLOAT;
-        case Format::RGBA32F:     return DXGI_FORMAT_R32G32B32A32_FLOAT;
-        case Format::RGB10A2:     return DXGI_FORMAT_R10G10B10A2_UNORM;
-        case Format::R11G11B10F:  return DXGI_FORMAT_R11G11B10_FLOAT;
-        default:                  return DXGI_FORMAT_UNKNOWN;
-    }
-}
-
 D3D12_SRV_DIMENSION toSRVDimension(TextureType type, uint32_t layerCount, bool isMS) {
     if (isMS) {
         if (layerCount > 1) return D3D12_SRV_DIMENSION_TEXTURE2DMSARRAY;
@@ -139,9 +98,7 @@ D3D12_SHADER_RESOURCE_VIEW_DESC makeTextureSRVDesc(const Texture *gfxTexture, co
     }
 
     D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
-    auto *resource = static_cast<ID3D12Resource *>(d3d12Texture->getD3D12ResourceHandle());
-    const DXGI_FORMAT resourceFormat = resource ? resource->GetDesc().Format : DXGI_FORMAT_UNKNOWN;
-    desc.Format = toSRVFormat(format, resourceFormat);
+    desc.Format = getD3D12ShaderResourceFormat(format);
     desc.ViewDimension = toSRVDimension(type, layerCount, texInfo.samples != SampleCount::X1);
     desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 

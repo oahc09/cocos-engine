@@ -43,17 +43,6 @@ namespace gfx {
 
 namespace {
 
-DXGI_FORMAT toD3D12DSVFormat(Format format) {
-    switch (format) {
-        case Format::DEPTH:
-            return DXGI_FORMAT_D32_FLOAT;
-        case Format::DEPTH_STENCIL:
-            return DXGI_FORMAT_D24_UNORM_S8_UINT;
-        default:
-            return DXGI_FORMAT_UNKNOWN;
-    }
-}
-
 bool buildAttachmentSnapshot(
     CCD3D12Texture *texture,
     uint64_t deviceEpoch,
@@ -191,7 +180,7 @@ bool makeDepthStencilViewDesc(
     const D3D12_RESOURCE_DESC &resourceDesc,
     D3D12_DEPTH_STENCIL_VIEW_DESC &desc) {
     desc = {};
-    desc.Format = toD3D12DSVFormat(attachment.format);
+    desc.Format = getD3D12DepthStencilViewFormat(attachment.format);
     if (desc.Format == DXGI_FORMAT_UNKNOWN) {
         return false;
     }

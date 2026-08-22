@@ -563,6 +563,38 @@ def test_descriptor_perf_counters_are_runtime_opt_in_and_cover_hot_path() -> Non
     assert "recordTransientUniformSlotFallback" in read("D3D12Buffer.cpp")
 
 
+def test_format_mapping_has_one_d3d12_source_of_truth() -> None:
+    texture_h = read("D3D12Texture.h")
+    texture_cpp = read("D3D12Texture.cpp")
+    render_pass_cpp = read("D3D12RenderPass.cpp")
+    framebuffer_cpp = read("D3D12Framebuffer.cpp")
+    descriptor_cpp = read("D3D12DescriptorSet.cpp")
+    device_cpp = read("D3D12Device.cpp")
+
+    for signature in (
+        "getD3D12TextureResourceFormat",
+        "getD3D12ShaderResourceFormat",
+        "getD3D12DepthStencilViewFormat",
+    ):
+        assert signature in texture_h
+        assert signature in texture_cpp
+
+    typed_map = function_body(texture_cpp, "DXGI_FORMAT mapD3D12Format")
+    assert "case Format::R8SN:" in typed_map
+    assert "case Format::RG8SN:" in typed_map
+    assert "case Format::RGBA8SN:" in typed_map
+    texture_create = function_body(texture_cpp, "bool CCD3D12Texture::createResource")
+    assert "getD3D12TextureResourceFormat(_info.format)" in texture_create
+
+    assert "toDXGIFormatUint32" not in render_pass_cpp
+    assert "toD3D12Format(attachment.format)" in render_pass_cpp
+    assert "toD3D12DSVFormat" not in framebuffer_cpp
+    assert "getD3D12DepthStencilViewFormat" in framebuffer_cpp
+    assert "toSRVFormat" not in descriptor_cpp
+    assert "getD3D12ShaderResourceFormat" in descriptor_cpp
+    assert "getD3D12ShaderResourceFormat(format)" in device_cpp
+
+
 def test_shader_scheduler_releases_completed_task_captures() -> None:
     scheduler = read("D3D12ShaderCompileScheduler.h")
     execute = function_body(scheduler, "void executeTask")
@@ -1012,6 +1044,7 @@ if __name__ == "__main__":
     test_render_pass_color_attachment_count_matches_engine_stack_capacity()
     test_persistent_descriptor_staging_pools_do_not_use_tiny_heap_granularity()
     test_descriptor_perf_counters_are_runtime_opt_in_and_cover_hot_path()
+    test_format_mapping_has_one_d3d12_source_of_truth()
     test_shader_scheduler_releases_completed_task_captures()
     test_partial_texture_upload_uses_region_sized_footprints()
     test_fragment_linkage_repair_is_shader_name_independent()
