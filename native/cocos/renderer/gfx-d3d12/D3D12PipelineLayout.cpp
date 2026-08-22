@@ -65,7 +65,7 @@ uint64_t hashRootSignatureBlob(const void *data, size_t size) {
 }
 
 D3D12_SHADER_VISIBILITY toD3D12ShaderVisibility(ShaderStageFlags stageFlags) {
-    if (hasAnyFlags(stageFlags, ShaderStageFlagBit::ALL)) {
+    if (hasAllFlags(stageFlags, ShaderStageFlagBit::ALL)) {
         return D3D12_SHADER_VISIBILITY_ALL;
     }
     // If multiple stages, use ALL

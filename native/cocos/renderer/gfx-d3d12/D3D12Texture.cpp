@@ -644,12 +644,28 @@ bool CCD3D12Texture::createResource(uint32_t width, uint32_t height) {
     heapProperties.CreationNodeMask = 1;
     heapProperties.VisibleNodeMask = 1;
 
+    const bool isTexture1D = _info.type == TextureType::TEX1D ||
+                             _info.type == TextureType::TEX1D_ARRAY;
+    const bool isTexture3D = _info.type == TextureType::TEX3D;
+    if (_info.samples != SampleCount::X1 && (isTexture1D || isTexture3D)) {
+        CC_LOG_ERROR("D3D12 texture type %u does not support multisampling.",
+                     static_cast<unsigned>(_info.type));
+        return false;
+    }
+
     D3D12_RESOURCE_DESC resourceDesc{};
-    resourceDesc.Dimension = _info.type == TextureType::TEX3D ? D3D12_RESOURCE_DIMENSION_TEXTURE3D : D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    resourceDesc.Dimension = isTexture1D ? D3D12_RESOURCE_DIMENSION_TEXTURE1D
+                           : isTexture3D ? D3D12_RESOURCE_DIMENSION_TEXTURE3D
+                                         : D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     resourceDesc.Alignment = 0;
     resourceDesc.Width = width;
-    resourceDesc.Height = height;
-    resourceDesc.DepthOrArraySize = _info.type == TextureType::TEX3D ? static_cast<UINT16>(_info.depth) : static_cast<UINT16>(_info.layerCount);
+    resourceDesc.Height = isTexture1D ? 1U : height;
+    resourceDesc.DepthOrArraySize = isTexture3D ? static_cast<UINT16>(_info.depth)
+                                 : isTexture1D ? static_cast<UINT16>(
+                                                     _info.type == TextureType::TEX1D_ARRAY
+                                                         ? std::max(_info.layerCount, 1U)
+                                                         : 1U)
+                                               : static_cast<UINT16>(std::max(_info.layerCount, 1U));
     resourceDesc.MipLevels = static_cast<UINT16>(_info.levelCount);
     resourceDesc.Format = resourceFormat;
     resourceDesc.SampleDesc.Count = toD3D12SampleCount(_info.samples);
@@ -722,7 +738,7 @@ bool CCD3D12Texture::createResource(uint32_t width, uint32_t height) {
     }
 
     const uint32_t mipLevels = std::max(_info.levelCount, 1U);
-    const uint32_t arraySize = _info.type == TextureType::TEX3D ? 1U : std::max(_info.layerCount, 1U);
+    const uint32_t arraySize = isTexture3D ? 1U : resourceDesc.DepthOrArraySize;
     const uint32_t planeCount = _info.format == Format::DEPTH_STENCIL ? 2U : 1U;
     auto newBacking = std::make_shared<D3D12ResourceBacking>();
     const auto oldBacking = _impl->backing;

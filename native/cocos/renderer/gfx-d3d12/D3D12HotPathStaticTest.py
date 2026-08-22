@@ -595,6 +595,43 @@ def test_format_mapping_has_one_d3d12_source_of_truth() -> None:
     assert "getD3D12ShaderResourceFormat(format)" in device_cpp
 
 
+def test_texture_view_type_mapping_covers_arrays_and_storage_ranges() -> None:
+    texture_cpp = read("D3D12Texture.cpp")
+    descriptor_cpp = read("D3D12DescriptorSet.cpp")
+
+    texture_create = function_body(texture_cpp, "bool CCD3D12Texture::createResource")
+    assert "TextureType::TEX1D_ARRAY" in texture_create
+    assert "D3D12_RESOURCE_DIMENSION_TEXTURE1D" in texture_create
+
+    srv_dimension = function_body(descriptor_cpp, "D3D12_SRV_DIMENSION toSRVDimension")
+    uav_dimension = function_body(descriptor_cpp, "D3D12_UAV_DIMENSION toUAVDimension")
+    for source in (srv_dimension, uav_dimension):
+        assert "case TextureType::TEX1D_ARRAY:" in source
+        assert "case TextureType::TEX2D_ARRAY:" in source
+        assert "DIMENSION_UNKNOWN" in source
+
+    srv_desc = function_body(descriptor_cpp, "D3D12_SHADER_RESOURCE_VIEW_DESC makeTextureSRVDesc")
+    assert "D3D12_SRV_DIMENSION_TEXTURE1DARRAY" in srv_desc
+    assert "desc.Texture1DArray.FirstArraySlice = baseLayer" in srv_desc
+    assert descriptor_cpp.count("srvDesc.ViewDimension != D3D12_SRV_DIMENSION_UNKNOWN") == 3
+
+    uav_desc = function_body(descriptor_cpp, "bool makeTextureUAVDesc")
+    assert "viewInfo.baseLevel" in uav_desc
+    assert "viewInfo.baseLayer" in uav_desc
+    assert "D3D12_UAV_DIMENSION_TEXTURE2DARRAY" in uav_desc
+    assert "D3D12_UAV_DIMENSION_TEXTURE3D" in uav_desc
+
+
+def test_root_visibility_does_not_treat_each_stage_as_all_stages() -> None:
+    pipeline_layout_cpp = read("D3D12PipelineLayout.cpp")
+    visibility = function_body(
+        pipeline_layout_cpp,
+        "D3D12_SHADER_VISIBILITY toD3D12ShaderVisibility",
+    )
+    assert "hasAllFlags(stageFlags, ShaderStageFlagBit::ALL)" in visibility
+    assert "hasAnyFlags(stageFlags, ShaderStageFlagBit::ALL)" not in visibility
+
+
 def test_shader_scheduler_releases_completed_task_captures() -> None:
     scheduler = read("D3D12ShaderCompileScheduler.h")
     execute = function_body(scheduler, "void executeTask")
@@ -1045,6 +1082,8 @@ if __name__ == "__main__":
     test_persistent_descriptor_staging_pools_do_not_use_tiny_heap_granularity()
     test_descriptor_perf_counters_are_runtime_opt_in_and_cover_hot_path()
     test_format_mapping_has_one_d3d12_source_of_truth()
+    test_texture_view_type_mapping_covers_arrays_and_storage_ranges()
+    test_root_visibility_does_not_treat_each_stage_as_all_stages()
     test_shader_scheduler_releases_completed_task_captures()
     test_partial_texture_upload_uses_region_sized_footprints()
     test_fragment_linkage_repair_is_shader_name_independent()

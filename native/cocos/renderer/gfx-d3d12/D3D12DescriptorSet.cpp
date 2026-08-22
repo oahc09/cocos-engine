@@ -49,20 +49,28 @@ std::atomic<uint64_t> DESCRIPTOR_SET_ID{1};
 
 D3D12_SRV_DIMENSION toSRVDimension(TextureType type, uint32_t layerCount, bool isMS) {
     if (isMS) {
-        if (layerCount > 1) return D3D12_SRV_DIMENSION_TEXTURE2DMSARRAY;
-        return D3D12_SRV_DIMENSION_TEXTURE2DMS;
+        if (type == TextureType::TEX2D || type == TextureType::TEX2D_ARRAY) {
+            return (type == TextureType::TEX2D_ARRAY || layerCount > 1)
+                       ? D3D12_SRV_DIMENSION_TEXTURE2DMSARRAY
+                       : D3D12_SRV_DIMENSION_TEXTURE2DMS;
+        }
+        return D3D12_SRV_DIMENSION_UNKNOWN;
     }
     switch (type) {
         case TextureType::TEX1D:
             return (layerCount > 1) ? D3D12_SRV_DIMENSION_TEXTURE1DARRAY : D3D12_SRV_DIMENSION_TEXTURE1D;
+        case TextureType::TEX1D_ARRAY:
+            return D3D12_SRV_DIMENSION_TEXTURE1DARRAY;
         case TextureType::TEX2D:
             return (layerCount > 1) ? D3D12_SRV_DIMENSION_TEXTURE2DARRAY : D3D12_SRV_DIMENSION_TEXTURE2D;
+        case TextureType::TEX2D_ARRAY:
+            return D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
         case TextureType::TEX3D:
             return D3D12_SRV_DIMENSION_TEXTURE3D;
         case TextureType::CUBE:
             return (layerCount > 6) ? D3D12_SRV_DIMENSION_TEXTURECUBEARRAY : D3D12_SRV_DIMENSION_TEXTURECUBE;
         default:
-            return D3D12_SRV_DIMENSION_TEXTURE2D;
+            return D3D12_SRV_DIMENSION_UNKNOWN;
     }
 }
 
@@ -70,12 +78,16 @@ D3D12_UAV_DIMENSION toUAVDimension(TextureType type, uint32_t layerCount) {
     switch (type) {
         case TextureType::TEX1D:
             return (layerCount > 1) ? D3D12_UAV_DIMENSION_TEXTURE1DARRAY : D3D12_UAV_DIMENSION_TEXTURE1D;
+        case TextureType::TEX1D_ARRAY:
+            return D3D12_UAV_DIMENSION_TEXTURE1DARRAY;
         case TextureType::TEX2D:
             return (layerCount > 1) ? D3D12_UAV_DIMENSION_TEXTURE2DARRAY : D3D12_UAV_DIMENSION_TEXTURE2D;
+        case TextureType::TEX2D_ARRAY:
+            return D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
         case TextureType::TEX3D:
             return D3D12_UAV_DIMENSION_TEXTURE3D;
         default:
-            return D3D12_UAV_DIMENSION_TEXTURE2D;
+            return D3D12_UAV_DIMENSION_UNKNOWN;
     }
 }
 
@@ -103,6 +115,16 @@ D3D12_SHADER_RESOURCE_VIEW_DESC makeTextureSRVDesc(const Texture *gfxTexture, co
     desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 
     switch (desc.ViewDimension) {
+        case D3D12_SRV_DIMENSION_TEXTURE1D:
+            desc.Texture1D.MostDetailedMip = baseLevel;
+            desc.Texture1D.MipLevels = mipLevels;
+            break;
+        case D3D12_SRV_DIMENSION_TEXTURE1DARRAY:
+            desc.Texture1DArray.MostDetailedMip = baseLevel;
+            desc.Texture1DArray.MipLevels = mipLevels;
+            desc.Texture1DArray.FirstArraySlice = baseLayer;
+            desc.Texture1DArray.ArraySize = layerCount;
+            break;
         case D3D12_SRV_DIMENSION_TEXTURE2D:
             desc.Texture2D.MostDetailedMip = baseLevel;
             desc.Texture2D.MipLevels = mipLevels;
@@ -139,6 +161,70 @@ D3D12_SHADER_RESOURCE_VIEW_DESC makeTextureSRVDesc(const Texture *gfxTexture, co
     }
 
     return desc;
+}
+
+bool makeTextureUAVDesc(const Texture *gfxTexture,
+                        DXGI_FORMAT resourceFormat,
+                        D3D12_UNORDERED_ACCESS_VIEW_DESC &desc) {
+    const auto &texInfo = gfxTexture->getInfo();
+    const auto &viewInfo = gfxTexture->getViewInfo();
+    const bool isView = gfxTexture->isTextureView();
+    const TextureType type = isView ? viewInfo.type : texInfo.type;
+    const uint32_t baseLevel = isView ? viewInfo.baseLevel : 0;
+    const uint32_t baseLayer = isView ? viewInfo.baseLayer : 0;
+    uint32_t layerCount = isView ? viewInfo.layerCount : texInfo.layerCount;
+    if (layerCount == 0) {
+        layerCount = 1;
+    }
+    if (texInfo.samples != SampleCount::X1) {
+        return false;
+    }
+
+    const Format format = isView ? viewInfo.format : texInfo.format;
+    desc = {};
+    desc.Format = toD3D12Format(format);
+    if (desc.Format == DXGI_FORMAT_UNKNOWN) {
+        return false;
+    }
+    if (desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB) {
+        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    } else if (desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB) {
+        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    }
+    if (resourceFormat != DXGI_FORMAT_UNKNOWN &&
+        resourceFormat != desc.Format &&
+        resourceFormat != DXGI_FORMAT_R8G8B8A8_UNORM_SRGB &&
+        resourceFormat != DXGI_FORMAT_B8G8R8A8_UNORM_SRGB) {
+        return false;
+    }
+
+    desc.ViewDimension = toUAVDimension(type, layerCount);
+    switch (desc.ViewDimension) {
+        case D3D12_UAV_DIMENSION_TEXTURE1D:
+            desc.Texture1D.MipSlice = baseLevel;
+            break;
+        case D3D12_UAV_DIMENSION_TEXTURE1DARRAY:
+            desc.Texture1DArray.MipSlice = baseLevel;
+            desc.Texture1DArray.FirstArraySlice = baseLayer;
+            desc.Texture1DArray.ArraySize = layerCount;
+            break;
+        case D3D12_UAV_DIMENSION_TEXTURE2D:
+            desc.Texture2D.MipSlice = baseLevel;
+            break;
+        case D3D12_UAV_DIMENSION_TEXTURE2DARRAY:
+            desc.Texture2DArray.MipSlice = baseLevel;
+            desc.Texture2DArray.FirstArraySlice = baseLayer;
+            desc.Texture2DArray.ArraySize = layerCount;
+            break;
+        case D3D12_UAV_DIMENSION_TEXTURE3D:
+            desc.Texture3D.MipSlice = baseLevel;
+            desc.Texture3D.FirstWSlice = baseLayer;
+            desc.Texture3D.WSize = layerCount;
+            break;
+        default:
+            return false;
+    }
+    return true;
 }
 
 D3D12_SHADER_RESOURCE_VIEW_DESC makeRawBufferSRVDesc(uint64_t firstElement, uint64_t sizeInBytes) {
@@ -923,7 +1009,15 @@ void CCD3D12DescriptorSet::forceUpdate() {
                             const auto srvDesc = makeTextureSRVDesc(gfxTexture, d3d12Texture);
                             D3D12_CPU_DESCRIPTOR_HANDLE handle;
                             handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
-                            d3dDevice->CreateShaderResourceView(rawResource, &srvDesc, handle);
+                            if (srvDesc.Format != DXGI_FORMAT_UNKNOWN &&
+                                srvDesc.ViewDimension != D3D12_SRV_DIMENSION_UNKNOWN) {
+                                d3dDevice->CreateShaderResourceView(rawResource, &srvDesc, handle);
+                            } else {
+                                CC_LOG_ERROR("D3D12DescriptorSet: unsupported sampler texture view type=%u format=%u.",
+                                             static_cast<unsigned>(gfxTexture->getViewInfo().type),
+                                             static_cast<unsigned>(gfxTexture->getFormat()));
+                                writeDummyTextureSRV(handle);
+                            }
                         } else {
                             // Texture exists but has no D3D12 resource -- write null SRV descriptor.
                             D3D12_CPU_DESCRIPTOR_HANDLE handle;
@@ -968,7 +1062,15 @@ void CCD3D12DescriptorSet::forceUpdate() {
                             const auto srvDesc = makeTextureSRVDesc(gfxTexture, d3d12Texture);
                             D3D12_CPU_DESCRIPTOR_HANDLE handle;
                             handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
-                            d3dDevice->CreateShaderResourceView(rawResource, &srvDesc, handle);
+                            if (srvDesc.Format != DXGI_FORMAT_UNKNOWN &&
+                                srvDesc.ViewDimension != D3D12_SRV_DIMENSION_UNKNOWN) {
+                                d3dDevice->CreateShaderResourceView(rawResource, &srvDesc, handle);
+                            } else {
+                                CC_LOG_ERROR("D3D12DescriptorSet: unsupported texture view type=%u format=%u.",
+                                             static_cast<unsigned>(gfxTexture->getViewInfo().type),
+                                             static_cast<unsigned>(gfxTexture->getFormat()));
+                                writeDummyTextureSRV(handle);
+                            }
                         } else {
                             // Texture exists but has no D3D12 resource -- write null SRV descriptor.
                             D3D12_CPU_DESCRIPTOR_HANDLE handle;
@@ -1015,16 +1117,16 @@ void CCD3D12DescriptorSet::forceUpdate() {
                             auto *d3d12Texture = static_cast<CCD3D12Texture *>(gfxTexture);
                             auto *rawResource = static_cast<ID3D12Resource *>(d3d12Texture->getD3D12ResourceHandle());
                             if (rawResource) {
-                                const auto &texInfo = gfxTexture->getInfo();
                                 D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
-                                uavDesc.Format = rawResource->GetDesc().Format;
-                                if (uavDesc.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB) {
-                                    uavDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-                                } else if (uavDesc.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB) {
-                                    uavDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+                                if (makeTextureUAVDesc(
+                                        gfxTexture, rawResource->GetDesc().Format, uavDesc)) {
+                                    d3dDevice->CreateUnorderedAccessView(rawResource, nullptr, &uavDesc, handle);
+                                } else {
+                                    CC_LOG_ERROR("D3D12DescriptorSet: unsupported storage image view type=%u format=%u.",
+                                                 static_cast<unsigned>(gfxTexture->getViewInfo().type),
+                                                 static_cast<unsigned>(gfxTexture->getFormat()));
+                                    writeDummyTextureUAV(handle);
                                 }
-                                uavDesc.ViewDimension = toUAVDimension(texInfo.type, texInfo.layerCount);
-                                d3dDevice->CreateUnorderedAccessView(rawResource, nullptr, &uavDesc, handle);
                             } else {
                                 // Null resource: write null UAV descriptor to keep heap slot valid.
                                 writeDummyTextureUAV(handle);
@@ -1047,7 +1149,15 @@ void CCD3D12DescriptorSet::forceUpdate() {
                             const auto srvDesc = makeTextureSRVDesc(gfxTexture, d3d12Texture);
                             D3D12_CPU_DESCRIPTOR_HANDLE handle;
                             handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
-                            d3dDevice->CreateShaderResourceView(rawResource, &srvDesc, handle);
+                            if (srvDesc.Format != DXGI_FORMAT_UNKNOWN &&
+                                srvDesc.ViewDimension != D3D12_SRV_DIMENSION_UNKNOWN) {
+                                d3dDevice->CreateShaderResourceView(rawResource, &srvDesc, handle);
+                            } else {
+                                CC_LOG_ERROR("D3D12DescriptorSet: unsupported input attachment view type=%u format=%u.",
+                                             static_cast<unsigned>(gfxTexture->getViewInfo().type),
+                                             static_cast<unsigned>(gfxTexture->getFormat()));
+                                writeDummyTextureSRV(handle);
+                            }
                         } else {
                             // Texture exists but has no D3D12 resource -- write null SRV descriptor.
                             D3D12_CPU_DESCRIPTOR_HANDLE handle;
