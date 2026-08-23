@@ -45,11 +45,46 @@ namespace cc {
 namespace gfx {
 
 namespace {
-constexpr UINT D3D12_PRESENT_SYNC_INTERVAL = 0;
-constexpr UINT D3D12_PRESENT_FLAGS = 0;
+// gfx VsyncMode -> DXGI sync interval. ON/RELAXED/MAILBOX all present with
+// vsync enabled; HALF caps the frame rate at half the refresh rate.
+// MAILBOX has no DXGI flip-model equivalent (no independent mailbox queue)
+// and degrades to ON per the VsyncMode fallback contract.
+constexpr UINT D3D12_PRESENT_VSYNC_SYNC_INTERVAL = 1;
+constexpr UINT D3D12_PRESENT_HALF_SYNC_INTERVAL = 2;
 #if CC_D3D12_DIAGNOSTICS_ENABLED
 constexpr uint64_t D3D12_PRESENT_DIAG_THRESHOLD_MS = 2;
 #endif
+
+UINT getD3D12PresentSyncInterval(VsyncMode mode) {
+    switch (mode) {
+        case VsyncMode::OFF:
+            return 0;
+        case VsyncMode::HALF:
+            return D3D12_PRESENT_HALF_SYNC_INTERVAL;
+        case VsyncMode::ON:
+        case VsyncMode::RELAXED:
+        case VsyncMode::MAILBOX:
+        default:
+            return D3D12_PRESENT_VSYNC_SYNC_INTERVAL;
+    }
+}
+
+// DXGI_PRESENT_ALLOW_TEARING requires factory support AND a swapchain created
+// with DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING (see createOrResizeSwapchain).
+bool queryD3D12PresentAllowTearing(IDXGIFactory4 *factory) {
+    if (!factory) {
+        return false;
+    }
+    Microsoft::WRL::ComPtr<IDXGIFactory5> factory5;
+    if (FAILED(factory->QueryInterface(IID_PPV_ARGS(&factory5))) || !factory5) {
+        return false;
+    }
+    BOOL allowTearing = FALSE;
+    if (FAILED(factory5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &allowTearing, sizeof(allowTearing)))) {
+        return false;
+    }
+    return allowTearing == TRUE;
+}
 } // namespace
 
 struct CCD3D12Swapchain::Impl {
@@ -60,6 +95,10 @@ struct CCD3D12Swapchain::Impl {
     uint32_t currentBackBufferIndex{0};
     uint32_t rtvDescriptorSize{0};
     bool ready{false};
+    // Queried once at creation; gates DXGI_PRESENT_ALLOW_TEARING and the
+    // matching swapchain creation/resize flag.
+    bool tearingSupported{false};
+    bool mailboxDegradationWarned{false};
 };
 
 CCD3D12Swapchain::CCD3D12Swapchain() = default;
@@ -202,22 +241,46 @@ bool CCD3D12Swapchain::present() {
         return false;
     }
 
+    if (_vsyncMode == VsyncMode::MAILBOX && !_impl->mailboxDegradationWarned) {
+        _impl->mailboxDegradationWarned = true;
+        CC_LOG_WARNING("D3D12 swapchain: VsyncMode::MAILBOX has no DXGI flip-model equivalent; falling back to vsync ON.");
+    }
+    const UINT syncInterval = getD3D12PresentSyncInterval(_vsyncMode);
+    // Tearing is only valid with syncInterval 0 on a swapchain created with
+    // DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING (see createOrResizeSwapchain).
+    const UINT presentFlags = (syncInterval == 0 && _impl->tearingSupported)
+                                  ? DXGI_PRESENT_ALLOW_TEARING
+                                  : 0U;
+
 #if CC_D3D12_DIAGNOSTICS_ENABLED
     const auto presentStart = std::chrono::steady_clock::now();
 #endif
-    HRESULT hr = _impl->swapChain->Present(D3D12_PRESENT_SYNC_INTERVAL, D3D12_PRESENT_FLAGS);
+    HRESULT hr = _impl->swapChain->Present(syncInterval, presentFlags);
 #if CC_D3D12_DIAGNOSTICS_ENABLED
     const auto presentEnd = std::chrono::steady_clock::now();
     const auto presentMs = std::chrono::duration_cast<std::chrono::milliseconds>(presentEnd - presentStart).count();
     if (presentMs >= D3D12_PRESENT_DIAG_THRESHOLD_MS) {
         CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] SwapchainPresent syncInterval=%u flags=%u totalMs=%llu",
-                    D3D12_PRESENT_SYNC_INTERVAL,
-                    D3D12_PRESENT_FLAGS,
+                    syncInterval,
+                    presentFlags,
                     static_cast<unsigned long long>(presentMs));
     }
 #endif
     if (FAILED(hr)) {
-        CC_LOG_ERROR("IDXGISwapChain::Present failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+        CC_LOG_ERROR("IDXGISwapChain::Present failed. HRESULT=0x%08x vsyncMode=%u syncInterval=%u",
+                     static_cast<unsigned>(hr), static_cast<unsigned>(_vsyncMode), syncInterval);
+        if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
+            // The device is gone (TDR/driver reset): nothing can recover this
+            // frame. Mark the swapchain unusable and record the sticky
+            // device-lost state so subsequent submissions fail fast.
+            _impl->ready = false;
+            if (auto *device = CCD3D12Device::getInstance()) {
+                device->markD3D12DeviceLost(hr);
+            }
+        } else if (hr == DXGI_ERROR_ACCESS_LOST || hr == DXGI_ERROR_INVALID_CALL) {
+            // The device is fine but this swapchain is unusable.
+            _impl->ready = false;
+        }
         return false;
     }
 
@@ -237,6 +300,10 @@ bool CCD3D12Swapchain::createOrResizeSwapchain(uint32_t width, uint32_t height) 
     auto hwnd = reinterpret_cast<HWND>(_windowHandle);
     if (!hwnd) {
         CC_LOG_ERROR("Window handle is null for D3D12 swapchain.");
+        return false;
+    }
+    if (device->isD3D12DeviceLost()) {
+        CC_LOG_ERROR("D3D12 swapchain operation refused because the device is lost.");
         return false;
     }
 
@@ -263,6 +330,12 @@ bool CCD3D12Swapchain::createOrResizeSwapchain(uint32_t width, uint32_t height) 
         }
 
         Microsoft::WRL::ComPtr<IDXGISwapChain1> swapChain1;
+        // Query tearing support once; the flag must be set at swapchain
+        // creation for DXGI_PRESENT_ALLOW_TEARING to be legal at Present time.
+        _impl->tearingSupported = queryD3D12PresentAllowTearing(dxgiFactory);
+        if (_impl->tearingSupported) {
+            swapchainDesc.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+        }
         hr = dxgiFactory->CreateSwapChainForHwnd(
             graphicsQueue,
             hwnd,
@@ -289,9 +362,20 @@ bool CCD3D12Swapchain::createOrResizeSwapchain(uint32_t width, uint32_t height) 
         for (auto &backBuffer : _impl->backBuffers) {
             backBuffer.reset();
         }
-        hr = _impl->swapChain->ResizeBuffers(Impl::BACK_BUFFER_COUNT, width, height, DXGI_FORMAT_R8G8B8A8_UNORM, 0);
+        // ResizeBuffers must preserve the ALLOW_TEARING creation flag.
+        const UINT swapchainFlags = _impl->tearingSupported ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0U;
+        hr = _impl->swapChain->ResizeBuffers(Impl::BACK_BUFFER_COUNT, width, height, DXGI_FORMAT_R8G8B8A8_UNORM, swapchainFlags);
         if (FAILED(hr)) {
             CC_LOG_ERROR("ResizeBuffers failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+            const HRESULT removedReason = d3dDevice->GetDeviceRemovedReason();
+            if (removedReason != S_OK) {
+                // TDR / device removal: recording the sticky lost state and
+                // skipping the RTV recovery — every GetBuffer call would fail
+                // on a removed device anyway.
+                device->markD3D12DeviceLost(removedReason);
+                _impl->ready = false;
+                return false;
+            }
             if (!createRenderTargetViews()) {
                 CC_LOG_ERROR("D3D12 swapchain failed to restore existing back buffers after ResizeBuffers failure.");
             } else {

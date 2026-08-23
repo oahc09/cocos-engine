@@ -118,6 +118,13 @@ public:
     void *getGraphicsQueueHandle() const;
     void *getDXGIFactoryHandle() const;
 
+    // Sticky device-lost state (TDR / DXGI_ERROR_DEVICE_REMOVED / RESET), set
+    // by waitIdle / queue submit / swapchain failure paths. Once set, queue
+    // submission and swapchain operations fail fast; recovery requires
+    // re-initializing the device.
+    bool isD3D12DeviceLost() const;
+    void markD3D12DeviceLost(int32_t removedReason);
+
     // GPU-visible descriptor heap pool for CBV/SRV/UAV (used by CommandBuffer::bindDescriptorSet)
     D3D12DescriptorHeapPool *getGPUDescriptorHeapPool() const;
     // GPU-visible sampler heap pool

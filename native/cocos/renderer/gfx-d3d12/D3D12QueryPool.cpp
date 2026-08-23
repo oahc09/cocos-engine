@@ -168,6 +168,39 @@ void CCD3D12QueryPool::doInit(const QueryPoolInfo &info) {
 }
 
 void CCD3D12QueryPool::doDestroy() {
+    // A ResolveQueryData batch may still be executing on the queue; its
+    // command list, heap and readback buffer must stay alive until the
+    // completion fence is signaled. If the wait times out (or the fence
+    // cannot be armed), the GPU may still be accessing them: deliberately
+    // leak those objects by detaching them from the owning ComPtrs (they
+    // are reclaimed at process exit) instead of releasing them out from
+    // under the hardware.
+    bool safeToRelease = true;
+    if (_impl->fence && _impl->fenceEvent &&
+        _impl->fence->GetCompletedValue() < _impl->fenceValue) {
+        if (SUCCEEDED(_impl->fence->SetEventOnCompletion(_impl->fenceValue, _impl->fenceEvent))) {
+            const DWORD waitResult = WaitForSingleObject(_impl->fenceEvent, 5000);
+            if (waitResult != WAIT_OBJECT_0) {
+                CC_LOG_ERROR("D3D12QueryPool::doDestroy timed out waiting for pending query readback. waitResult=%lu",
+                             static_cast<unsigned long>(waitResult));
+                safeToRelease = false;
+            }
+        } else {
+            CC_LOG_ERROR("D3D12QueryPool::doDestroy failed to arm the readback completion fence.");
+            safeToRelease = false;
+        }
+    }
+    if (!safeToRelease) {
+        // Keep the event handle alive as well: the armed completion may
+        // still fire and would reference a closed handle otherwise.
+        _impl->fenceEvent = nullptr;
+        _impl->fence.Detach();
+        _impl->commandList.Detach();
+        _impl->commandAllocator.Detach();
+        _impl->readbackBuffer.Detach();
+        _impl->queryHeap.Detach();
+        return;
+    }
     if (_impl->fenceEvent) {
         CloseHandle(_impl->fenceEvent);
         _impl->fenceEvent = nullptr;

@@ -300,6 +300,19 @@ D3D12_PRIMITIVE_TOPOLOGY_TYPE toD3D12PrimitiveTopologyType(PrimitiveMode mode) {
     }
 }
 
+// Modes D3D12 cannot express natively; they are approximated with LIST
+// topologies and render differently from the GL-family backends.
+bool isD3D12ApproximatedPrimitiveMode(PrimitiveMode mode) {
+    switch (mode) {
+        case PrimitiveMode::LINE_LOOP:
+        case PrimitiveMode::TRIANGLE_FAN:
+        case PrimitiveMode::ISO_LINE_LIST:
+            return true;
+        default:
+            return false;
+    }
+}
+
 D3D12_PRIMITIVE_TOPOLOGY toD3D12PrimitiveTopology(PrimitiveMode mode) {
     switch (mode) {
         case PrimitiveMode::POINT_LIST:                  return D3D_PRIMITIVE_TOPOLOGY_POINTLIST;
@@ -543,6 +556,10 @@ void CCD3D12PipelineState::doInit(const PipelineStateInfo &info) {
 
     // Store primitive topology for IA setup
     _impl->primitiveTopology = toD3D12PrimitiveTopology(_primitive);
+    if (isD3D12ApproximatedPrimitiveMode(_primitive)) {
+        CC_LOG_WARNING("D3D12PipelineState: primitive mode %u has no D3D12 equivalent and is approximated with a LIST topology; geometry will differ from GL-family backends.",
+                       static_cast<unsigned>(_primitive));
+    }
 
     // Get shader bytecode
     auto *d3d12Shader = static_cast<CCD3D12Shader *>(_shader);

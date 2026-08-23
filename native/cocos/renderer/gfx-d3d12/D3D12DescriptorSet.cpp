@@ -1800,6 +1800,16 @@ void CCD3D12DescriptorSet::applyDynamicOffsets(uint32_t dynamicOffsetCount, cons
                                            : 0;
 
         if (slot.type == DescriptorType::DYNAMIC_UNIFORM_BUFFER) {
+            // A CBV BufferLocation must be 256-byte aligned; the GPU virtual
+            // address base is already aligned, so only the caller-provided
+            // dynamic offset can break the contract (undefined behavior on
+            // D3D12). Upper layers are expected to align via
+            // uboOffsetAlignment (reported as 256). Debug builds assert;
+            // release builds reject the misaligned descriptor below and
+            // bind the dummy CBV instead of writing an unaligned location.
+            const bool dynamicOffsetAligned =
+                dynamicOffset % D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT == 0;
+            CC_ASSERT(dynamicOffsetAligned);
             auto *gfxBuffer = _buffers[descIdx].ptr;
             if (gfxBuffer && cbvSrvUavOffset < _impl->cbvSrvUavDescriptorCount) {
                 auto *d3d12Buffer = static_cast<CCD3D12Buffer *>(gfxBuffer);
@@ -1828,9 +1838,13 @@ void CCD3D12DescriptorSet::applyDynamicOffsets(uint32_t dynamicOffsetCount, cons
                             cbvDesc.BufferLocation = d3d12Buffer->getD3D12UniformGPUVirtualAddress() + dynamicOffset;
                             cbvDesc.SizeInBytes = static_cast<UINT>(cbvSize);
 
+                            if (!dynamicOffsetAligned) {
+                                CC_LOG_ERROR("[D3D12-CBV-DYN] dynamic uniform offset %u is not 256-byte aligned; binding the dummy CBV instead (binding=%u descIdx=%u).",
+                                               dynamicOffset, slot.binding, descIdx);
+                            }
                             D3D12_CPU_DESCRIPTOR_HANDLE handle;
                             handle.ptr = _impl->cbvSrvUavCpuStart.ptr + cbvSrvUavOffset * _impl->cbvSrvUavDescriptorSize;
-                            if (cbvDesc.SizeInBytes >= 256U && availableAligned >= cbvSize) {
+                            if (dynamicOffsetAligned && cbvDesc.SizeInBytes >= 256U && availableAligned >= cbvSize) {
                                 d3dDevice->CreateConstantBufferView(&cbvDesc, handle);
                             } else {
                                 writeDummyCBV(handle);

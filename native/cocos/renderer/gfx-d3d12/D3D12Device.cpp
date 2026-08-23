@@ -147,6 +147,10 @@ struct CCD3D12Device::Impl {
     uint64_t bufferStateEpoch{1};
     uint64_t deviceEpoch{0};
     uint64_t transientUniformUploadGeneration{1};
+    // Sticky device-lost state (TDR / DXGI_ERROR_DEVICE_REMOVED / RESET).
+    // Set via markD3D12DeviceLost; recovery requires re-initialization.
+    bool deviceLost{false};
+    HRESULT deviceLostReason{S_OK};
 
     struct UploadPage {
         Microsoft::WRL::ComPtr<ID3D12Resource> resource;
@@ -288,6 +292,11 @@ bool CCD3D12Device::doInit(const DeviceInfo &info) {
         CC_LOG_ERROR("Failed to initialize D3D12 context.");
         return false;
     }
+    // initializeD3D12Context just created a fresh ID3D12Device; any recorded
+    // device-lost (TDR / removal) state described the previous device and
+    // must not outlive re-initialization.
+    _impl->deviceLost = false;
+    _impl->deviceLostReason = S_OK;
     initializeShaderCacheSession();
 
     for (auto &gpuDescriptorHeapPool : _impl->gpuDescriptorHeapPools) {
@@ -2283,6 +2292,11 @@ bool CCD3D12Device::waitIdle() {
         const HRESULT removedReason = _impl->d3dDevice
                                           ? _impl->d3dDevice->GetDeviceRemovedReason()
                                           : E_POINTER;
+        if (removedReason != S_OK) {
+            // TDR / device removal is sticky: record it once so later
+            // submissions and swapchain operations fail fast.
+            markD3D12DeviceLost(removedReason);
+        }
         CC_LOG_ERROR("D3D12 waitIdle %s failed. HRESULT=0x%08x DeviceRemovedReason=0x%08x",
                      stage, static_cast<unsigned>(hr), static_cast<unsigned>(removedReason));
     };
@@ -2342,6 +2356,21 @@ void *CCD3D12Device::getGraphicsQueueHandle() const {
 
 void *CCD3D12Device::getDXGIFactoryHandle() const {
     return _impl ? _impl->dxgiFactory.Get() : nullptr;
+}
+
+bool CCD3D12Device::isD3D12DeviceLost() const {
+    return _impl && _impl->deviceLost;
+}
+
+void CCD3D12Device::markD3D12DeviceLost(int32_t removedReason) {
+    if (!_impl || _impl->deviceLost) {
+        return;
+    }
+    // Sticky state: callers already log their own failure context; this only
+    // records the loss so queue submission / swapchain operations can fail
+    // fast instead of hammering a dead device.
+    _impl->deviceLost = true;
+    _impl->deviceLostReason = static_cast<HRESULT>(removedReason);
 }
 
 std::shared_ptr<void> CCD3D12Device::getBlitPipelineCacheEntry(uint32_t key) const {

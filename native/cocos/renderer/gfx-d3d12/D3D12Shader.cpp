@@ -1033,6 +1033,18 @@ struct InFlightDXBCCompileTicket {
 std::mutex s_inFlightDXBCMutex;
 std::unordered_map<ccstd::string, std::shared_ptr<InFlightDXBCCompile>> s_inFlightDXBCCompiles;
 
+// Upper bound for waiting on another thread's in-flight DXBC compile. A
+// healthy compile finishes well below this; exceeding it means the owner
+// stalled or died before finishing, and the waiter falls back to compiling
+// locally instead of hanging forever.
+constexpr std::chrono::seconds D3D12_INFLIGHT_DXBC_COMPILE_WAIT_TIMEOUT{10};
+
+enum class InFlightDXBCWaitResult {
+    COMPLETED_OK,
+    COMPLETED_FAILED,
+    TIMED_OUT,
+};
+
 InFlightDXBCCompileTicket beginInFlightDXBCCompile(const ccstd::string &cacheKey) {
     std::lock_guard<std::mutex> lock(s_inFlightDXBCMutex);
     auto iter = s_inFlightDXBCCompiles.find(cacheKey);
@@ -1045,21 +1057,36 @@ InFlightDXBCCompileTicket beginInFlightDXBCCompile(const ccstd::string &cacheKey
     return {compile, true};
 }
 
-bool waitForInFlightDXBCCompile(const InFlightDXBCCompileTicket &ticket, std::vector<uint8_t> &outDXBC) {
+InFlightDXBCWaitResult waitForInFlightDXBCCompile(const InFlightDXBCCompileTicket &ticket, std::vector<uint8_t> &outDXBC) {
     if (!ticket.compile) {
-        return false;
+        return InFlightDXBCWaitResult::COMPLETED_FAILED;
     }
 
     std::unique_lock<std::mutex> lock(ticket.compile->mutex);
-    ticket.compile->completedCondition.wait(lock, [&ticket]() {
-        return ticket.compile->completed;
-    });
+    const bool completed = ticket.compile->completedCondition.wait_for(
+        lock, D3D12_INFLIGHT_DXBC_COMPILE_WAIT_TIMEOUT, [&ticket]() {
+            return ticket.compile->completed;
+        });
+    if (!completed) {
+        return InFlightDXBCWaitResult::TIMED_OUT;
+    }
     if (ticket.compile->ok) {
         outDXBC = ticket.compile->dxbc;
     } else {
         outDXBC.clear();
     }
-    return ticket.compile->ok;
+    return ticket.compile->ok ? InFlightDXBCWaitResult::COMPLETED_OK
+                              : InFlightDXBCWaitResult::COMPLETED_FAILED;
+}
+
+InFlightDXBCCompileTicket replaceInFlightDXBCCompile(const ccstd::string &cacheKey) {
+    // Take over a stalled in-flight record. The previous owner's finish()
+    // only erases pointer-equal entries, so its late completion cannot
+    // remove this replacement.
+    std::lock_guard<std::mutex> lock(s_inFlightDXBCMutex);
+    auto compile = std::make_shared<InFlightDXBCCompile>();
+    s_inFlightDXBCCompiles[cacheKey] = compile;
+    return {compile, true};
 }
 
 bool finishInFlightDXBCCompile(const ccstd::string &cacheKey,
@@ -1609,19 +1636,30 @@ bool CCD3D12Shader::compileGLSLToDXBC(ShaderStageFlagBit stage,
         return false;
     }
 
-    const auto inFlightCompile = beginInFlightDXBCCompile(cacheKey);
+    auto inFlightCompile = beginInFlightDXBCCompile(cacheKey);
     if (!inFlightCompile.owner) {
-        const bool ok = waitForInFlightDXBCCompile(inFlightCompile, outDXBC);
-        if (ok) {
-            recordDXBCHashComparison(shaderName, stage, diagnosticGroupingKey, fullSourceKey, outDXBC, "in-flight");
+        const auto waitResult = waitForInFlightDXBCCompile(inFlightCompile, outDXBC);
+        if (waitResult != InFlightDXBCWaitResult::TIMED_OUT) {
+            const bool ok = waitResult == InFlightDXBCWaitResult::COMPLETED_OK;
+            if (ok) {
+                recordDXBCHashComparison(shaderName, stage, diagnosticGroupingKey, fullSourceKey, outDXBC, "in-flight");
+            }
+            CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] ShaderStageCompileInFlightHit name='%s' stage=%s profile=%s ok=%u totalMs=%llu glslBytes=%u dxbcBytes=%u cacheKey=%s",
+                        shaderName.c_str(), getShaderStageName(stage), profile, ok ? 1U : 0U,
+                        static_cast<unsigned long long>(elapsedMs(compileStart)),
+                        static_cast<unsigned>(compileSource.size()),
+                        static_cast<unsigned>(outDXBC.size()),
+                        cacheKey.c_str());
+            return ok;
         }
-        CC_D3D12_DIAGNOSTIC_LOG("[D3D12-PERF] ShaderStageCompileInFlightHit name='%s' stage=%s profile=%s ok=%u totalMs=%llu glslBytes=%u dxbcBytes=%u cacheKey=%s",
-                    shaderName.c_str(), getShaderStageName(stage), profile, ok ? 1U : 0U,
-                    static_cast<unsigned long long>(elapsedMs(compileStart)),
-                    static_cast<unsigned>(compileSource.size()),
-                    static_cast<unsigned>(outDXBC.size()),
-                    cacheKey.c_str());
-        return ok;
+        CC_LOG_WARNING(
+            "D3D12Shader: in-flight compile wait timed out after %lld ms for '%s' (%s); compiling locally.",
+            static_cast<long long>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    D3D12_INFLIGHT_DXBC_COMPILE_WAIT_TIMEOUT)
+                    .count()),
+            shaderName.c_str(), getShaderStageName(stage));
+        inFlightCompile = replaceInFlightDXBCCompile(cacheKey);
     }
     InFlightDXBCCompletion inFlightCompletion(cacheKey, inFlightCompile, outDXBC);
 

@@ -1,3 +1,8 @@
+# This file is only ever configured standalone (cmake -S native); the
+# declaration below is required by CMake 4.x (CMP0000) and is a no-op for
+# the CMake 3.30 that originally configured the existing build trees.
+cmake_minimum_required(VERSION 3.5)
+
 if(NOT USE_XR AND NOT USE_AR_MODULE)
     include(${CMAKE_CURRENT_LIST_DIR}/cmake/predefine.cmake)
 endif()

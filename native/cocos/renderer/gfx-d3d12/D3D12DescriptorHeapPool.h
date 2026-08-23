@@ -34,6 +34,12 @@ namespace gfx {
  * D3D12DescriptorHeapPool manages allocation and recycling of D3D12 descriptor heaps.
  * Supports CBV_SRV_UAV and SAMPLER heap types, with both CPU-visible and GPU-visible variants.
  *
+ * Threading contract: NOT thread-safe. All methods (including reset() and the
+ * dirty-heap bookkeeping) must be called from the frame/command-recording
+ * thread only, under the same single-threaded recording convention as the
+ * rest of this backend. GPU-visible pools are additionally frame-local and
+ * fence-protected by their owning frame resource.
+ *
  * This is a utility class designed to be integrated into the Device by Agent C.
  * Usage:
  *   1. Call allocate() to get a contiguous block of descriptors from a heap.

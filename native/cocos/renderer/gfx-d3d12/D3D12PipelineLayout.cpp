@@ -110,6 +110,14 @@ D3D12_DESCRIPTOR_RANGE_TYPE toD3D12DescriptorRangeType(DescriptorType type) {
 
 } // namespace
 
+// Register-space convention (bilateral, keep in sync with the shader side):
+// every descriptor range / root descriptor built here uses
+//   RegisterSpace = descriptor-set index (set), ShaderRegister = binding.
+// D3D12Shader's SPIRV-Cross configuration mirrors this with set=N -> space=N
+// when translating GLSL SPIR-V to HLSL. There is no single shared definition
+// of this mapping; changing one side without the other silently breaks every
+// pipeline.
+
 struct CCD3D12PipelineLayout::Impl {
     Microsoft::WRL::ComPtr<ID3D12RootSignature> rootSignature;
     uint64_t rootSignatureHash{0};

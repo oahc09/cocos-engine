@@ -45,6 +45,35 @@ namespace gfx {
 
 namespace {
 std::atomic<uint64_t> BUFFER_RESOURCE_GENERATION{1};
+
+ccstd::string describeD3D12BufferUsageFlags(BufferUsage usage) {
+    struct FlagName {
+        BufferUsageBit bit;
+        const char *name;
+    };
+    static const FlagName NAMES[] = {
+        {BufferUsageBit::TRANSFER_SRC, "TRANSFER_SRC"},
+        {BufferUsageBit::TRANSFER_DST, "TRANSFER_DST"},
+        {BufferUsageBit::INDEX, "INDEX"},
+        {BufferUsageBit::VERTEX, "VERTEX"},
+        {BufferUsageBit::UNIFORM, "UNIFORM"},
+        {BufferUsageBit::STORAGE, "STORAGE"},
+        {BufferUsageBit::INDIRECT, "INDIRECT"},
+    };
+    ccstd::string result;
+    for (const auto &entry : NAMES) {
+        if (hasFlag(usage, entry.bit)) {
+            if (!result.empty()) {
+                result += '|';
+            }
+            result += entry.name;
+        }
+    }
+    if (result.empty()) {
+        result = "NONE";
+    }
+    return result;
+}
 }
 
 struct CCD3D12Buffer::Impl {
@@ -65,6 +94,9 @@ struct CCD3D12Buffer::Impl {
     ccstd::vector<uint8_t> uniformShadowData;
     uint64_t uniformBackingSize{0};
     bool updateQueued{false};
+    // Guards the once-per-buffer warning for an update overwriting an
+    // un-flushed pending payload (last-write-wins within a flush window).
+    bool pendingOverwriteWarned{false};
     ID3D12Resource *transientUniformResource{nullptr};
     uint64_t transientUniformGPUAddress{0};
     uint64_t transientUniformEpoch{std::numeric_limits<uint64_t>::max()};
@@ -176,6 +208,9 @@ void CCD3D12Buffer::update(const void *buffer, uint32_t size) {
     if (!buffer || size == 0 || _size == 0) {
         return;
     }
+    // An update larger than the buffer is a caller bug; the silent clamp
+    // below would only upload a prefix.
+    CC_ASSERT(size <= _size);
 
     if (!_impl) {
         return;
@@ -259,6 +294,21 @@ void CCD3D12Buffer::update(const void *buffer, uint32_t size) {
         // command list instead of creating/submitting/waiting on one command
         // list per buffer. Queue ordering then protects data still used by the
         // previous frame while descriptors keep their stable DEFAULT resource.
+        if (_impl->updateQueued && !_impl->pendingOverwriteWarned) {
+            // updateQueued is only cleared once the pending payload has been
+            // flushed into a command list. Every consume point (draw /
+            // beginDrawBatch / execute / end) drains pending updates first, so
+            // two consecutive updates with no consume in between mean the
+            // first payload was never issued to the GPU: dropping it is safe
+            // (last-write-wins) and only flags a redundant CPU-side update.
+            // Size/usage identify which engine buffer is updated twice per
+            // flush window.
+            _impl->pendingOverwriteWarned = true;
+            CC_LOG_WARNING("D3D12 DEFAULT-heap buffer updated again before the pending upload was flushed; the earlier payload is dropped (last-write-wins within the flush window). size=%u usage=%s pending=%zu",
+                           _size,
+                           describeD3D12BufferUsageFlags(_usage).c_str(),
+                           _impl->pendingData.size());
+        }
         _impl->pendingData.resize(copySize);
         std::memcpy(_impl->pendingData.data(), buffer, copySize);
         if (!_impl->updateQueued) {

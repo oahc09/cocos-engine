@@ -195,6 +195,13 @@ void CCD3D12Queue::submit(CommandBuffer *const *cmdBuffs, uint32_t count) {
     }
 
     if (submissions.empty()) return;
+    if (device->isD3D12DeviceLost()) {
+        CC_LOG_ERROR("D3D12Queue::submit - device is lost; submission rejected until re-initialization.");
+        for (const auto &submission : submissions) {
+            submission.commandBuffer->notifySubmissionFailed();
+        }
+        return;
+    }
     if (!d3dDevice || !_impl->fence) {
         CC_LOG_ERROR("D3D12Queue::submit - device or submission fence is unavailable.");
         for (const auto &submission : submissions) {
@@ -283,6 +290,13 @@ void CCD3D12Queue::submit(CommandBuffer *const *cmdBuffs, uint32_t count) {
         HRESULT hr = graphicsQueue->Signal(_impl->fence.Get(), _impl->fenceValue);
         if (FAILED(hr)) {
             CC_LOG_ERROR("D3D12Queue::submit - Signal failed. HRESULT=0x%08x", static_cast<unsigned>(hr));
+            if (d3dDevice) {
+                const HRESULT removedReason = d3dDevice->GetDeviceRemovedReason();
+                if (removedReason != S_OK) {
+                    // Signal failure caused by device removal is sticky.
+                    device->markD3D12DeviceLost(removedReason);
+                }
+            }
             if (device->waitIdle()) {
                 return;
             }

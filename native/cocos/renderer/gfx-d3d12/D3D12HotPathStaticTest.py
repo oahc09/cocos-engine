@@ -1057,6 +1057,224 @@ def test_d3d12ma_command_buffer_retains_buffer_backing() -> None:
     assert "bufferBackings" in collect
 
 
+def test_present_honors_vsync_mode_all_enums() -> None:
+    swapchain_cpp = read("D3D12Swapchain.cpp")
+
+    # Every VsyncMode enum value must have an explicit sync-interval mapping:
+    # OFF -> 0, HALF -> 2, ON/RELAXED/MAILBOX -> 1.
+    sync_interval = function_body(swapchain_cpp, "UINT getD3D12PresentSyncInterval")
+    for mode in ("OFF", "HALF", "ON", "RELAXED", "MAILBOX"):
+        assert f"VsyncMode::{mode}" in sync_interval
+    assert "D3D12_PRESENT_HALF_SYNC_INTERVAL" in sync_interval
+    assert "D3D12_PRESENT_VSYNC_SYNC_INTERVAL" in sync_interval
+
+    present = function_body(swapchain_cpp, "bool CCD3D12Swapchain::present")
+    assert "getD3D12PresentSyncInterval(_vsyncMode)" in present
+    # Tearing is only legal with syncInterval 0 on a tearing-capable swapchain.
+    assert "syncInterval == 0 && _impl->tearingSupported" in present
+    assert "DXGI_PRESENT_ALLOW_TEARING" in present
+    assert "Present(syncInterval, presentFlags)" in present
+    # MAILBOX has no flip-model equivalent: warn once about the degradation.
+    assert "VsyncMode::MAILBOX" in present
+    assert "mailboxDegradationWarned" in present
+
+    # Tearing support is queried through the factory and gates the creation
+    # flag; ResizeBuffers must preserve that creation-time flag.
+    assert "DXGI_FEATURE_PRESENT_ALLOW_TEARING" in swapchain_cpp
+    create = function_body(
+        swapchain_cpp, "bool CCD3D12Swapchain::createOrResizeSwapchain"
+    )
+    assert "queryD3D12PresentAllowTearing(dxgiFactory)" in create
+    assert "swapchainDesc.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING" in create
+    assert (
+        "const UINT swapchainFlags = _impl->tearingSupported "
+        "? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0U;" in create
+    )
+    assert (
+        "ResizeBuffers(Impl::BACK_BUFFER_COUNT, width, height, "
+        "DXGI_FORMAT_R8G8B8A8_UNORM, swapchainFlags)" in create
+    )
+
+
+def test_device_loss_is_sticky_and_propagates_to_queue_and_swapchain() -> None:
+    device_h = read("D3D12Device.h")
+    device_cpp = read("D3D12Device.cpp")
+    queue_cpp = read("D3D12Queue.cpp")
+    swapchain_cpp = read("D3D12Swapchain.cpp")
+
+    # Sticky device-lost state lives on the device with public accessors.
+    assert "bool isD3D12DeviceLost() const;" in device_h
+    assert "void markD3D12DeviceLost(int32_t removedReason);" in device_h
+    assert "bool deviceLost{false};" in device_cpp
+    assert "HRESULT deviceLostReason{S_OK};" in device_cpp
+
+    # markD3D12DeviceLost never un-sets the flag (recovery = re-init).
+    mark_lost = function_body(device_cpp, "void CCD3D12Device::markD3D12DeviceLost")
+    assert "if (!_impl || _impl->deviceLost) {" in mark_lost
+    assert "_impl->deviceLost = true;" in mark_lost
+
+    # doInit builds a fresh ID3D12Device via initializeD3D12Context, so the
+    # sticky state recorded for the removed device is cleared on success;
+    # otherwise Queue and Swapchain would refuse work forever after a
+    # re-initialization.
+    do_init = function_body(device_cpp, "bool CCD3D12Device::doInit")
+    assert "_impl->deviceLost = false;" in do_init
+    assert "_impl->deviceLostReason = S_OK;" in do_init
+    assert do_init.index("_impl->deviceLost = false;") > do_init.index(
+        "initializeD3D12Context()"
+    )
+
+    # Queue submission fails fast once lost; a Signal failure that stems from
+    # device removal is recorded as a loss.
+    submit = function_body(queue_cpp, "void CCD3D12Queue::submit")
+    assert "device->isD3D12DeviceLost()" in submit
+    assert "GetDeviceRemovedReason()" in submit
+    assert "device->markD3D12DeviceLost(removedReason)" in submit
+
+    # Swapchain refuses to (re)create while lost and propagates Present /
+    # ResizeBuffers device-removal failures into the sticky state.
+    present = function_body(swapchain_cpp, "bool CCD3D12Swapchain::present")
+    assert "device->markD3D12DeviceLost(hr)" in present
+    create = function_body(
+        swapchain_cpp, "bool CCD3D12Swapchain::createOrResizeSwapchain"
+    )
+    assert "device->isD3D12DeviceLost()" in create
+    assert "GetDeviceRemovedReason()" in create
+    assert "device->markD3D12DeviceLost(removedReason)" in create
+
+
+def test_shader_inflight_wait_has_timeout_and_local_fallback() -> None:
+    shader_cpp = read("D3D12Shader.cpp")
+
+    # Bounded wait: a waiter can never hang forever on a stalled owner.
+    assert (
+        "constexpr std::chrono::seconds D3D12_INFLIGHT_DXBC_COMPILE_WAIT_TIMEOUT{10};"
+        in shader_cpp
+    )
+    wait = function_body(
+        shader_cpp, "InFlightDXBCWaitResult waitForInFlightDXBCCompile"
+    )
+    assert "wait_for(" in wait
+    assert "D3D12_INFLIGHT_DXBC_COMPILE_WAIT_TIMEOUT" in wait
+    assert "InFlightDXBCWaitResult::TIMED_OUT" in wait
+
+    # A timed-out waiter takes over the cache entry and compiles locally. The
+    # previous owner's finish() only erases pointer-equal entries, so the
+    # replacement cannot be un-registered by the stale owner.
+    assert "InFlightDXBCCompileTicket replaceInFlightDXBCCompile" in shader_cpp
+    assert "iter->second == ticket.compile" in shader_cpp
+    compile_shader = function_body(shader_cpp, "bool CCD3D12Shader::compileGLSLToDXBC")
+    timeout_pos = compile_shader.index("InFlightDXBCWaitResult::TIMED_OUT")
+    steal_pos = compile_shader.index(
+        "inFlightCompile = replaceInFlightDXBCCompile(cacheKey);"
+    )
+    assert steal_pos > timeout_pos
+
+
+def test_default_heap_buffer_update_warns_on_unflushed_overwrite() -> None:
+    buffer_cpp = read("D3D12Buffer.cpp")
+
+    update = function_body(buffer_cpp, "void CCD3D12Buffer::update")
+    # An update larger than the buffer is a caller bug, not a prefix clamp.
+    assert "CC_ASSERT(size <= _size);" in update
+    # Overwriting an un-flushed pending payload is last-write-wins: warn once.
+    assert "bool pendingOverwriteWarned{false};" in buffer_cpp
+    assert "_impl->updateQueued && !_impl->pendingOverwriteWarned" in update
+    assert "last-write-wins within the flush window" in update
+    assert "_impl->pendingOverwriteWarned = true;" in update
+    # The once-per-buffer warning carries size/usage so the double-updated
+    # engine buffer can be identified from the runtime log.
+    assert "size=%u usage=%s pending=%zu" in update
+    assert "describeD3D12BufferUsageFlags" in buffer_cpp
+
+
+def test_dynamic_uniform_offset_alignment_is_asserted() -> None:
+    descriptor_cpp = read("D3D12DescriptorSet.cpp")
+    apply = function_body(
+        descriptor_cpp, "void CCD3D12DescriptorSet::applyDynamicOffsets"
+    )
+    # D3D12 CBV BufferLocation must be 256-byte aligned; a misaligned dynamic
+    # offset is undefined behavior, so catch it in debug builds.
+    assert (
+        "dynamicOffset % D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT == 0"
+        in apply
+    )
+    assert "CC_ASSERT(dynamicOffsetAligned);" in apply
+    # CC_ASSERT compiles out of release builds, so the same check must gate
+    # the real CBV write: a misaligned (or too small) range binds the dummy
+    # CBV instead of writing an invalid descriptor location.
+    gate = (
+        "if (dynamicOffsetAligned && cbvDesc.SizeInBytes >= 256U"
+        " && availableAligned >= cbvSize)"
+    )
+    assert gate in apply
+    gated = apply[apply.index(gate):]
+    assert "d3dDevice->CreateConstantBufferView(&cbvDesc, handle)" in gated
+    assert "writeDummyCBV(handle)" in gated
+    assert "is not 256-byte aligned" in apply
+
+
+def test_query_pool_destroy_waits_for_pending_readback() -> None:
+    query_pool_cpp = read("D3D12QueryPool.cpp")
+    destroy = function_body(query_pool_cpp, "void CCD3D12QueryPool::doDestroy")
+    # Destroying a pool with an in-flight readback must not release the fence
+    # and readback resources out from under the GPU.
+    assert "_impl->fence->GetCompletedValue() < _impl->fenceValue" in destroy
+    assert "SetEventOnCompletion(_impl->fenceValue, _impl->fenceEvent)" in destroy
+    assert "WaitForSingleObject(_impl->fenceEvent, 5000)" in destroy
+    assert destroy.index("WaitForSingleObject") < destroy.index("CloseHandle")
+    # If the bounded wait times out (or the fence cannot be armed), the GPU
+    # may still be executing the ResolveQueryData batch: the command list,
+    # readback buffer and query heap are detached and deliberately leaked
+    # (reclaimed at process exit) instead of being released out from under
+    # the hardware.
+    assert "bool safeToRelease = true;" in destroy
+    assert "safeToRelease = false;" in destroy
+    leak = destroy[destroy.index("if (!safeToRelease) {"):]
+    assert "_impl->fence.Detach();" in leak
+    assert "_impl->commandList.Detach();" in leak
+    assert "_impl->commandAllocator.Detach();" in leak
+    assert "_impl->readbackBuffer.Detach();" in leak
+    assert "_impl->queryHeap.Detach();" in leak
+
+
+def test_approximated_primitive_modes_warn_at_pipeline_creation() -> None:
+    pipeline_cpp = read("D3D12PipelineState.cpp")
+
+    approximated = function_body(pipeline_cpp, "bool isD3D12ApproximatedPrimitiveMode")
+    assert "PrimitiveMode::LINE_LOOP" in approximated
+    assert "PrimitiveMode::TRIANGLE_FAN" in approximated
+    assert "PrimitiveMode::ISO_LINE_LIST" in approximated
+
+    # The warning fires at PSO creation, right after the topology mapping.
+    do_init = function_body(pipeline_cpp, "void CCD3D12PipelineState::doInit")
+    topology_pos = do_init.index(
+        "_impl->primitiveTopology = toD3D12PrimitiveTopology(_primitive);"
+    )
+    warn_pos = do_init.index("isD3D12ApproximatedPrimitiveMode(_primitive)")
+    assert warn_pos > topology_pos
+    assert "CC_LOG_WARNING" in do_init[warn_pos:]
+
+
+def test_backend_conventions_are_documented() -> None:
+    pipeline_layout_cpp = read("D3D12PipelineLayout.cpp")
+    heap_pool_h = read("D3D12DescriptorHeapPool.h")
+
+    # The register-space convention is bilateral (pipeline layout builds
+    # RegisterSpace=set / ShaderRegister=binding; the shader translator maps
+    # set=N -> space=N). Keep the contract comment next to the Impl that
+    # builds root parameters.
+    assert (
+        "RegisterSpace = descriptor-set index (set), ShaderRegister = binding"
+        in pipeline_layout_cpp
+    )
+    assert "set=N -> space=N" in pipeline_layout_cpp
+
+    # Descriptor heap pool is single-threaded by contract.
+    assert "NOT thread-safe" in heap_pool_h
+    assert "single-threaded recording convention" in heap_pool_h
+
+
 if __name__ == "__main__":
     test_restored_revision_fast_paths()
     test_legacy_shadow_depth_source_is_normalized_before_cache_lookup()
@@ -1100,4 +1318,12 @@ if __name__ == "__main__":
     test_d3d12ma_unified_backing_owner()
     test_d3d12ma_vendored_sources_present()
     test_d3d12ma_command_buffer_retains_buffer_backing()
+    test_present_honors_vsync_mode_all_enums()
+    test_device_loss_is_sticky_and_propagates_to_queue_and_swapchain()
+    test_shader_inflight_wait_has_timeout_and_local_fallback()
+    test_default_heap_buffer_update_warns_on_unflushed_overwrite()
+    test_dynamic_uniform_offset_alignment_is_asserted()
+    test_query_pool_destroy_waits_for_pending_readback()
+    test_approximated_primitive_modes_warn_at_pipeline_creation()
+    test_backend_conventions_are_documented()
     print("D3D12 hot-path static tests passed")
